@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>盘中实时监控 · 设计样稿</title>
+<style>
+  :root{
+    --bg:#0e1218; --panel:#141a23; --panel2:#1a2230; --line:#232d3d;
+    --fg:#d8e0ea; --faint:#7c8aa0; --dim:#4a566b;
+    --up:#e5484d; --down:#2fbf71; --gold:#e2b13c; --blue:#5b9dd9;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"PingFang SC","Microsoft YaHei",monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--fg);font:13.5px/1.6 var(--mono);padding:18px 16px 50px}
+  .wrap{max-width:1240px;margin:0 auto}
+  h1{font-size:17px;letter-spacing:1px;display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+  .sub{color:var(--faint);font-size:11.5px;margin-top:2px}
+  .clock{color:var(--gold);font-size:15px;font-variant-numeric:tabular-nums}
+  .phase{font-size:11px;padding:1px 10px;border-radius:9px;border:1px solid var(--gold);color:var(--gold)}
+  .phase.break{border-color:var(--dim);color:var(--dim)}
+  .dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--down);margin-right:5px;animation:blink 1.6s infinite}
+  @keyframes blink{50%{opacity:.25}}
+
+  .kpis{display:grid;grid-template-columns:repeat(6,1fr);gap:10px;margin:14px 0}
+  .k{border:1px solid var(--line);background:var(--panel);border-radius:7px;padding:9px 13px}
+  .k .l{color:var(--faint);font-size:11px}
+  .k .v{font-size:21px;margin-top:1px;font-variant-numeric:tabular-nums}
+  .k .d{font-size:11px;margin-left:6px}
+  .grid{display:grid;grid-template-columns:1.5fr 1fr;gap:12px}
+  .panel{border:1px solid var(--line);background:var(--panel);border-radius:7px;padding:12px 14px;margin-bottom:12px}
+  .panel h2{font-size:12.5px;color:var(--gold);letter-spacing:1px;margin-bottom:8px}
+  table{border-collapse:collapse;width:100%;font-size:12.5px}
+  th{color:var(--faint);font-weight:normal;text-align:right;padding:4px 8px;border-bottom:1px solid var(--line);white-space:nowrap}
+  td{padding:4px 8px;border-bottom:1px solid var(--line);text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+  th:first-child,td:first-child{text-align:left}
+  .num{font-variant-numeric:tabular-nums}
+  .red{color:var(--up)} .green{color:var(--down)} .goldc{color:var(--gold)} .faintc{color:var(--faint)}
+  .badge{display:inline-block;font-size:10.5px;padding:0 7px;border-radius:8px;border:1px solid}
+  .b-seal{color:var(--up);border-color:rgba(229,72,77,.5)}
+  .b-zha{color:var(--gold);border-color:var(--gold)}
+  .b-open{color:var(--dim);border-color:var(--dim)}
+  /* 事件流 */
+  .feed{max-height:330px;overflow-y:auto;font-size:12.5px}
+  .ev{display:flex;gap:8px;padding:4px 2px;border-bottom:1px dashed #1b2431}
+  .ev .t{color:var(--dim);font-variant-numeric:tabular-nums;flex:none}
+  .ev .tag{flex:none;width:52px;text-align:center;font-size:10.5px;border-radius:4px;padding:0 0;border:1px solid}
+  .t-zt{color:var(--up);border-color:rgba(229,72,77,.5)}
+  .t-zb{color:var(--gold);border-color:var(--gold)}
+  .t-dm{color:var(--down);border-color:rgba(47,191,113,.5)}
+  .t-hf{color:var(--blue);border-color:rgba(91,157,217,.5)}
+  .t-dd{color:var(--faint);border-color:var(--line)}
+  /* 预警区 */
+  .warn li{list-style:none;padding:4px 2px;border-bottom:1px dashed #1b2431;display:flex;justify-content:space-between;gap:8px}
+  .legend{color:var(--faint);font-size:11px;margin-top:4px}
+  #toast{position:fixed;right:16px;bottom:16px;background:var(--panel2);border:1px solid var(--gold);
+         color:var(--fg);padding:7px 14px;border-radius:6px;font-size:12px;opacity:0;transition:opacity .25s;pointer-events:none}
+  @media(max-width:900px){.grid{grid-template-columns:1fr}.kpis{grid-template-columns:repeat(3,1fr)}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1><span class="dot"></span>盘中实时监控
+    <span class="clock num" id="clock">09:30</span>
+    <span class="phase" id="phase">早盘</span>
+    <span class="sub">演示：时钟加速运行 · 数据为模拟</span>
+  </h1>
+  <div class="sub">GeorgeSoros-V2 · 设计样稿（零外部依赖） · 实盘=前端每 2-3s 轮询 GET /api/v1/intraday/summary · 实时层独立于 qfq 日线底座</div>
+
+  <div class="kpis" id="kpis"></div>
+
+  <div class="grid">
+    <div>
+      <div class="panel">
+        <h2>连板梯队 · 实时</h2>
+        <table><thead><tr>
+          <th style="text-align:left">板</th><th style="text-align:left">代码/名称</th>
+          <th>现价%</th><th>封单(亿)</th><th>首封</th><th>炸板</th><th>状态</th>
+        </tr></thead><tbody id="ladder"></tbody></table>
+        <div class="legend">封单/首封时间/炸板次数 = 东财涨停池接口盘中字段（agent 探针核实中）· 收盘归档后回测词表 limit_ecology 升级</div>
+      </div>
+      <div class="panel">
+        <h2>昨涨停溢价 · 盘中曲线（市场温度计）</h2>
+        <div id="chart"></div>
+      </div>
+      <div class="panel">
+        <h2>大面预警 · 高位股实时跌幅</h2>
+        <ul class="warn" id="warn"></ul>
+        <div class="legend">口径：近3日最高连板≥3 或 近5日涨幅≥50%（强势池成员）现价 ≤ -5%</div>
+      </div>
+    </div>
+    <div>
+      <div class="panel">
+        <h2>实时事件流</h2>
+        <div class="feed" id="feed"></div>
+      </div>
+      <div class="panel">
+        <h2>钉钉推送记录</h2>
+        <ul class="warn" id="dd"></ul>
+        <div class="legend">策略：龙头炸板/高位大面/最高板易主 → 推送；普通涨停不推（防刷屏）</div>
+      </div>
+    </div>
+  </div>
+</div>
+<div id="toast"></div>
+
+<script>
+'use strict';
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;var t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296}}
+function esc(s){return String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
+function pct(v){return (v>0?'+':'')+v.toFixed(2)+'%'}
+function cls(v){return v>0?'red':(v<0?'green':'faintc')}
+function toast(m){const t=document.getElementById('toast');t.textContent=m;t.style.opacity=1;setTimeout(()=>t.style.opacity=0,2000)}
+
+/* ---------- 模拟数据 ---------- */
+const LADDER=[
+  {code:'601628',name:'平潭发展',streak:6,chg:10.03,seal:8.6,first:'09:31:04',zha:0,stat:'SEAL'},
+  {code:'600231',name:'凌钢股份',streak:4,chg:10.01,seal:2.1,first:'09:44:12',zha:1,stat:'SEAL'},
+  {code:'000622',name:'恒大地产',streak:3,chg:6.42,seal:0,first:'09:52:30',zha:2,stat:'ZHA'},
+  {code:'002159',name:'三特索道',streak:3,chg:10.02,seal:1.3,first:'10:02:41',zha:0,stat:'SEAL'},
+  {code:'600605',name:'汇通能源',streak:2,chg:9.98,seal:0.7,first:'10:11:19',zha:0,stat:'SEAL'},
+  {code:'000010',name:'美丽生态',streak:2,chg:-2.31,seal:0,first:'09:47:55',zha:3,stat:'OPEN'},
+  {code:'300798',name:'锦鸡股份',streak:2,chg:5.14,seal:0.4,first:'10:20:02',zha:1,stat:'ZHA'}
+];
+let kpi={zt:47,dt:5,zb:22,maxStreak:6,prem:1.82,advDec:2.3};
+const feedMax=28;let events=[];
+function addEvent(min,tg,txt,dd){
+  events.unshift({time:minToStr(min),tg,txt,dd});
+  if(events.length>feedMax)events.pop();
+  renderFeed();
+}
+function minToStr(m){const h=Math.floor(m/60),mm=m%60;return String(h).padStart(2,'0')+':'+String(mm).padStart(2,'0')}
+const EV={ZT:['t-zt','涨停'],ZB:['t-zb','炸板'],HF:['t-hf','回封'],DM:['t-dm','大面'],DD:['t-dd','钉钉']};
+
+/* ---------- 曲线 ---------- */
+let premSeries=[1.82],minute=9*60+30;      // 09:30 起
+const rng=mulberry32(20261002);
+for(let i=0;i<10;i++){premSeries.push(premSeries[i]+(rng()-0.48)*0.3)}  // 预热到 09:40
+
+function renderChart(){
+  const W=560,H=170,P=34,n=240; // 09:30-13:30 之后逐分钟
+  const lo=Math.min.apply(null,premSeries)-0.4,hi=Math.max.apply(null,premSeries)+0.4;
+  const X=i=>P+i/(n-1)*(W-P-8);
+  const Y=v=>H-22-(v-lo)/(hi-lo)*(H-44);
+  let g='';
+  [0,0.5,1].forEach(f=>{const y=22+f*(H-44);const v=hi-(hi-lo)*f;
+    g+='<line x1="'+P+'" y1="'+y+'" x2="'+(W-8)+'" y2="'+y+'" stroke="#232d3d"/>'+
+       '<text x="'+(P-4)+'" y="'+(y+4)+'" fill="#7c8aa0" font-size="9.5" text-anchor="end">'+v.toFixed(1)+'%</text>';});
+  ['09:30','10:30','11:30/13:00','14:00','15:00'].forEach((lab,i)=>{
+    const x=X(i*(n-1)/4);
+    g+='<text x="'+x+'" y="'+(H-6)+'" fill="#4a566b" font-size="9.5" text-anchor="middle">'+lab+'</text>';});
+  const cur=premSeries.length-1;
+  const pts=premSeries.map((v,i)=>X(i).toFixed(1)+','+Y(v).toFixed(1)).join(' ');
+  g+='<polyline points="'+pts+'" fill="none" stroke="#e2b13c" stroke-width="1.6"/>';
+  g+='<circle cx="'+X(cur)+'" cy="'+Y(premSeries[cur])+'" r="3" fill="#e2b13c"/>';
+  g+='<text x="'+(X(cur)+6)+'" y="'+(Y(premSeries[cur])-6)+'" fill="#e2b13c" font-size="11">'+pct(premSeries[cur])+'</text>';
+  document.getElementById('chart').innerHTML=
+    '<svg viewBox="0 0 '+W+' '+H+'" style="width:100%;background:#0a0e14;border:1px solid var(--line);border-radius:6px">'+g+'</svg>';
+}
+
+/* ---------- 渲染 ---------- */
+function renderKpis(){
+  const rows=[
+    ['涨停家数',kpi.zt,'', 'red'],['跌停家数',kpi.dt,'','green'],['炸板家数',kpi.zb,'','goldc'],
+    ['最高板',kpi.maxStreak+'板','','goldc'],['昨涨停溢价',pct(kpi.prem),'实时','goldc'],
+    ['涨跌家数比',kpi.advDec.toFixed(2),'','faintc']];
+  document.getElementById('kpis').innerHTML=rows.map(r=>
+    '<div class="k"><div class="l">'+r[0]+'</div><div class="v '+r[3]+'">'+r[1]+'<span class="d faintc">'+r[2]+'</span></div></div>').join('');
+}
+function renderLadder(){
+  document.getElementById('ladder').innerHTML=LADDER.map(s=>{
+    const st=s.stat==='SEAL'?'<span class="badge b-seal">封住</span>'
+            :s.stat==='ZHA'?'<span class="badge b-zha">炸板</span>':'<span class="badge b-open">开板</span>';
+    return '<tr><td class="goldc num">'+s.streak+'</td><td>'+s.code+' '+esc(s.name)+'</td>'+
+      '<td class="num '+cls(s.chg)+'">'+pct(s.chg)+'</td>'+
+      '<td class="num '+(s.seal>=5?'red':'')+'">'+(s.seal>0?s.seal.toFixed(1):'—')+'</td>'+
+      '<td class="num faintc">'+(s.first||'—')+'</td>'+
+      '<td class="num '+(s.zha>1?'goldc':'faintc')+'">'+(s.zha||'—')+'</td>'+
+      '<td>'+st+'</td></tr>';}).join('');
+}
+function renderFeed(){
+  document.getElementById('feed').innerHTML=events.map(e=>{
+    const et=EV[e.tg]||EV.DD;
+    return '<div class="ev"><span class="t">'+e.time+'</span><span class="tag '+et[0]+'">'+et[1]+'</span><span>'+e.txt+'</span></div>';
+  }).join('')||'<div class="faintc">暂无事件</div>';
+}
+function renderDd(){
+  const list=events.filter(e=>e.dd);
+  document.getElementById('dd').innerHTML=list.map(e=>
+    '<li><span class="num faintc">'+e.time+'</span><span>'+e.txt+'</span></li>').join('')||'<li class="faintc">暂无推送</li>';
+}
+function renderWarn(){
+  const W=[['000622 恒大地产',-6.42,'3板炸'],['000010 美丽生态',-5.31,'2板开'],['301231 华宝新能',-4.88,'近5日+62%']];
+  document.getElementById('warn').innerHTML=W.map(w=>
+    '<li><span>'+w[0]+'</span><span class="num '+cls(w[1])+'">'+pct(w[1])+'</span><span class="faintc">'+w[2]+'</span></li>').join('');
+}
+function renderClock(){
+  document.getElementById('clock').textContent=minToStr(minute);
+  const ph=document.getElementById('phase');
+  let p='早盘',brk=false;
+  if(minute<9*60+30)p='集合竞价';
+  else if(minute>=11*60+30&&minute<13*60){p='午间休市';brk=true}
+  else if(minute>=13*60)p='午盘';
+  if(minute>=15*60)p='已收盘',brk=true;
+  ph.textContent=p;ph.classList.toggle('break',brk);
+}
+
+/* ---------- 演示驱动：每 tick 时钟 +5 分钟，数据小幅演化 ---------- */
+function tick(){
+  if(minute<15*60){
+    minute=Math.min(15*60,minute+5);
+    // KPI 演化
+    kpi.zt=Math.max(5,kpi.zt+Math.round((Math.random()-0.48)*4));
+    kpi.dt=Math.max(0,kpi.dt+Math.round((Math.random()-0.5)*2));
+    kpi.zb=Math.max(0,kpi.zb+Math.round((Math.random()-0.5)*3));
+    kpi.prem=+(kpi.prem+(Math.random()-0.5)*0.22).toFixed(2);
+    kpi.advDec=Math.max(0.2,kpi.advDec+(Math.random()-0.5)*0.15);
+    premSeries.push(kpi.prem);
+    // 梯队演化
+    LADDER.forEach(s=>{
+      s.chg=+(s.chg+(Math.random()-0.5)*(s.stat==='SEAL'?0.05:1.1)).toFixed(2);
+      if(s.stat!=='SEAL'&&s.chg>9.9&&Math.random()>0.6){s.stat='SEAL';s.seal=+(Math.random()*4+0.5).toFixed(1);s.zha++;
+        addEvent(minute,'HF',s.name+' 回封 '+s.streak+'板，封单 '+s.seal.toFixed(1)+' 亿')}
+      if(s.stat==='SEAL'&&Math.random()>0.92){s.stat='ZHA';s.seal=0;s.zha++;
+        addEvent(minute,'ZB','<b class="goldc">'+s.name+'</b> 炸板！'+s.streak+'板开板（第'+s.zha+'次）',s.streak>=4||s.code==='601628');
+        if(s.streak>=4)addEvent(minute,'DD','【预警】高度龙 '+s.name+'（'+s.streak+'板）炸板',true);}
+      else if(s.stat==='ZHA'&&s.chg>=10&&Math.random()>0.5){s.stat='SEAL';s.seal=+(Math.random()*3+0.5).toFixed(1);
+        addEvent(minute,'HF',s.name+' 重新封板，封单 '+s.seal.toFixed(1)+' 亿')}
+      else if(s.stat==='SEAL'){s.seal=+Math.max(0.2,s.seal+(Math.random()-0.5)*0.4).toFixed(1)}
+      if(s.chg<=-5&&s.streak>=3&&Math.random()>0.9)
+        addEvent(minute,'DM','<b class="green">'+s.name+'</b> 高位大面 现价 '+pct(s.chg),true);
+    });
+    if(Math.random()>0.75){
+      const cand=LADDER.filter(s=>s.stat!=='SEAL');
+      if(cand.length){const s=cand[Math.floor(Math.random()*cand.length)];s.stat='SEAL';s.seal=+(Math.random()*2+0.3).toFixed(1);
+        addEvent(minute,'ZT','<b class="red">'+s.name+'</b> 涨停 '+s.streak+'板，封单 '+s.seal.toFixed(1)+' 亿')}
+    }
+    kpi.maxStreak=LADDER.filter(s=>s.stat==='SEAL').reduce((m,s)=>Math.max(m,s.streak),0);
+    renderKpis();renderLadder();renderClock();renderChart();renderDd();
+  }else{
+    renderClock();
+  }
+}
+setInterval(tick,1800);
+
+/* 初始事件铺垫 */
+addEvent(9*60+31,'ZT','<b class="red">平潭发展</b> 竞价一字 6 板（总龙头）');
+addEvent(9*60+44,'ZT','凌钢股份 涨停 4 板，封单 2.1 亿');
+addEvent(9*60+52,'ZB','<b class="goldc">恒大地产</b> 炸板，3 板开板（第 1 次）',false);
+addEvent(10*60+3,'DD','【预警】最高板易主观察：恒大地产（3板）炸板未回封',true);
+renderKpis();renderLadder();renderFeed();renderDd();renderWarn();renderClock();renderChart();
+toast('演示模式：时钟加速 · 每 1.8s 演化 5 分钟');
+</script>
+</body>
+</html>

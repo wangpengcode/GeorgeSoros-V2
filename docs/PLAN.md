@@ -71,10 +71,23 @@ CREATE TABLE stock_history (
     UNIQUE (st_code, st_date)
 );
 
--- 核心索引
-CREATE INDEX idx_history_code_date ON stock_history (st_code, st_date);
-CREATE INDEX idx_history_date ON stock_history (st_date);  -- 按日期批量查询
+-- 核心索引（2026-10-02 索引审计：UNIQUE(st_code,st_date) 自带同列复合索引，
+-- 原 idx_history_code_date 与之完全重复已删除，勿再建同列普通索引）
+CREATE INDEX idx_history_date ON stock_history (st_date);  -- 按日全市场扫描
 ```
+
+**查询模式 → 索引对照（§2.2.2，防后续加功能乱加/漏加索引）**：
+
+| 查询模式 | 代表场景 | 命中 |
+|---------|---------|------|
+| `WHERE st_code=? [AND st_date BETWEEN]` | 回测加载、波浪计算、个股 actions、单股重拉 | UNIQUE(st_code,st_date) 自带索引 |
+| `WHERE st_date=? / >=?` | SentimentCycleJob、梯队排名、market_daily/sector_daily 聚合、滚动重拉近7日 | idx_history_date（单日~5000行，内存过滤） |
+| 近 N 日入池窗口（强势池/崩塌池） | 近3日最高连板≥3 等 | idx_history_date 取 ~2.5 万行后内存开窗，不需专门索引 |
+| 全表顺序扫 | 回测启动装载、WaveComputeJob、回放 | 本应 seq scan，索引无关 |
+| 预计算表直读 | 情绪网页、limit_ecology/sector/market_env 条件 | sentiment_cycle / market_daily / sector_daily / signal_daily，**不碰日线** |
+| 模糊搜索 | GET /stock-search | stock_info.search_key GIN(trgm) |
+
+派生层存在的意义即"查询永不逐次回扫日线"：日频派生全落库，现算仅限单日截面/单股窗口的有界查询。
 
 ### 2.2.1 容量评估与分区策略（分层递进）
 
@@ -1412,11 +1425,14 @@ market_daily(           -- 全市场温度计，一日一行
   limit_down_list  JSONB,      -- 同构；涨停/跌停查询直接命中冗余名单，免全表扫 is_limit_up
   zhaban_count     SMALLINT,   -- 炸板家数（日线近似口径）
   yst_limit_premium NUMERIC(6,2),  -- 昨涨停今溢价 = 昨日 limit_up_list ∘ 今日行情（表自算自洽）
+  yst_promotion    JSONB,     -- 分级晋级率（借鉴同花顺复盘）：{"total":21.05,"by_level":{"1to2":33.3,"2to3":25.0,...}}
+                              --   = 昨日 N-1 板家数 ∘ 今日 N 板家数，与 yst_limit_premium 同一自算逻辑，同源自洽
   yst_face_count   SMALLINT    -- 昨日大面家数
 )
 sector_daily(           -- 板块聚合，日×板块
   st_date, board, PRIMARY KEY(st_date, board),
-  limit_up_count, max_streak, avg_chg_pct
+  limit_up_count, max_streak, avg_chg_pct,
+  driver_text TEXT               -- 当日板块驱动主线一句话（LLM 生成，标"系统生成"，2026-10-02 定稿）
 )
 signal_daily(           -- 个股×日，只存"必须全市场排序才得出"的列
   st_code, st_date, PRIMARY KEY(st_code, st_date),
@@ -1429,6 +1445,14 @@ signal_daily(           -- 个股×日，只存"必须全市场排序才得出"�
 - 名单模式与 sentiment_cycle.big_meat_list/big_face_list 同构（大肉名单 ⊂ 涨停名单），count 冗余同源校验复用同一纪律；ST 天然不在库内；极端高潮日 ~150 家 < 20KB/行无压力。
 - market_env/limit_ecology/sector 三组条件的查询与情绪网页、涨停池接口共用这份数据，单一事实来源。
 - 精度折损已标注：炸板=日线近似（盘中触及涨停未封）、昨涨停溢价按收盘价口径。
+
+**复盘对标（2026-10-02 拆解同花顺「热点复盘」长图，ozone summary_image 接口）**：图中信息 → 本方案落点——涨停/跌停/炸板家数、总溢价幅 → market_daily；分级晋级率（一进二/二进三…）→ yst_promotion（本次补入）；是否首板/连板数 → limit_up_streak 词表组；涨停时间早→晚 → intraday_archive.first_seal_time（§十四，含秒级）；板块分组与板块涨停家数 → sector_daily。
+
+**涨停原因归因（2026-10-02 定稿 ② LLM 生成，用户确认）**：SignalPrecomputeJob 末步加 AttributionStep——输入当日 limit_up_list + sector_daily + stock_info 板块归属（industry/concept_boards），单次批量 prompt（全涨停名单一次调用），输出 JSON schema 校验后落库：`limit_up_list[].reason`（个股题材标签串）+ `sector_daily.driver_text`（板块主线一句话）。要点：
+- **受控词表**：reason 只能由该股自己的 industry/concept_boards 词汇组合而成，禁自由发挥——保证可比较、可展示一致；板块归属条件本来就用结构化字段，reason 定位 = 复盘展示 + 人工研究，**不进 L2 条件词表**。
+- **诚实边界**：输入只有行情与板块结构，产出的是"题材归类式归因"（这只创新药业股涨停 → 归创新药主线），不是 THS 问财那种"ESMO 年会催化"事件级归因（那需要新闻/公告源，超本期范围）；页面展示标"系统生成"。
+- **失败不阻塞**：每日涨停 ~50-150 家，每日 1-2 次调用（主力 glm-5.3-flash，兜底 deepseek-v4-flash），schema 校验失败重试 1 次，仍失败 reason=null，不影响握手链；重跑按日期覆盖（幂等）。
+- **探针**：验证主力模型是否有当日实时信息能力——若有，归因可升级为事件级（记 §14.7 同批探针）。
 
 ### 12.5 绩效与可复现
 
@@ -1685,3 +1709,103 @@ Kotlin 不做"换个数据源重试"（避免双重点燃）；Kotlin 侧仅对 
   回放到首个完整断板/反包周期后自然进入正常语义
 - 回放完成输出摘要（各表行数、龙头周期清单）→ 钉钉通知，网页左侧历史即刻可看
 ```
+
+---
+
+## 十四、盘中实时模块（2026-10-02 设计定稿；数据源源码级探针+实测双重确认，附录 docs/research/realtime-sources.md；页面样稿 docs/design/intraday-monitor-mock.html）
+
+### 14.1 定位与三条铁律
+
+1. **实时层绝不写 stock_history**——qfq 日线口径洁净性是 §4.6 漂移检测/回测确定性的根基，盘中易变快照只进独立实时层
+2. **拉事件状态，不拉全市场逐秒快照**——超短盘中要的是封板/炸板/大面等事件与梯队状态
+3. **独立故障域**——IntradayCollectJob 挂掉只影响实时展示与预警，不进 §13.4 盘后握手链，不拖累日线主线
+
+### 14.2 数据源定稿（探针结论）
+
+| 数据 | 接口 | 关键结论 | 用途 |
+|------|------|---------|------|
+| 涨停/炸板/跌停/强势/昨日涨停池（6 接口） | `stock_zt_pool_em` 等 | **六项关键字段全齐**：首次/最后封板时间、炸板次数、封板资金、连板数、涨停统计；date 参数可查历史但**仅保留 ~30 天**（且部分池传老日期静默返回空）；单请求全量无翻页 | 梯队榜/事件 diff/收盘归档（超短核心） |
+| 全市场实时快照 | `stock_zh_a_spot_em` | 23 列，有最新价/涨跌幅/涨速，**无盘口无涨跌停价**；内部分页 55-60 页、30-90s、批内时点不同步 → 只能低频 | 涨跌家数、大面预警（90s+抖动） |
+| 单只盘口五档 | `stock_bid_ask_em` | 含五档+涨跌停价，单只请求 | 只查候选名单（梯队+预警 ~50 只） |
+| 盘前竞价分时 | `stock_zh_a_hist_pre_min_em` | 当日分时**含集合竞价** | 9:25 竞价 gap 探测（竞价情绪） |
+| 分钟线 | `stock_zh_a_hist_min_em` | 1 分钟仅近 5 交易日且不复权（源码硬编码） | 盘中分时仅看当日；长历史免费路径=每日增量自建（暂不做） |
+| mootdx | TCP 直连 | quotes 五档 80 只/次；**issue #157 公共节点 2026-07 起大面积失效 + 项目停更 2 年** | 实验性备源，不进主链路 |
+
+**交易所直连结论（用户问询后穿透）**：交易所无对外开放实时 API——直连需行情信息使用授权（L1 年费数万起）+专线；官网网页抓取无 SLA、有反爬且属灰色地带；**东财=交易所授权的信息商分销层（合法）**，且字段已超短特化。设计为可升级源抽象：
+
+```
+IntradaySource 接口（Python 侧）
+  ├─ EastmoneySource   ← V2 初始实现（信息商层）
+  ├─ (预留) QmtSource  ← 远期：券商 QMT/miniQMT（需账户，准 L1/L2）
+  └─ (预留) L2Source   ← 更远期：正规 Level-2 授权
+```
+
+### 14.3 轮询与限频（东财 2025-04 起 IP 级限频，封禁实测 ~5h）
+
+```
+- 涨停池 4 接口（ZT/ZB/DT/STRONG）各 15-30s、错峰相位（不同时发）
+- 全市场快照 90s + 随机抖动
+- bid_ask 只查候选名单 ~50 只、30s 一轮（列表现算：池成员∪强势池预警∪龙头）
+- TokenBucket 复用 §11.1；AKShare 零防护裸请求（无 UA 无 timeout）→ Python 统一包一层 UA/timeout/重试
+- 退避：连续 3 次失败 → 降频 2 倍；连续 6 次 → 停轮 300s + 钉钉告警（防封禁升级）
+- 交易时段判定：trading_calendar + 9:15-11:30 / 13:00-15:00 窗口，午休/非交易日不空转
+```
+
+### 14.4 实时层表结构（新增三表）
+
+```sql
+intraday_pool_snap(            -- 每轮池快照（追加，原始轮次保留 3 天供回溯调试）
+  id          BIGSERIAL PRIMARY KEY,
+  snap_at     TIMESTAMP NOT NULL,
+  pool        CHAR(6) NOT NULL,            -- ZT / ZB / DT / STRONG / PREV
+  payload     JSONB NOT NULL               -- 接口原样行（未来字段升级不丢）
+);
+intraday_event(                -- 状态 diff 出事件（本轮 vs 上轮）
+  id          BIGSERIAL PRIMARY KEY,
+  trade_date  DATE NOT NULL,
+  ev_time     TIMESTAMP NOT NULL,
+  ev_type     VARCHAR(20) NOT NULL,        -- ZT涨停 / ZB炸板 / HF回封 / DM大面 / MAXCHG最高板易主 / OPEN开板
+  st_code     VARCHAR(20),
+  st_name     VARCHAR(100),
+  detail      JSONB,                       -- {streak, seal_amount, zhaban_count, chg...}
+  pushed_dd   BOOLEAN DEFAULT FALSE        -- 是否已推钉钉
+);
+CREATE INDEX idx_ie_date_time ON intraday_event (trade_date, ev_time);
+
+intraday_archive(              -- 收盘归档（盘后权威表，词表升级的数据源）
+  trade_date      DATE NOT NULL,
+  st_code         VARCHAR(20) NOT NULL,
+  first_seal_time VARCHAR(8),              -- 首次封板 HH:MM:SS
+  last_seal_time  VARCHAR(8),
+  zhaban_count    SMALLINT,                -- 炸板次数
+  seal_amount     NUMERIC(16,2),           -- 封板资金（元）
+  streak          SMALLINT,                -- 连板数
+  pool            CHAR(6),                 -- 归属池（ZT/ZB/DT...）
+  UNIQUE (trade_date, st_code)
+);
+```
+
+**长历史自建（30 天窗口对策）**：每日 15:10 IntradayArchiveStep 用 `date=当日` 重新拉 6 个池接口做**权威归档**（池接口收盘后仍可查，比盘中最后一轮更稳）——自上线日起逐日积累封板时间/炸板/封单历史；**上线前的历史拉不到**（诚实边界，报告标注数据起点）。
+
+### 14.5 消费出口
+
+1. **实时页** `intraday.html`（样稿 docs/design/intraday-monitor-mock.html）：前端每 2-3s 轮询 `GET /api/v1/intraday/summary`（一次聚合：KPI+梯队+事件流+溢价曲线+大面预警+钉钉记录，无 WebSocket 基建）
+2. **钉钉盘中预警**（事件驱动，防刷屏）：龙头(最高板)炸板 / 高位股大面(强势池成员现价≤-5%) / 最高板易主 → 推；普通涨停不推
+3. **收盘归档 → 词表升级**：intraday_archive 落库后，§12.7.1 limit_ecology 信号源新增可用条件 first_seal_time（早封/晚封板）、zhaban_count、seal_amount——**回测口径自动升级**，数据起点=V2 上线日
+
+### 14.6 交易时段与调度
+
+```
+IntradayCollectJob（Python 侧轮询进程 or Kotlin 调度 + Python 接口）
+  09:15-09:25  竞价：pre_min 接口抓竞价分时 → 竞价 gap 快照（KPI 带"竞价"态）
+  09:30-11:30 / 13:00-15:00  按 §14.3 节奏轮询
+  15:10        IntradayArchiveStep 权威归档 + 当日事件摘要推钉钉
+```
+
+### 14.7 落地前必测清单（探针遗留，Step 实施首日跑）
+
+spot 的 total=59271 混入板块行疑点 / 盘中 bid_ask 五档有值性 / 5 分钟线实际深度 / 强势/炸板/跌停池 30 天保留边界逐一实测 / mootdx 节点连通性（如选备源）
+
+### 14.8 排期
+
+新增 **Step 7：盘中实时模块（3-4 天）**：Python 源+限频轮询 Job（1 天）→ 三表+事件 diff+归档（1 天）→ intraday.html+钉钉预警（1 天）→ 探针清单实测+联调（0.5-1 天）。
