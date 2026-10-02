@@ -1,0 +1,568 @@
+<title>情绪周期表</title>
+<meta name="description" content="超短情绪周期可视化样稿：大/小周期热度带、大肉大面对比图、一天一列明细表，评级可点击编辑（纯离线样例数据）">
+<style>
+  /* 设计基调：交易终端深色单主题；红涨绿跌（A股惯例）。零外部依赖：系统字体 + 内置 SVG 图表，断网可渲染。
+     Layout: KPI → 周期热度带 → SVG 主图 → 一天一列明细表（横向滚动，首列固定，评级可点击编辑） */
+  :root {
+    --bg: #0e1218;
+    --panel: #161c25;
+    --panel-2: #1c2431;
+    --line: #26303f;
+    --fg: #dde4ee;
+    --muted: #8593a8;
+    --faint: #5a6678;
+    --up: #e5484d;      /* 红=涨/大肉 */
+    --down: #2fbf71;    /* 绿=跌/大面 */
+    --gold: #e2b13c;    /* 连板线 / 人工确认 / 当前列 */
+    --up-soft: rgba(229,72,77,.16);
+    --down-soft: rgba(47,191,113,.16);
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 400 14px/1.6 -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    padding: 20px 16px 40px;
+    padding-inline: max(16px, env(safe-area-inset-left));
+  }
+  .wrap { max-width: 1200px; margin: 0 auto; }
+  h1 { font-size: 20px; font-weight: 700; margin: 0 0 4px; letter-spacing: .02em; }
+  .sub { color: var(--muted); font-size: 12.5px; margin: 0 0 18px; }
+  .sub b { color: var(--gold); font-weight: 500; }
+
+  .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 14px; }
+  .kpi { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px; }
+  .kpi .lab { color: var(--muted); font-size: 11.5px; letter-spacing: .08em; }
+  .kpi .val { font: 600 22px/1.3 "SF Mono", Menlo, Consolas, monospace; margin-top: 2px; font-variant-numeric: tabular-nums; }
+  .kpi .val small { font-size: 12px; color: var(--muted); font-weight: 400; }
+  .up { color: var(--up); } .down { color: var(--down); }
+  .chip { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 13px; font-weight: 700; line-height: 1.7; }
+
+  .bandbox { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px 10px; margin-bottom: 14px; }
+  .bandbox h3 { margin: 0 0 8px; font-size: 12px; color: var(--muted); font-weight: 500; letter-spacing: .08em; }
+  .band { display: flex; gap: 2px; height: 14px; }
+  .band i { flex: 1; border-radius: 2px; min-width: 0; }
+  .bandlab { display: flex; justify-content: space-between; color: var(--muted); font-size: 10.5px; margin-top: 5px; font-family: "SF Mono", Menlo, monospace; }
+
+  .chartbox { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; }
+  .chartbox h3 { margin: 0 0 8px; font-size: 12px; color: var(--muted); font-weight: 500; letter-spacing: .08em; }
+  .chartlegend { display: flex; flex-wrap: wrap; gap: 14px; color: var(--muted); font-size: 11.5px; margin-bottom: 6px; }
+  .chartlegend i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; margin-right: 5px; vertical-align: -1px; }
+  #chartsvg { width: 100%; height: auto; display: block; }
+
+  .tablebox { margin-top: 14px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; }
+  .tablebox h3 { margin: 0 0 10px; font-size: 12px; color: var(--muted); font-weight: 500; letter-spacing: .08em; }
+  .hint { background: var(--panel); border: 1px dashed var(--gold); border-radius: 8px; padding: 8px 12px; color: var(--muted); font-size: 12.5px; margin-bottom: 12px; }
+  .hint b { color: var(--gold); font-weight: 500; }
+  .scroller { overflow-x: auto; border: 1px solid var(--line); border-radius: 6px; }
+  table { border-collapse: collapse; font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 12px; font-variant-numeric: tabular-nums; }
+  th, td { padding: 6px 9px; text-align: center; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 500; background: var(--panel-2); position: sticky; top: 0; }
+  td:first-child, th:first-child {
+    position: sticky; left: 0; z-index: 2; background: var(--panel-2);
+    font-family: -apple-system, "PingFang SC", sans-serif; text-align: left; font-weight: 500; min-width: 84px;
+  }
+  th:first-child { z-index: 3; }
+  tbody tr:last-child td { border-bottom: none; }
+  td.latest { outline: 1.5px solid var(--gold); outline-offset: -1.5px; }
+
+  /* 可编辑单元格 */
+  .editable { cursor: pointer; }
+  td.editable:hover, .editable:hover { background: var(--panel-2); }
+  .rowedit { color: var(--gold); font-size: 10px; margin-left: 4px; }
+  .manual { box-shadow: inset 0 -2px 0 var(--gold); }
+  .manual::after { content: "✎"; color: var(--gold); font-size: 10px; margin-left: 3px; vertical-align: 2px; }
+
+  /* 行内编辑浮层 */
+  #editor {
+    position: fixed; z-index: 9; display: none;
+    background: var(--panel-2); border: 1px solid var(--gold); border-radius: 8px;
+    padding: 10px 12px; box-shadow: 0 6px 24px rgba(0,0,0,.5);
+  }
+  #editor .et { font-size: 11.5px; color: var(--muted); margin-bottom: 8px; }
+  #editor .opts { display: flex; gap: 6px; flex-wrap: wrap; }
+  #editor button {
+    background: var(--panel); color: var(--fg); border: 1px solid var(--line);
+    border-radius: 6px; padding: 4px 10px; cursor: pointer; font: 500 12.5px "SF Mono", Menlo, monospace;
+  }
+  #editor button:hover { border-color: var(--gold); color: var(--gold); }
+  #editor button.reset { border-color: var(--muted); color: var(--muted); font-family: inherit; }
+
+  .legend { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 10px; color: var(--muted); font-size: 11.5px; }
+  .legend span { display: inline-flex; align-items: center; gap: 5px; }
+  .legend i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+  /* 大肉/大面个股名单面板 */
+  .lists { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 10px; margin-bottom: 14px; }
+  .lcard { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; min-width: 0; }
+  .lcard.meat { border-top: 2px solid var(--up); }
+  .lcard.face { border-top: 2px solid var(--down); }
+  .lhead { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+  .lhead .t { font-weight: 700; font-size: 13px; }
+  .lhead .n { color: var(--muted); font-size: 12px; font-family: "SF Mono", Menlo, monospace; }
+  .lhead .sp { flex: 1; }
+  .lhead button { background: var(--panel-2); color: var(--muted); border: 1px solid var(--line); border-radius: 6px; font-size: 11.5px; padding: 2px 8px; cursor: pointer; }
+  .lhead button:hover { color: var(--gold); border-color: var(--gold); }
+  .lrow { display: flex; align-items: center; gap: 8px; padding: 4px 2px; border-bottom: 1px solid var(--line); font-size: 12.5px; }
+  .lrow:last-child { border-bottom: none; }
+  .lname { font-weight: 500; min-width: 4em; }
+  .lcode, .lind { color: var(--muted); font-size: 11px; font-family: "SF Mono", Menlo, monospace; }
+  .lpct { font-family: "SF Mono", Menlo, monospace; font-variant-numeric: tabular-nums; margin-left: auto; }
+  .lrm { background: none; border: none; color: var(--faint); cursor: pointer; font-size: 12px; padding: 0 2px; }
+  .lrm:hover { color: var(--up); }
+  .lnote { color: var(--faint); font-size: 11px; margin-top: 6px; }
+  .fup { margin-top: 10px; padding-top: 8px; border-top: 1px dashed var(--line); display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: 11.5px; color: var(--muted); }
+  .fchip { padding: 1px 8px; border-radius: 999px; font-size: 11px; }
+  .fchip.pos { background: var(--up-soft); color: var(--up); }
+  .fchip.neg { background: var(--down-soft); color: var(--down); }
+  .fchip.mid { background: var(--panel-2); color: var(--muted); }
+  .fchip.susp { background: var(--panel-2); color: var(--faint); }
+  .addform { display: flex; gap: 6px; }
+  .addform input { background: var(--panel); border: 1px solid var(--line); color: var(--fg); border-radius: 6px; padding: 4px 8px; font-size: 12.5px; width: 100px; }
+  .relwrap { position: relative; }
+  .sug { position: absolute; top: calc(100% + 4px); left: 0; z-index: 10; min-width: 200px;
+         background: var(--panel-2); border: 1px solid var(--gold); border-radius: 6px;
+         max-height: 220px; overflow-y: auto; box-shadow: 0 6px 24px rgba(0,0,0,.5); }
+  .sug:empty { display: none; }
+  .sug .si { display: flex; gap: 8px; align-items: baseline; padding: 5px 10px; cursor: pointer; font-size: 12.5px; }
+  .sug .si:hover, .sug .si.on { background: var(--panel); }
+  .sug .si .c { color: var(--muted); font-family: "SF Mono", Menlo, monospace; font-size: 11px; }
+  .sug .si .p { color: var(--faint); font-size: 10.5px; margin-left: auto; }
+  @media (max-width: 500px) { .kpi .val { font-size: 19px; } }
+</style>
+
+<div class="wrap">
+  <h1>情绪周期表</h1>
+  <p class="sub">超短情绪监控 · <b>离线样例数据（124 个交易日，虚构，走完两轮完整情绪循环）</b> · 实际运行时由 sentiment_cycle 表每日自动追加，本页实时读取 · 零外部依赖，断网可打开</p>
+
+  <div class="kpis" id="kpis"></div>
+
+  <div class="bandbox">
+    <h3>大周期热度带（1 冰点 → 6 高潮）</h3>
+    <div class="band" id="bigband"></div>
+    <div class="bandlab"><span>最早</span><span>最新</span></div>
+  </div>
+
+  <div class="chartbox">
+    <h3>大肉 / 大面 与 连板高度</h3>
+    <div class="chartlegend">
+      <span><i style="background:var(--up)"></i>大肉数（上柱）</span>
+      <span><i style="background:var(--down)"></i>大面数（下柱）</span>
+      <span><i style="background:var(--gold)"></i>连板总数（金线，右轴）</span>
+      <span><i style="background:var(--faint)"></i>最高板（灰虚线，右轴）</span>
+    </div>
+    <svg id="chartsvg" viewBox="0 0 1200 380" role="img" aria-label="大肉大面与连板高度图"></svg>
+  </div>
+
+  <div class="lists" id="lists"></div>
+
+  <div class="tablebox">
+    <h3>一天一列明细</h3>
+    <div class="hint">✎ 可编辑：点击表中 <b>大周期 / 小周期 / 超短周期状态</b> 三行任意一天的格子（或顶部 KPI 徽章）即可修改——弹窗里选择新值，改后显示金色 ✎，可一键"恢复建议值"。实机即 PUT confirm 接口落库。</div>
+    <div class="scroller">
+      <table id="tbl"></table>
+    </div>
+    <div class="legend">
+      <span><i style="background:var(--up)"></i>大肉 ≥+5%</span>
+      <span><i style="background:var(--down)"></i>大面 ≤-5%</span>
+      <span><i style="background:var(--gold)"></i>当前列 / 人工确认</span>
+      <span>周期色：1 冰点 → 6 高潮</span>
+    </div>
+  </div>
+</div>
+
+<div id="editor"></div>
+
+<script>
+/* ---- 周期热度色阶 1-6 ---- */
+var CYCLE_COLORS = ['#3d7bd9','#3da4c9','#57b26a','#d9b13d','#e07b39','#e5484d'];
+var STATUS = {1:'冰点', 2:'退潮', 3:'混沌', 4:'发酵', 5:'主升', 6:'高潮'};
+
+/* ---- 确定性样例数据：124 个交易日，两轮 混沌→发酵→高潮→退潮→冰点→回暖 ---- */
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;var t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296}}
+var rnd = mulberry32(20261002);
+
+var script = [];
+[[3,18],[4,12],[5,18],[3,6],[2,10],[1,16],[2,8],[3,8],[4,10],[5,10],[2,8]].forEach(function(seg) {
+  for (var i = 0; i < seg[1]; i++) script.push(seg[0]);
+});
+
+var DRAGONS = ['中大力德','上海物贸','联明股份','尚纬股份','润达医疗','南方精工','可川科技','中马传动','科力尔','新时达','华西股份','洛凯股份','迪生力','铭普光磁','冠石科技','平潭发展'];
+var dates = [], d = new Date(2026, 2, 2); /* 2026-03-02 起，跳过周末 */
+while (dates.length < script.length) {
+  var wd = d.getDay();
+  if (wd !== 0 && wd !== 6) dates.push(new Date(d));
+  d.setDate(d.getDate() + 1);
+}
+
+var base = script.map(function(big, i) {
+  var small = Math.max(1, Math.min(6, big + (rnd() < .35 ? (rnd() < .5 ? -1 : 1) : 0)));
+  var heat = (big - 1) / 5;
+  var meat = Math.round(12 + heat * 46 + (rnd() - .5) * 14);
+  var face = Math.round(6 + (1 - heat) * 22 + (rnd() - .3) * 16);
+  if (big === 2 && rnd() < .6) face += 12;
+  face = Math.max(0, face); meat = Math.max(2, meat);
+  return {
+    date: dates[i], big: big, small: small, meat: meat, face: face,
+    lianban: Math.round(1 + heat * 11 + rnd() * 3),
+    maxStreak: Math.max(2, Math.round(2 + heat * 6 + rnd() * 2)),
+    dragon: DRAGONS[Math.floor(rnd() * DRAGONS.length)],
+    status: STATUS[small]
+  };
+});
+
+/* ---- 人工确认值（演示：存浏览器 localStorage；实机走 PUT confirm 接口落库） ---- */
+var overrides = {};
+try { overrides = JSON.parse(localStorage.getItem('sentiment-mock-overrides') || '{}'); } catch (e) { overrides = {}; }
+/* 股票搜索库（样例；实机 = stock_info.search_key：小写 名称+全拼+拼音首字母，StockInfoService 落库时生成） */
+var STOCKS = [
+  {code:'601453', name:'平潭发展', py:'pingtanfazhan', pyi:'ptfz'},
+  {code:'600838', name:'上海物贸', py:'shanghaiwumao', pyi:'shwm'},
+  {code:'600605', name:'联明股份', py:'lianminggufen', pyi:'lmgf'},
+  {code:'300316', name:'晶盛机电', py:'jingshengjidian', pyi:'jsjd'},
+  {code:'002163', name:'中航产融', py:'zhonghangchanrong', pyi:'zhcr'},
+  {code:'600892', name:'大晟文化', py:'dashengwenhua', pyi:'dswh'},
+  {code:'603123', name:'翠微股份', py:'cuiweigufen', pyi:'cwgf'},
+  {code:'002508', name:'老板电器', py:'laobandianqi', pyi:'lbdq'},
+  {code:'600859', name:'王府井', py:'wangfujing', pyi:'wfj'},
+  {code:'000016', name:'深康佳A', py:'shenkangjia', pyi:'skja'},
+  {code:'300973', name:'立高食品', py:'ligaoshipin', pyi:'lgsp'},
+  {code:'603871', name:'嘉友国际', py:'jiayougouji', pyi:'jygj'}
+];
+base.forEach(function(r, i) {  /* 样例名单池个股并入搜索库（缺拼音的按名称生成占位） */
+  DRAGONS.forEach(function(n, j) {
+    if (!STOCKS.some(function(s){ return s.name === n; }))
+      STOCKS.push({code: String(600200 + j * 37), name: n, py: n, pyi: n.toLowerCase()});
+  });
+});
+function searchStocks(q) {
+  q = q.trim().toLowerCase();
+  if (!q) return [];
+  return STOCKS.filter(function(s) {
+    return s.code.indexOf(q) === 0 || s.name.toLowerCase().indexOf(q) >= 0
+        || s.py.indexOf(q) >= 0 || s.pyi.indexOf(q) >= 0;
+  }).slice(0, 8);
+}
+
+function saveOverrides() { try { localStorage.setItem('sentiment-mock-overrides', JSON.stringify(overrides)); } catch (e) {} }
+
+/* ---- 大肉/大面个股名单（样例：每日从名单池生成代表个股；实机为强势池过滤的完整名单） ---- */
+var INDUSTRIES = ['算力','机器人','消费电子','医药','半导体','军工','汽车','电力设备','化工','食品'];
+var baseLists = {};
+base.forEach(function(r, i) {
+  function mk(side) {
+    var cnt = side === 'meat' ? r.meat : r.face;
+    if (cnt <= 0) return [];
+    var k = Math.min(6, Math.max(2, Math.round(cnt / 9)));
+    var arr = [];
+    for (var j = 0; j < k; j++) {
+      arr.push({
+        code: String(600100 + i * 11 + j * 3),
+        name: DRAGONS[Math.floor(rnd() * DRAGONS.length)],
+        pct: side === 'meat' ? Math.round((5.1 + rnd() * 9.9) * 10) / 10 : -Math.round((5.1 + rnd() * 8.9) * 10) / 10,
+        streak: Math.max(1, Math.round(rnd() * 5)),
+        industry: INDUSTRIES[Math.floor(rnd() * INDUSTRIES.length)]
+      });
+    }
+    return arr;
+  }
+  baseLists[fmt(r.date)] = { meat: mk('meat'), face: mk('face') };
+});
+
+/* 名单人工增删（演示存 localStorage；实机 PUT /sentiment-cycle/{date}/lists 落库留痕） */
+var listOverrides = {};
+try { listOverrides = JSON.parse(localStorage.getItem('sentiment-mock-lists') || '{}'); } catch (e) { listOverrides = {}; }
+function saveListOverrides() { try { localStorage.setItem('sentiment-mock-lists', JSON.stringify(listOverrides)); } catch (e) {} }
+function listO(dateKey, side) {
+  if (!listOverrides[dateKey]) listOverrides[dateKey] = {};
+  if (!listOverrides[dateKey][side]) listOverrides[dateKey][side] = { removed: [], added: [] };
+  return listOverrides[dateKey][side];
+}
+function effectiveList(dateKey, side) {
+  var items = (baseLists[dateKey] && baseLists[dateKey][side]) || [];
+  var o = listOverrides[dateKey] && listOverrides[dateKey][side] ? listOverrides[dateKey][side] : { removed: [], added: [] };
+  return {
+    items: items.filter(function(it){ return o.removed.indexOf(it.code) < 0; }).concat(o.added),
+    edited: o.removed.length + o.added.length > 0,
+    systemCount: items.length, o: o
+  };
+}
+
+function view() {
+  return base.map(function(r) {
+    var key = fmt(r.date), o = overrides[key] || {};
+    return Object.assign({}, r, {
+      manual: Object.keys(o).length > 0,
+      sug: r,
+      big: o.big || r.big, small: o.small || r.small, status: o.status || r.status,
+      o: o
+    });
+  });
+}
+
+/* ---- 工具（本地时区日期） ---- */
+function pad(n){ return (n < 10 ? '0' : '') + n; }
+function fmt(dt){ return dt.getFullYear() + '-' + pad(dt.getMonth()+1) + '-' + pad(dt.getDate()); }
+function wdCN(dt){ return '日一二三四五六'[dt.getDay()]; }
+
+/* ---- SVG 主图（零依赖） ---- */
+function renderChart(data) {
+  var W = 1200, H = 380, L = 46, R = 46, T = 30, B = 28;
+  var pw = W - L - R, ph = H - T - B;
+  var mid = T + ph / 2;
+  var maxBar = 70, rMax = 16;
+  var n = data.length, bw = pw / n;
+  function barH(v){ return v / maxBar * (ph / 2); }
+  function lx(i){ return L + i * bw + bw / 2; }
+  function ry(v){ return T + ph - v / rMax * ph; }
+
+  var s = '';
+  /* 网格与左轴刻度 */
+  [60, 30, 0, -30, -60].forEach(function(v) {
+    var y = mid - barH(v);
+    s += '<line x1="' + L + '" y1="' + y + '" x2="' + (W - R) + '" y2="' + y + '" stroke="#1c2431" stroke-width="1"/>';
+    s += '<text x="' + (L - 6) + '" y="' + (y + 3) + '" fill="#8593a8" font-size="10" text-anchor="end" font-family="Menlo,monospace">' + v + '</text>';
+  });
+  /* 右轴刻度（连板/最高板 0-16） */
+  [0, 4, 8, 12, 16].forEach(function(v) {
+    s += '<text x="' + (W - R + 6) + '" y="' + (ry(v) + 3) + '" fill="#8593a8" font-size="10" font-family="Menlo,monospace">' + v + '</text>';
+  });
+  /* 柱 + tooltip */
+  data.forEach(function(r, i) {
+    var x = L + i * bw + bw * 0.21, w = Math.max(1, bw * 0.58);
+    s += '<g><title>' + fmt(r.date) + ' 周' + wdCN(r.date) + '\n大肉 ' + r.meat + ' / 大面 ' + r.face + '\n连板 ' + r.lianban + ' 家 · 最高 ' + r.maxStreak + ' 板\n' + r.dragon + '（' + r.status + '）</title>';
+    s += '<rect x="' + x + '" y="' + (mid - barH(r.meat)) + '" width="' + w + '" height="' + barH(r.meat) + '" fill="#e5484d" opacity=".85" rx="1"/>';
+    s += '<rect x="' + x + '" y="' + mid + '" width="' + w + '" height="' + barH(r.face) + '" fill="#2fbf71" opacity=".85" rx="1"/>';
+    s += '</g>';
+  });
+  /* 连板总数金线 + 最高板灰虚线 */
+  var pts1 = data.map(function(r, i){ return lx(i) + ',' + ry(r.lianban); }).join(' ');
+  var pts2 = data.map(function(r, i){ return lx(i) + ',' + ry(r.maxStreak); }).join(' ');
+  s += '<polyline points="' + pts2 + '" fill="none" stroke="#8593a8" stroke-width="1" stroke-dasharray="4 3" opacity=".8"/>';
+  s += '<polyline points="' + pts1 + '" fill="none" stroke="#e2b13c" stroke-width="1.6"/>';
+  /* X 轴日期标签 */
+  var step = Math.ceil(n / 12);
+  data.forEach(function(r, i) {
+    if (i % step !== 0) return;
+    s += '<text x="' + lx(i) + '" y="' + (H - 8) + '" fill="#8593a8" font-size="10" text-anchor="middle" font-family="Menlo,monospace">' + fmt(r.date).slice(5) + '</text>';
+  });
+  /* 中轴线 */
+  s += '<line x1="' + L + '" y1="' + mid + '" x2="' + (W - R) + '" y2="' + mid + '" stroke="#26303f" stroke-width="1"/>';
+  document.getElementById('chartsvg').innerHTML = s;
+}
+
+/* ---- 大肉/大面名单面板 + 昨日名单今日兑现 ---- */
+function followupOf(prevItems, src, dayIdx) {
+  var tables = src === 'meat'
+    ? [['延续',.45],['回落',.30],['转大面',.20],['停牌',.05]]
+    : [['反核止跌',.25],['弱势震荡',.35],['继续大面',.32],['停牌',.08]];
+  return prevItems.map(function(it, j) {
+    var x = ((parseInt(it.code, 10) + dayIdx * 7 + j) % 100) / 100;
+    var acc = 0, res = tables[tables.length-1][0];
+    for (var t = 0; t < tables.length; t++) { acc += tables[t][1]; if (x < acc) { res = tables[t][0]; break; } }
+    return { name: it.name, src: src, result: res };
+  });
+}
+function fchipClass(res) {
+  return res === '延续' || res === '反核止跌' ? 'pos'
+       : res === '转大面' || res === '继续大面' ? 'neg'
+       : res === '停牌' ? 'susp' : 'mid';
+}
+function renderLists(data) {
+  var lastI = data.length - 1;
+  var latest = data[lastI];
+  var todayKey = fmt(base[lastI].date);
+  var yestKey = lastI > 0 ? fmt(base[lastI - 1].date) : null;
+  var html = '';
+  ['meat', 'face'].forEach(function(side) {
+    var eff = effectiveList(todayKey, side);
+    var isMeat = side === 'meat';
+    html += '<div class="lcard ' + side + '">'
+      + '<div class="lhead"><span class="t" style="color:var(--' + (isMeat ? 'up' : 'down') + ')">今日' + (isMeat ? '大肉' : '大面') + '名单</span>'
+      + '<span class="n">' + fmt(base[lastI].date).slice(5) + ' · ' + eff.items.length + ' 只</span>'
+      + (eff.edited ? '<span class="rowedit" title="人工调整过">✎</span>' : '')
+      + '<span class="sp"></span>'
+      + (eff.edited ? '<button class="lreset" data-side="' + side + '">恢复系统名单</button>' : '')
+      + '<button class="ladd" data-side="' + side + '">+ 添加个股</button></div>';
+    if (eff.items.length === 0) {
+      html += '<div class="lnote">今日无' + (isMeat ? '大肉' : '大面') + '个股</div>';
+    } else {
+      html += eff.items.map(function(it) {
+        return '<div class="lrow"><span class="lname">' + it.name + (it.manual ? '<span class="rowedit">✎</span>' : '')
+          + '</span><span class="lcode">' + it.code + '</span><span class="lind">' + it.industry + '</span>'
+          + '<span style="color:var(--muted);font-size:11px">' + it.streak + '板</span>'
+          + '<span class="lpct ' + (isMeat ? 'up' : 'down') + '">' + (it.pct > 0 ? '+' : '') + it.pct.toFixed(1) + '%</span>'
+          + '<button class="lrm" data-side="' + side + '" data-code="' + it.code + '" title="从名单移除">✕</button></div>';
+      }).join('');
+      if (eff.systemCount > 0)
+        html += '<div class="lnote">系统名单 ' + eff.systemCount + ' 只，展示前 6（实机展示全部）；今日名单自动滚动为明日关注名单</div>';
+    }
+    if (yestKey) {
+      var yest = effectiveList(yestKey, side).items;
+      if (yest.length) {
+        html += '<div class="fup"><span>昨日(' + yestKey.slice(5) + ')名单今日兑现：</span>'
+          + followupOf(yest, side, lastI).map(function(f) {
+              return '<span class="fchip ' + fchipClass(f.result) + '" title="' + f.src + '名单 · ' + f.name + '">' + f.name + ' ' + f.result + '</span>';
+            }).join('') + '</div>';
+      }
+    }
+    html += '</div>';
+  });
+  document.getElementById('lists').innerHTML = html;
+
+  /* 名单编辑操作（实机：PUT /sentiment-cycle/{date}/lists，服务端校验非 ST + 留痕） */
+  document.querySelectorAll('.lrm').forEach(function(btn) {
+    btn.onclick = function(ev) {
+      ev.stopPropagation();
+      var o = listO(todayKey, btn.dataset.side);
+      if (o.removed.indexOf(btn.dataset.code) < 0) o.removed.push(btn.dataset.code);
+      saveListOverrides(); renderAll();
+    };
+  });
+  document.querySelectorAll('.lreset').forEach(function(btn) {
+    btn.onclick = function(ev) {
+      ev.stopPropagation();
+      delete listOverrides[todayKey][btn.dataset.side];
+      if (Object.keys(listOverrides[todayKey]).length === 0) delete listOverrides[todayKey];
+      saveListOverrides(); renderAll();
+    };
+  });
+  document.querySelectorAll('.ladd').forEach(function(btn) {
+    btn.onclick = function(ev) {
+      ev.stopPropagation();
+      var side = btn.dataset.side;
+      editor.innerHTML = '<div class="et">添加到今日' + (side === 'meat' ? '大肉' : '大面') + '名单（手动，实机落库留痕）</div>'
+        + '<div class="addform"><span class="relwrap"><input id="addname" placeholder="代码/名称/拼音如 pt" autocomplete="off">'
+        + '<div id="sug" class="sug"></div></span>'
+        + '<input id="addpct" type="number" step="0.1" placeholder="涨幅%">'
+        + '<button id="addok">确定</button></div>';
+      editor.style.display = 'block';
+      var rect = btn.getBoundingClientRect();
+      editor.style.top = (rect.bottom + 6) + 'px';
+      editor.style.left = Math.max(8, Math.min(rect.left, window.innerWidth - 360)) + 'px';
+      var addname = document.getElementById('addname'), sug = document.getElementById('sug');
+      var picked = null;
+      addname.focus();
+      addname.addEventListener('input', function() {
+        picked = null;
+        var hits = searchStocks(addname.value);
+        sug.innerHTML = hits.map(function(s) {
+          return '<div class="si" data-code="' + s.code + '" data-name="' + s.name + '"><b>' + s.name + '</b>'
+            + '<span class="c">' + s.code + '</span><span class="p">' + s.pyi + '</span></div>';
+        }).join('');
+        sug.querySelectorAll('.si').forEach(function(el) {
+          el.onmousedown = function(ev2) {          /* mousedown 先于 input 失焦，保证选中 */
+            ev2.preventDefault(); ev2.stopPropagation();
+            picked = { code: el.dataset.code, name: el.dataset.name };
+            addname.value = picked.name;
+            sug.innerHTML = '';
+          };
+        });
+      });
+      document.getElementById('addok').onclick = function(ev2) {
+        ev2.stopPropagation();
+        var name = addname.value.trim();
+        var pct = parseFloat(document.getElementById('addpct').value);
+        if (!name || isNaN(pct)) return;
+        var code = picked && picked.name === name ? picked.code : String(900000 + Math.floor(Math.random() * 90000));
+        listO(todayKey, side).added.push({
+          code: code, name: name, pct: Math.round(pct * 10) / 10, streak: 1, industry: '手动添加', manual: true
+        });
+        saveListOverrides(); closeEditor(); renderAll();
+      };
+    };
+  });
+}
+
+/* ---- 渲染总入口 ---- */
+function renderAll() {
+  var data = view();
+  var latest = data[data.length - 1];
+  var lastI = data.length - 1;
+
+  /* KPI（评级徽章可点击编辑） */
+  var kpis = [
+    ['大周期 / 小周期', '<span class="editable" data-i="' + lastI + '" data-k="big" title="点击编辑"><span class="chip" style="background:' + CYCLE_COLORS[latest.big-1] + ';color:#0e1218">' + latest.big + '</span></span> <span class="editable" data-i="' + lastI + '" data-k="small" title="点击编辑"><span class="chip" style="background:' + CYCLE_COLORS[latest.small-1] + ';color:#0e1218">' + latest.small + '</span></span>'],
+    ['超短周期状态', '<span class="editable" data-i="' + lastI + '" data-k="status" title="点击编辑"><span class="chip" style="background:var(--panel-2);border:1px solid var(--gold);color:var(--gold)">' + latest.status + '</span></span>'],
+    ['当日最高板', latest.maxStreak + '<small> 板 · ' + latest.dragon + '</small>'],
+    ['大肉总数', '<span class="up">' + latest.meat + '</span>'],
+    ['大面总数', '<span class="down">' + latest.face + '</span>'],
+    ['连板总数', latest.lianban + '<small> 家</small>']
+  ];
+  document.getElementById('kpis').innerHTML = kpis.map(function(k) {
+    return '<div class="kpi"><div class="lab">' + k[0] + '</div><div class="val">' + k[1] + '</div></div>';
+  }).join('');
+
+  /* 热度带 */
+  document.getElementById('bigband').innerHTML = data.map(function(r) {
+    return '<i style="background:' + CYCLE_COLORS[r.big-1] + '" title="' + fmt(r.date) + ' · 大周期 ' + r.big + (r.o.big ? '（人工确认，建议 ' + r.sug.big + '）' : '') + '"></i>';
+  }).join('');
+
+  renderChart(data);
+  renderLists(data);
+
+  /* 明细表 */
+  function cell(r, key) {
+    var manual = (key === 'big' || key === 'small' || key === 'status') && r.o[key] != null;
+    if (key === 'big' || key === 'small')
+      return '<span class="chip' + (manual ? ' manual' : '') + '" style="background:' + CYCLE_COLORS[r[key]-1] + ';color:#0e1218;font-size:11px;padding:1px 8px">' + r[key] + '</span>';
+    if (key === 'meat') return '<span class="up">' + r.meat + '</span>';
+    if (key === 'face') return '<span class="down">' + r.face + '</span>';
+    if (key === 'dragon') return '<span>' + r.dragon + '<small style="color:var(--muted)"> ' + r.maxStreak + '板</small></span>';
+    if (key === 'date') return fmt(r.date).slice(5);
+    if (key === 'wd') return '周' + wdCN(r.date);
+    if (key === 'status') return '<span class="' + (manual ? 'manual' : '') + '">' + r.status + '</span>';
+    return r[key];
+  }
+  var ROWS = [['date','日期'],['wd','周几'],['big','大周期'],['small','小周期'],['meat','大肉总数'],['face','大面总数'],['lianban','连板总数'],['maxStreak','最高板'],['dragon','高度龙'],['status','超短周期状态']];
+  var EDITABLE = { big: 1, small: 1, status: 1 };
+  var html = '<thead><tr><th></th>' + data.map(function(r, i) {
+    return '<th' + (i === lastI ? ' class="latest"' : '') + '>' + fmt(r.date).slice(5) + '</th>';
+  }).join('') + '</tr></thead><tbody>';
+  ROWS.forEach(function(row) {
+    html += '<tr><td>' + row[1] + (EDITABLE[row[0]] ? '<span class="rowedit" title="此行可点击编辑">✎</span>' : '') + '</td>' + data.map(function(r, i) {
+      var cls = (i === lastI ? 'latest ' : '') + (EDITABLE[row[0]] ? 'editable' : '');
+      return '<td' + (cls ? ' class="' + cls.trim() + '"' : '') + ' data-i="' + i + '" data-k="' + row[0] + '"' + (EDITABLE[row[0]] ? ' title="点击编辑"' : '') + '>' + cell(r, row[0]) + '</td>';
+    }).join('') + '</tr>';
+  });
+  document.getElementById('tbl').innerHTML = html + '</tbody>';
+}
+renderAll();
+
+/* ---- 行内编辑器（实机对应 PUT /api/v1/sentiment-cycle/{date}/confirm；表格与 KPI 共用） ---- */
+var editor = document.getElementById('editor');
+function closeEditor() { editor.style.display = 'none'; }
+function openEditor(el) {
+  var i = +el.dataset.i, k = el.dataset.k, r = view()[i], dateKey = fmt(base[i].date);
+  var label = { big: '大周期', small: '小周期', status: '超短周期状态' }[k];
+  var opts = k === 'status'
+    ? Object.keys(STATUS).map(function(n){ return [n, STATUS[n]]; })
+    : [1,2,3,4,5,6].map(function(n){ return [n, n]; });
+  editor.innerHTML =
+    '<div class="et">' + fmt(base[i].date) + ' 周' + wdCN(base[i].date) + ' · ' + label +
+    '（建议 ' + (k === 'status' ? STATUS[r.sug.small] : r.sug[k]) + '）</div>' +
+    '<div class="opts">' + opts.map(function(o) {
+      return '<button data-v="' + o[0] + '">' + o[1] + '</button>';
+    }).join('') +
+    (r.o[k] != null ? '<button class="reset" data-v="">恢复建议值</button>' : '') +
+    '</div>';
+  editor.style.display = 'block';
+  var rect = el.getBoundingClientRect();
+  editor.style.top = (rect.bottom + 6) + 'px';
+  editor.style.left = Math.max(8, Math.min(rect.left, window.innerWidth - 300)) + 'px';
+  editor.querySelectorAll('button').forEach(function(btn) {
+    btn.onclick = function(ev2) {
+      ev2.stopPropagation();
+      var v = btn.dataset.v;
+      if (!overrides[dateKey]) overrides[dateKey] = {};
+      if (v === '') delete overrides[dateKey][k]; else overrides[dateKey][k] = k === 'status' ? STATUS[v] : +v;
+      if (Object.keys(overrides[dateKey]).length === 0) delete overrides[dateKey];
+      saveOverrides(); closeEditor(); renderAll();
+    };
+  });
+}
+document.addEventListener('click', function(ev) {
+  var t = ev.target.closest('.editable');
+  if (t && t.dataset.k) { openEditor(t); return; }
+  if (!editor.contains(ev.target)) closeEditor();
+});
+</script>
