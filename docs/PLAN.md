@@ -52,14 +52,14 @@ V1 系统（`GeorgeSoros/soros-data-adaptor`）基于 Spring Boot 2.4.6 + Kotlin
 ```sql
 CREATE TABLE stock_history (
     id          BIGSERIAL PRIMARY KEY,
-    st_code     VARCHAR(20) NOT NULL,     -- 600000（裸数字，不带 sh/sz）
-    st_date     DATE NOT NULL,             -- 2024-01-02
-    st_open     NUMERIC(12,4),
-    st_close    NUMERIC(12,4),
-    st_high     NUMERIC(12,4),
-    st_low      NUMERIC(12,4),
-    st_volume   BIGINT,
-    total_amount NUMERIC(20,4),
+    code     VARCHAR(20) NOT NULL,     -- 600000（裸数字，不带 sh/sz）
+    trade_date     DATE NOT NULL,             -- 2024-01-02
+    open     NUMERIC(12,4),
+    close    NUMERIC(12,4),
+    high     NUMERIC(12,4),
+    low      NUMERIC(12,4),
+    volume   BIGINT,
+    amount NUMERIC(20,4),
     change_pct  NUMERIC(10,4),            -- 涨跌幅%（修正命名）
     turnover_rate NUMERIC(10,4),          -- 换手率%（修正命名）
     is_limit_up BOOLEAN DEFAULT FALSE,    -- 涨停
@@ -68,20 +68,20 @@ CREATE TABLE stock_history (
     limit_down_streak SMALLINT DEFAULT 0, -- 跌停连板数（§4.9 崩塌池依据，与 limit_up_streak 镜像派生）
     data_source VARCHAR(20) DEFAULT 'UNKNOWN' CHECK (data_source IN ('BAOSTOCK', 'AKSHARE', 'MOOTDX', 'UNKNOWN')),
     created_at  TIMESTAMP DEFAULT NOW(),
-    UNIQUE (st_code, st_date)
+    UNIQUE (code, trade_date)
 );
 
--- 核心索引（2026-10-02 索引审计：UNIQUE(st_code,st_date) 自带同列复合索引，
+-- 核心索引（2026-10-02 索引审计：UNIQUE(code,trade_date) 自带同列复合索引，
 -- 原 idx_history_code_date 与之完全重复已删除，勿再建同列普通索引）
-CREATE INDEX idx_history_date ON stock_history (st_date);  -- 按日全市场扫描
+CREATE INDEX idx_history_date ON stock_history (trade_date);  -- 按日全市场扫描
 ```
 
 **查询模式 → 索引对照（§2.2.2，防后续加功能乱加/漏加索引）**：
 
 | 查询模式 | 代表场景 | 命中 |
 |---------|---------|------|
-| `WHERE st_code=? [AND st_date BETWEEN]` | 回测加载、波浪计算、个股 actions、单股重拉 | UNIQUE(st_code,st_date) 自带索引 |
-| `WHERE st_date=? / >=?` | SentimentCycleJob、梯队排名、market_daily/sector_daily 聚合、滚动重拉近7日 | idx_history_date（单日~5000行，内存过滤） |
+| `WHERE code=? [AND trade_date BETWEEN]` | 回测加载、波浪计算、个股 actions、单股重拉 | UNIQUE(code,trade_date) 自带索引 |
+| `WHERE trade_date=? / >=?` | SentimentCycleJob、梯队排名、market_daily/sector_daily 聚合、滚动重拉近7日 | idx_history_date（单日~5000行，内存过滤） |
 | 近 N 日入池窗口（强势池/崩塌池） | 近3日最高连板≥3 等 | idx_history_date 取 ~2.5 万行后内存开窗，不需专门索引 |
 | 全表顺序扫 | 回测启动装载、WaveComputeJob、回放 | 本应 seq scan，索引无关 |
 | 预计算表直读 | 情绪网页、limit_ecology/sector/market_env 条件 | sentiment_cycle / market_daily / sector_daily / signal_daily，**不碰日线** |
@@ -118,7 +118,7 @@ ALTER TABLE stock_history RENAME TO stock_history_legacy;
 
 -- 2. 创建分区表（结构完全一致）
 CREATE TABLE stock_history (LIKE stock_history_legacy INCLUDING ALL)
-    PARTITION BY RANGE (st_date);
+    PARTITION BY RANGE (trade_date);
 
 -- 3. 按年创建分区
 CREATE TABLE stock_history_2024 PARTITION OF stock_history
@@ -182,12 +182,12 @@ CREATE INDEX idx_stock_info_search ON stock_info USING gin (search_key gin_trgm_
 ```sql
 CREATE TABLE stock_fundamentals (
     id          SERIAL PRIMARY KEY,
-    st_code     VARCHAR(20) NOT NULL,
+    code     VARCHAR(20) NOT NULL,
     report_date DATE NOT NULL,             -- 报告期（季度末 2024-12-31），季度/年度通吃（2026-10-02 用户决策：每季度都存）
     revenue     NUMERIC(20,2),             -- 元（AKShare stock_yjbb_em 原始单位亿元，×1e8 转换）
     net_profit  NUMERIC(20,2),             -- 元（同上）
     updated_at  TIMESTAMP DEFAULT NOW(),
-    UNIQUE (st_code, report_date)
+    UNIQUE (code, report_date)
 );
 ```
 
@@ -197,7 +197,7 @@ CREATE TABLE stock_fundamentals (
 CREATE TABLE data_quality_log (
     id          SERIAL PRIMARY KEY,
     check_date  DATE NOT NULL,
-    stock_code  VARCHAR(20) NOT NULL,
+    code  VARCHAR(20) NOT NULL,
     issue_type  VARCHAR(50) NOT NULL,
     detail      TEXT,
     source      VARCHAR(20),
@@ -236,12 +236,12 @@ CREATE TABLE index_history (
     id          BIGSERIAL PRIMARY KEY,
     code        VARCHAR(20) NOT NULL,     -- sh000001（带前缀，同 stock_index 特例）
     trade_date  DATE NOT NULL,
-    st_open     NUMERIC(12,4),
-    st_close    NUMERIC(12,4),
-    st_high     NUMERIC(12,4),
-    st_low      NUMERIC(12,4),
-    st_volume   BIGINT,
-    total_amount NUMERIC(20,4),
+    open     NUMERIC(12,4),
+    close    NUMERIC(12,4),
+    high     NUMERIC(12,4),
+    low      NUMERIC(12,4),
+    volume   BIGINT,
+    amount NUMERIC(20,4),
     data_source VARCHAR(20) DEFAULT 'UNKNOWN',
     created_at  TIMESTAMP DEFAULT NOW(),
     UNIQUE (code, trade_date)
@@ -254,12 +254,12 @@ CREATE TABLE index_history (
 ```sql
 CREATE TABLE sentiment_cycle (
     id              BIGSERIAL PRIMARY KEY,
-    st_date         DATE NOT NULL UNIQUE,        -- 交易日
+    trade_date         DATE NOT NULL UNIQUE,        -- 交易日
     limit_up_count  INT NOT NULL DEFAULT 0,      -- 全市场涨停家数
     limit_down_count INT NOT NULL DEFAULT 0,     -- 全市场跌停家数
     lianban_count   INT NOT NULL DEFAULT 0,      -- 连板家数（limit_up_streak>=2）
     max_streak      SMALLINT,                    -- 当日最高板
-    dragon_json     JSONB,                       -- 高度龙明细：[{code,name,streak,board,industry}]（industry=主行业，取数组第一个，展示用）
+    dragon_json     JSONB,                       -- 高度龙明细：[{code,name,limit_up_streak,board,industry}]（industry=主行业，取数组第一个，展示用）
     pool_count      INT NOT NULL DEFAULT 0,      -- 强势池家数（§4.9 入池规则）
     big_meat_count  INT NOT NULL DEFAULT 0,      -- 大肉数（池内今日 change_pct>=+5%）
     big_face_count  INT NOT NULL DEFAULT 0,      -- 大面数（池内今日 change_pct<=-5%）
@@ -286,7 +286,7 @@ CREATE TABLE sentiment_cycle (
 ```sql
 CREATE TABLE dragon_cycle (
     id              BIGSERIAL PRIMARY KEY,
-    st_code         VARCHAR(20) NOT NULL,        -- 龙头代码
+    code         VARCHAR(20) NOT NULL,        -- 龙头代码
     start_date      DATE NOT NULL,               -- 上位日（前一龙头阵亡次日）
     end_date        DATE,                        -- 阵亡/定性日（null=进行中）
     max_streak      SMALLINT NOT NULL DEFAULT 0, -- 周期内最高板
@@ -342,11 +342,11 @@ CREATE INDEX idx_dragon_cycle_status ON dragon_cycle (status);
 
 | PG 列 | 口径 / 含义 / 单位 | Kotlin | Python JSON | BaoStock | AKShare | mootdx |
 |-------|-------------------|--------|-------------|----------|---------|--------|
-| st_code | 裸数字 600000（不带 sh/sz 前缀） | code | code | code 去前缀 | 股票代码 | code |
-| st_date | 交易日 | date | date | date | 日期 | datetime[:10] |
-| st_open / st_high / st_low / st_close | **qfq 前复权价**（元，2 位小数） | open/high/low/close | open/high/low/close | adjustflag=2 | adjust=qfq | ⚠ 不复权（降级源，记 RAW_FALLBACK） |
-| st_volume | 成交量，**统一单位=股** | volume | volume | volume（原生股） | 成交量（手）×100 | vol（手）×100 |
-| total_amount | 成交额（元） | totalAmount | amount | amount | 成交额 | amount |
+| code | 裸数字 600000（不带 sh/sz 前缀） | code | code | code 去前缀 | 股票代码 | code |
+| trade_date | 交易日 | date | date | date | 日期 | datetime[:10] |
+| open / high / low / close | **qfq 前复权价**（元，2 位小数） | open/high/low/close | open/high/low/close | adjustflag=2 | adjust=qfq | ⚠ 不复权（降级源，记 RAW_FALLBACK） |
+| volume | 成交量，**统一单位=股** | volume | volume | volume（原生股） | 成交量（手）×100 | vol（手）×100 |
+| amount | 成交额（元） | totalAmount | amount | amount | 成交额 | amount |
 | change_pct | **不复权**真实涨跌幅%（数据源原始值，§4.5 涨停检测依据） | changePct | change_percent | pctChg | 涨跌幅 | (close−last_close)/last_close |
 | turnover_rate | 换手率%（**V1 曾误名 st_change**，字典留痕防旧记忆） | turnoverRate | turnover | turn | 换手率 | 无 → 0 |
 | is_limit_up / is_limit_down | Kotlin 侧按 board 阈值计算（§4.5），Python 不传 | isLimitUp/isLimitDown | — | — | — | — |
@@ -364,9 +364,11 @@ CREATE INDEX idx_dragon_cycle_status ON dragon_cycle (status);
 - `stock_info.industry`（JSON 数组） / `concept_boards`（JSON 数组）：来源 BoardCollectJob 东财板块成分（行业每日/概念每周），非股票列表接口；均只存当前成分快照（§4.8）。
 - `amplitude`（振幅%）：**已决策删除（2026-10-02）**——可由 最高/最低/昨收 随时派生，不设列不养契约。
 - `prev_close`（除权后昨收）：**传输字段，不落库**，仅供 §4.6 漂移检测；三源口径一致（mootdx 除外，见 §4.6）。
-- `stock_info.code` 裸数字；**`stock_index.code` 特例带前缀**（sh000001）——字典显式标注，防有人"顺手统一"。
-- `st_volume`/`total_amount` 单位换算（×100 等）为契约约定，**M0 探针已实测（2026-10-03，docs/research/probe-units-v2.md）**：BaoStock volume 原生=股（amount/volume≈收盘价）、amount=元、preclose 有值、tradestatus/isST 字段确认存在；AKShare 成交量=手（×100 换算正确）、成交额=元、qfq 与不复权列名完全一致。mootdx 未测（本机无可用节点，备源低优先，M3 接入时实测校准）。
+- **证券代码列名全库统一 `code`（2026-10-03 命名穿透后定稿，st_/stock_ 变体已清零）**；口径特例在**值层面**：股票=裸数字 600000，**指数=带前缀 sh000001**（仅 stock_index/index_history 两表）——字典显式标注，防有人"顺手统一"值口径。
+- `volume`/`amount` 单位换算（×100 等）为契约约定，**M0 探针已实测（2026-10-03，docs/research/probe-units-v2.md）**：BaoStock volume 原生=股（amount/volume≈收盘价）、amount=元、preclose 有值、tradestatus/isST 字段确认存在；AKShare 成交量=手（×100 换算正确）、成交额=元、qfq 与不复权列名完全一致。mootdx 未测（本机无可用节点，备源低优先，M3 接入时实测校准）。
 - Kotlin 属性名与 Python JSON key 不同（如 turnoverRate ↔ turnover）是**有意为之**（@Column 显式映射 + DTO 独立命名），禁止"顺手统一"两侧命名——统一动作必须过字典。
+- **全系统命名总册**：`docs/design/naming-dictionary.md`（2026-10-03 命名穿透产出，同语义字段全库同名定稿 + 26 表逐列清单 + 特例留痕）。新表/新列/新 DTO 字段必须先查总册再命名，总册没有的概念先增册再用名。
+- **Entity 注释铁律（2026-10-03 用户要求）**：Kotlin Entity 每个字段必须带 KDoc 注释，注释文本与 DDL 列注释**同文**（以 schema.sql 为源），M1 生成 Entity 时执行——字典注释随 schema 走，`\d+` 与 IDE 悬浮两处可见，永不失联。
 
 ---
 
@@ -479,28 +481,28 @@ class StockHistory(
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     var id: Long? = null,
 
-    @Column(name = "st_code", nullable = false, length = 20)
+    @Column(name = "code", nullable = false, length = 20)
     var code: String = "",
 
-    @Column(name = "st_date", nullable = false)
+    @Column(name = "trade_date", nullable = false)
     var date: LocalDate? = null,
 
-    @Column(name = "st_open")
+    @Column(name = "open")
     var open: BigDecimal? = null,
 
-    @Column(name = "st_close")
+    @Column(name = "close")
     var close: BigDecimal? = null,
 
-    @Column(name = "st_high")
+    @Column(name = "high")
     var high: BigDecimal? = null,
 
-    @Column(name = "st_low")
+    @Column(name = "low")
     var low: BigDecimal? = null,
 
-    @Column(name = "st_volume")
+    @Column(name = "volume")
     var volume: Long? = null,
 
-    @Column(name = "total_amount")
+    @Column(name = "amount")
     var totalAmount: BigDecimal? = null,
 
     @Column(name = "change_pct")
@@ -747,11 +749,11 @@ object LimitUpDetector {
 计算规则（saveBatch 内，bars 按日期升序遍历）：
 1. bar.isLimitUp == false → limit_up_streak = 0
 2. true → 前一交易日（trading_calendar 找）：
-   a. 批内有前一日 bar → streak = 前一日.streak + 1
+   a. 批内有前一日 bar → limit_up_streak = 前一日.limit_up_streak + 1
    b. 批内无 → 查库内该股 < 窗口起点的最近一行（含滚动重拉续基）：
-      前一交易日有行且 is_limit_up → streak = 该行.streak + 1
-      前一交易日无行（停牌/未上市）→ streak = 1（停牌断板，复盘重计，与市场惯例一致）
-3. IPO 守卫：bar.date 距 stock_info.ipo_date 不足 5 个交易日 → is_limit_up 强制 false、streak=0
+      前一交易日有行且 is_limit_up → limit_up_streak = 该行.limit_up_streak + 1
+      前一交易日无行（停牌/未上市）→ limit_up_streak = 1（停牌断板，复盘重计，与市场惯例一致）
+3. IPO 守卫：bar.date 距 stock_info.ipo_date 不足 5 个交易日 → is_limit_up 强制 false、limit_up_streak=0
    （上市首 5 日无涨跌幅限制，不存在涨停——顺带修正 §4.5 新股误标风险）
 4. 涨停阈值按 board 区分：主板 10cm、双创 20cm（§4.5 复用）；ST 不在采集范围（§2.2 隔离原则）——5cm 梯队天然不存在，是设计而非缺口
 ```
@@ -763,8 +765,8 @@ object LimitUpDetector {
 ```
 GET /api/v1/limit-up-board?date=2026-10-02
 → { date, limit_up_count, leaderboard: [
-     {code, name, streak, board /*MAIN|GEM|STAR*/, change_pct, industry, concept_boards}
-   ] /* 按 streak DESC */ }
+     {code, name, limit_up_streak, board /*MAIN|GEM|STAR*/, change_pct, industry, concept_boards}
+   ] /* 按 limit_up_streak DESC */ }
 当日最高板 = leaderboard[0]（同板数并列时全部返回）
 ```
 
@@ -813,8 +815,8 @@ GET /api/v1/limit-up-board?date=2026-10-02
 **SentimentCycleJob（@Scheduled，排在 DailyCollectJob 之后，如 20:40；失败不阻塞主采集，钉钉告警）**：
 
 ```
-每日一行写 sentiment_cycle（幂等 upsert by st_date）：
-1. 全市场：limit_up_count / limit_down_count / lianban_count(streak>=2) / max_streak / dragon_json
+每日一行写 sentiment_cycle（幂等 upsert by trade_date）：
+1. 全市场：limit_up_count / limit_down_count / lianban_count(limit_up_streak>=2) / max_streak / dragon_json
 2. 大肉数 = 强势池内今日 change_pct >= +5%（pool.big-meat-threshold）
 3. 大面数 = 强势池内今日 change_pct <= -5%（pool.big-face-threshold）
 4. leader_json = 近 1-3 日最高板前三名逐个记录：晋级（连板延续）/ 断板 / 大面
@@ -846,12 +848,12 @@ GET /api/v1/limit-up-board?date=2026-10-02
 
 逐日推进（SentimentCycleJob 内，写 dragon_cycle；阈值配置 sentiment.dragon-*.）：
 1. 上位：前一龙头 DEAD 后，当日最高板股票接棒开新周期（并列取先到者；confirm 接口可人工改判）
-2. RISING：龙头今日涨停（streak 延续），max_streak 刷新
+2. RISING：龙头今日涨停（limit_up_streak 延续），max_streak 刷新
 3. BROKEN：龙头今日未涨停 → broken_date 起观察期（默认 3 个交易日）
 4. 反包：观察期内再次涨停
-   └ 若此后 streak 超过断板前最高板（创新高）→ cycle_type 定为 BIG；rebreak_count+1
+   └ 若此后 limit_up_streak 超过断板前最高板（创新高）→ cycle_type 定为 BIG；rebreak_count+1
 5. DEAD：观察期内无反包 → 周期结束
-   └ 断板时 max_streak ≤ dragon.small-max-streak (默认 7) 且无反包 → cycle_type = SMALL
+   └ 断板时 max_streak ≤ dragon.small-max-limit_up_streak (默认 7) 且无反包 → cycle_type = SMALL
    └ max_streak ≥ 8 或曾反包创新高 → cycle_type = BIG
 6. SUSPENDED：交易日历开市但龙头无 bar（复用 §4.7 NO_BAR_TODAY 检测）→ 状态置 SUSPENDED，
    周期延续，当日 dragon_json 龙头名标注"XX（停牌）"，suspend_json 记录区间，复牌后回到 2/3 判定
@@ -868,11 +870,11 @@ GET /api/v1/sentiment-cycle/{date}/terms
   —— 钉钉日报与网页详情共用这份"今日术语清单"
 
 GET /api/v1/stocks/{code}/actions?from=&to=
-  个股动作标签时间线：逐日 [{date, label, streak, change_pct}]
+  个股动作标签时间线：逐日 [{date, label, limit_up_streak, change_pct}]
   —— 复盘视角：某股 6/18 断板、6/20 反包、6/23 创新高定性大周期
 ```
 
-按需现算不落库（数据全在 stock_history streak 列 + 交易日历）；个股动作标签集同时是二期 L2 DSL 的信号源词汇表（§12.7 策略 YAML 可写 `label: 反包 within_days: 3`）。
+按需现算不落库（数据全在 stock_history limit_up_streak 列 + 交易日历）；个股动作标签集同时是二期 L2 DSL 的信号源词汇表（§12.7 策略 YAML 可写 `label: 反包 within_days: 3`）。
 
 **情绪周期网页（2026-10-02 确认，样稿 docs/design/sentiment-dashboard-mock.html）**：
 
@@ -1081,7 +1083,7 @@ def _sync_fetch_daily_bars(self, code, start, end, adjust):
    ① BackfillJob 拉一批（如 50 股全历史）→ DataValidator 校验 →
       CopyManager COPY INTO stock_history_stage（中转表，TEXT/CSV 流式，瞬时）
    ② INSERT INTO stock_history SELECT * FROM stock_history_stage
-      ON CONFLICT (st_code, st_date) DO UPDATE SET ...   -- 幂等合并，单条 SQL
+      ON CONFLICT (code, trade_date) DO UPDATE SET ...   -- 幂等合并，单条 SQL
    ③ TRUNCATE stock_history_stage → 下一批；stage 结构与主表一致（无 UNIQUE 约束）
    ```
    - 幂等语义与 saveBatch 的 DO UPDATE 完全一致，可中断重跑
@@ -1090,7 +1092,7 @@ def _sync_fetch_daily_bars(self, code, start, end, adjust):
 2. **单段回填（2026-10-02 决策：只存近 5 年，无需再分两段）**：
    - `app.data-collection.default-start-date: 20211001`，BackfillJob 一次拉满近 5 年（~600 万行，COPY 下**当天 <1 小时**）
    - 批次限速防触发数据源风控，`DO UPDATE` 幂等可随时中断重跑
-   - 数据老化策略（将来启用）：每年 1 月 1 日可跑一次性清理 `DELETE FROM stock_history WHERE st_date < 当前日 - 5 年`（先做不实现，写进运维手册即可）
+   - 数据老化策略（将来启用）：每年 1 月 1 日可跑一次性清理 `DELETE FROM stock_history WHERE trade_date < 当前日 - 5 年`（先做不实现，写进运维手册即可）
 3. **兜底**：DailyCollectJob 的滚动重拉/断点逻辑不变——任何漏网缺口由每日 20:00 增量自动补齐（§4.7 防线④）
 4. 容量：~1500-2200 万行，Phase A 单表无压力
 5. 收益（相比迁移 V1 数据）：无字段映射风险、无 V1 脏数据（V1 有错误数据订正史）、change_pct/涨停标记在源头即为正确语义
@@ -1099,18 +1101,18 @@ def _sync_fetch_daily_bars(self, code, start, end, adjust):
    -- ① 涨停/跌停标记：按 board 阈值（join stock_info，双创 19.9 / 主板 9.9）
    -- ② 连板数（涨停为例；跌停镜像）：
    WITH marked AS (
-     SELECT h.id, h.st_code, h.st_date, h.is_limit_up,
+     SELECT h.id, h.code, h.trade_date, h.is_limit_up,
             SUM(CASE WHEN h.is_limit_up THEN 0 ELSE 1 END)
-              OVER (PARTITION BY h.st_code ORDER BY h.st_date) AS grp
+              OVER (PARTITION BY h.code ORDER BY h.trade_date) AS grp
      FROM stock_history h)
    UPDATE stock_history x SET limit_up_streak =
      CASE WHEN m.is_limit_up
-          THEN ROW_NUMBER() OVER (PARTITION BY m.st_code, m.grp ORDER BY m.st_date)
+          THEN ROW_NUMBER() OVER (PARTITION BY m.code, m.grp ORDER BY m.trade_date)
           ELSE 0 END
    FROM marked m WHERE x.id = m.id;
-   -- ③ IPO 守卫：stock_info.ipo_date 后首 5 根 bar（row_number per code）is_limit_up/两 streak 强制 false/0
+   -- ③ IPO 守卫：stock_info.ipo_date 后首 5 根 bar（row_number per code）is_limit_up/两 limit_up_streak 强制 false/0
    -- ④ 停牌断板天然成立（停牌无行即断点）
-   -- ⑤ 验证：抽 3 只股票的回填 streak 与 saveBatch 增量路径在同日期段重算比对一致
+   -- ⑤ 验证：抽 3 只股票的回填 limit_up_streak 与 saveBatch 增量路径在同日期段重算比对一致
    ```
 
 ---
@@ -1136,7 +1138,7 @@ def _sync_fetch_daily_bars(self, code, start, end, adjust):
 
 ### Step 3: Python 微服务（3-5 天）
 
-1. Phase 0.5 探针测试 — 实测三个数据源 API（**必须实测并回写 §2.4 字典**：st_volume/total_amount 的原始单位、AKShare「昨收」列名、BaoStock tradestatus/isST 停牌行真实返回、query_stock_basic 退市字段）
+1. Phase 0.5 探针测试 — 实测三个数据源 API（**必须实测并回写 §2.4 字典**：volume/amount 的原始单位、AKShare「昨收」列名、BaoStock tradestatus/isST 停牌行真实返回、query_stock_basic 退市字段）
 2. 基于探针结果写 Adapter
 3. CircuitBreaker + TokenBucket + Router（参数见 §11.1）
 4. /health /stock-list /daily-bars/batch /trading-calendar 端点（契约见 §11.1）
@@ -1154,7 +1156,7 @@ def _sync_fetch_daily_bars(self, code, start, end, adjust):
 
 ### Step 5: 基本面 + 辅助功能（2-3 天）
 
-1. FundamentalsCollectJob（季度循环拉 stock_yjbb_em，亿元→元，UNIQUE(st_code, report_date) 幂等）
+1. FundamentalsCollectJob（季度循环拉 stock_yjbb_em，亿元→元，UNIQUE(code, report_date) 幂等）
 2. BoardCollectJob（行业每日/概念每周 → stock_info.industry/concept_boards）
 3. CrossValidateJob（§11.2）
 4. ManualDataController（兼容 V1 webhook，最小 6 端点，§11.4）
@@ -1167,9 +1169,9 @@ def _sync_fetch_daily_bars(self, code, start, end, adjust):
 
 1. BackfillJob：COPY 两段式写入（§六：stage 中转表 → ON CONFLICT 合并 → TRUNCATE），DataValidator 整批校验
 2. 一次拉满近 5 年（`defaultStartDate=20211001`，~600 万行，当天完成）
-3. 派生列补算 SQL（§六.6：is_limit_up/两 streak gaps-and-islands + IPO 守卫 + 抽查比对）
+3. 派生列补算 SQL（§六.6：is_limit_up/两 limit_up_streak gaps-and-islands + IPO 守卫 + 抽查比对）
 4. 情绪历史冷启动回放（§13.5：POST /jobs/sentiment-replay，逐交易日顺序重建 sentiment_cycle/dragon_cycle）
-5. 验证：股票覆盖数、行数与交易日历对账、抽样对照行情软件；streak 抽查与增量路径一致；回放摘要钉钉通知；漏网缺口由每日增量滚动重拉自动补齐
+5. 验证：股票覆盖数、行数与交易日历对账、抽样对照行情软件；limit_up_streak 抽查与增量路径一致；回放摘要钉钉通知；漏网缺口由每日增量滚动重拉自动补齐
 
 ---
 
@@ -1207,7 +1209,7 @@ curl -X POST http://localhost:8000/api/v1/daily-bars/batch \
 
 # 数据库验证
 SELECT code, COUNT(*) FROM stock_history GROUP BY code ORDER BY COUNT(*) DESC LIMIT 10;
-SELECT MAX(st_date) FROM stock_history WHERE code = '600000';
+SELECT MAX(trade_date) FROM stock_history WHERE code = '600000';
 ```
 
 ---
@@ -1231,7 +1233,7 @@ SELECT MAX(st_date) FROM stock_history WHERE code = '600000';
 | # | 扣分 | 说明 | 何时销账 |
 |---|------|------|---------|
 | 1 | -1 | 算法对拍 golden：设计已定稿（§11.5），但 V1 复刻版移植与 off-by-one 差异清单须实际跑通锁定 | Step 5 实施时 |
-| 2 | -1 | streak 补算 SQL（§六.6）与情绪回放（§13.5）为设计稿，落地须实测性能与边界（1300 日回放、年度窗口 UPDATE） | Step 5/6 实施时 |
+| 2 | -1 | limit_up_streak 补算 SQL（§六.6）与情绪回放（§13.5）为设计稿，落地须实测性能与边界（1300 日回放、年度窗口 UPDATE） | Step 5/6 实施时 |
 | 3 | -1 | 集成测试用例集未逐条列纲（TestContainers 场景清单待实施时展开：含情绪派生/COPY 合并/握手事件） | Step 2/4 实施时 |
 
 > 已销账的六项（2026-10-02 穿透收尾）：application.yml 全样与 dispatcher 收口（§13.1）、WebClient 双 profile 超时重试+熔断（§13.2）、结构化日志与 Micrometer 指标（§13.3）、Job 完成握手（§13.4）、情绪历史冷启动回放（§13.5）、COPY 派生列补算（§六.6）。
@@ -1349,7 +1351,7 @@ V1 真实调用方 = resources/py 下 4 个 Python 脚本。**保留 6 端点**�
 3. 排序兼容：V1 按日期字符串字典序（依赖 yyyyMMdd 定宽）——V2 复刻版保留原样，清理版用 LocalDate；
    对拍输入日期格式统一 yyyyMMdd，消除格式变量
 4. 表结构兼容：stock_inflection_point / BIG_TREND 字段名照抄 V1
-   （st_code/wave_direction/data_type/last_days/st_range），不"顺手修正"，保下游报表兼容
+   （code/wave_direction/data_type/last_days/st_range），不"顺手修正"，保下游报表兼容
 5. 调度：V2 单 SorosJob，由 DailyCollectJob 完成事件触发（§13.4 握手），只重算 findMaxDate 有变化的股票；
    废弃 V1 双 Job 全量重算与死配置（range=0.5/multiWaveInterval=44/inflectionPointDays=20 不迁移）
 ```
@@ -1392,7 +1394,7 @@ V1 真实调用方 = resources/py 下 4 个 Python 脚本。**保留 6 端点**�
 
 ### 12.4 信号供给（二期第一任务）
 
-建表兼容 V1：`stock_inflection_point(code,date,close,high,low,type; UNIQUE(code,date))`、`big_trend(st_code,wave_direction,data_type,start_date,end_date,last_days,st_range)`。`WaveComputeJob` 每收盘一次计算多表落库（复用 §11.5 清洁版算法）。回测只读信号表——确定性要求。
+建表兼容 V1：`stock_inflection_point(code,date,close,high,low,type; UNIQUE(code,date))`、`big_trend(code,wave_direction,data_type,start_date,end_date,last_days,st_range)`。`WaveComputeJob` 每收盘一次计算多表落库（复用 §11.5 清洁版算法）。回测只读信号表——确定性要求。
 
 #### 12.4.1 信号层数据设计（2026-10-02，配合 §12.7.1 词表）
 
@@ -1419,7 +1421,7 @@ V1 真实调用方 = resources/py 下 4 个 Python 脚本。**保留 6 端点**�
 
 ```sql
 market_daily(           -- 全市场温度计，一日一行
-  st_date DATE PK,
+  trade_date DATE PK,
   adv_count        SMALLINT,   -- 上涨家数
   dec_count        SMALLINT,   -- 下跌家数
   limit_up_count   SMALLINT,   -- 今日涨停家数（冗余 = jsonb_array_length(limit_up_list)，同源校验）
@@ -1433,12 +1435,12 @@ market_daily(           -- 全市场温度计，一日一行
   yst_face_count   SMALLINT    -- 昨日大面家数
 )
 sector_daily(           -- 板块聚合，日×板块
-  st_date, board, PRIMARY KEY(st_date, board),
+  trade_date, board, PRIMARY KEY(trade_date, board),
   limit_up_count, max_streak, avg_chg_pct,
   driver_text TEXT               -- 当日板块驱动主线一句话（LLM 生成，标"系统生成"，2026-10-02 定稿）
 )
 signal_daily(           -- 个股×日，只存"必须全市场排序才得出"的列
-  st_code, st_date, PRIMARY KEY(st_code, st_date),
+  code, trade_date, PRIMARY KEY(code, trade_date),
   streak_rank SMALLINT,           -- 当日梯队排名
   is_zhaban BOOLEAN,              -- 炸板（日线近似，统一口径落库）
   sector_streak_rank SMALLINT     -- 板块内板数排名
@@ -1609,11 +1611,11 @@ signals:
 strategy_config(id, name UNIQUE, yaml TEXT, version, status DRAFT/ACTIVE/RETIRED,
                 alert_enabled BOOLEAN DEFAULT FALSE,   -- 盘中开仓预警开关（结果对比页开启，§14.9）
                 created_by, created_at, note)
-strategy_config_history(id, config_id, yaml, version, edited_at)  -- 每次保存留痕，可回滚可 diff
+strategy_config_history(id, config_id, yaml, version, created_at)  -- 每次保存留痕，可回滚可 diff
 
 watchlist_group(id SERIAL PK, name VARCHAR(50) UNIQUE, note TEXT, created_at)
-watchlist_member(group_id FK→watchlist_group, st_code, note, added_at,
-                 UNIQUE(group_id, st_code))          -- 自选股分组：用户按基本面 curated 的观察宇宙（PCB/存储芯片/创新药…）
+watchlist_member(group_id FK→watchlist_group, code, note, created_at,
+                 UNIQUE(group_id, code))          -- 自选股分组：用户按基本面 curated 的观察宇宙（PCB/存储芯片/创新药…）
 ```
 
 **自选股分组 = 回测/策略 universe（2026-10-03 用户需求，已裁定）**：
@@ -1691,7 +1693,7 @@ soros:
     big-face-threshold: -5.0
     pool:     { min-streak: 3, min-limit-ups: 2, min-5d-gain: 50 }
     collapse: { min-streak: 2, max-5d-drop: 30 }
-    dragon:   { observe-days: 3, small-max-streak: 7 }   # §4.9 状态机
+    dragon:   { observe-days: 3, small-max-limit_up_streak: 7 }   # §4.9 状态机
   dingtalk:
     webhook: ${SOROS_DINGTALK_WEBHOOK}      # §11.3
 ```
@@ -1786,15 +1788,15 @@ IntradaySource 接口（Python 侧）
 
 | 源字段（中文键） | DTO 字段 | 出现池别 |
 |---|---|---|
-| 代码 / 名称 / 涨跌幅 / 最新价 / 成交额 / 流通市值 / 总市值 / 换手率 / 所属行业 | code / name / chg / price / amount / float_mv / total_mv / turnover / industry | 全 5 池 |
-| 首次封板时间 / 炸板次数 / 涨停统计 | first_seal_time / zhaban_count / limit_stat | ZT/ZB/STRONG（"涨停统计"样稿缩写 stat） |
-| 最后封板时间 / 封板资金 / 连板数 | last_seal_time / seal_amount / streak | 仅 ZT（连板数样稿缩写 lbc） |
+| 代码 / 名称 / 涨跌幅 / 最新价 / 成交额 / 流通市值 / 总市值 / 换手率 / 所属行业 | code / name / change_pct / price / amount / float_mv / total_mv / turnover / industry | 全 5 池 |
+| 首次封板时间 / 炸板次数 / 涨停统计 | first_seal_time / zhaban_count / limit_stat | ZT/ZB/STRONG（"涨停统计"样稿缩写 limit_stat） |
+| 最后封板时间 / 封板资金 / 连板数 | last_seal_time / seal_amount / limit_up_streak | 仅 ZT（连板数样稿缩写 lbc） |
 | 涨停价 / 涨速 / 振幅 | limit_price / speed / amplitude | ZB/ZT/PREV/STRONG 视池而定，空缺=缺列 |
-| 动态市盈率 / 封单资金 / 板上成交额 / 连续跌停 / 开板次数 | pe_ttm / **seal_order_amount**（注意：DT 口径是"封单资金"，≠ZT"封板资金" seal_amount，两个独立字段）/ board_amount / dt_streak / open_count | 仅 DT |
+| 动态市盈率 / 封单资金 / 板上成交额 / 连续跌停 / 开板次数 | pe_ttm / **seal_order_amount**（注意：DT 口径是"封单资金"，≠ZT"封板资金" seal_amount，两个独立字段）/ board_amount / limit_down_streak / open_count | 仅 DT |
 | 是否新高 / 量比 / 入选理由 | is_new_high / vol_ratio / select_reason | 仅 STRONG |
-| 昨日封板时间 / 昨日连板数 | prev_seal_time / prev_streak | 仅 PREV |
+| 昨日封板时间 / 昨日连板数 | prev_seal_time / prev_limit_up_streak | 仅 PREV |
 
-**池别字段覆盖声明（对拍修正）**：此前"六项关键字段全齐"表述不精确——**仅 ZT 六项全齐**；ZB 缺 最后封板时间/封板资金/连板数，DT 无连板概念（用 dt_streak），STRONG 仅涨停统计，PREV 全为"昨日"口径。`intraday_archive` 权威归档时非 ZT 成员缺列落 **NULL**（列允许 NULL，不造默认值）；原样 JSONB 快照（intraday_pool_snap）保留各池全量原样字段不受影响。
+**池别字段覆盖声明（对拍修正）**：此前"六项关键字段全齐"表述不精确——**仅 ZT 六项全齐**；ZB 缺 最后封板时间/封板资金/连板数，DT 无连板概念（用 limit_down_streak），STRONG 仅涨停统计，PREV 全为"昨日"口径。`intraday_archive` 权威归档时非 ZT 成员缺列落 **NULL**（列允许 NULL，不造默认值）；原样 JSONB 快照（intraday_pool_snap）保留各池全量原样字段不受影响。
 
 ### 14.3 轮询与限频（东财 2025-04 起 IP 级限频，封禁实测 ~5h）
 
@@ -1823,30 +1825,30 @@ intraday_event(                -- 状态 diff 出事件（本轮 vs 上轮）
   trade_date  DATE NOT NULL,
   ev_time     TIMESTAMP NOT NULL,
   ev_type     VARCHAR(20) NOT NULL,        -- ZT涨停 / ZB炸板 / HF回封 / DM大面 / MAXCHG最高板易主 / OPEN开板
-  st_code     VARCHAR(20),
-  st_name     VARCHAR(100),
-  detail      JSONB,                       -- {streak, seal_amount, zhaban_count, chg...}
+  code     VARCHAR(20),
+  name     VARCHAR(100),
+  detail      JSONB,                       -- {limit_up_streak, seal_amount, zhaban_count, change_pct...}
   pushed_dd   BOOLEAN DEFAULT FALSE        -- 是否已推钉钉
 );
 CREATE INDEX idx_ie_date_time ON intraday_event (trade_date, ev_time);
 
 intraday_archive(              -- 收盘归档（盘后权威表，词表升级的数据源）
   trade_date      DATE NOT NULL,
-  st_code         VARCHAR(20) NOT NULL,
+  code         VARCHAR(20) NOT NULL,
   first_seal_time VARCHAR(8),              -- 首次封板 HH:MM:SS
   last_seal_time  VARCHAR(8),
   zhaban_count    SMALLINT,                -- 炸板次数
   seal_amount     NUMERIC(16,2),           -- 封板资金（元）
-  streak          SMALLINT,                -- 连板数
+  limit_up_streak          SMALLINT,                -- 连板数
   pool            CHAR(6),                 -- 归属池（ZT/ZB/DT...）
-  UNIQUE (trade_date, st_code)
+  UNIQUE (trade_date, code)
 );
 
 intraday_replay(               -- 日维度整页渲染快照，一日一行（2026-10-02 定稿：读模型/渲染契约表）
   trade_date  DATE PRIMARY KEY,
   complete    BOOLEAN DEFAULT FALSE,        -- 15:10 归档补齐后置 true；盘中只含已采样点
   page        JSONB             -- 整页数据：{kpi_series:[{t:"09:30",zt:52,zb:18,dt:3,prem:1.66,adr:2.3,adv:3200,dec:1400,max_streak:5,gap_pct:1.2},...],
-                                --   ladder:[{code,name,streak,chg,seal,first,zha,stat}...],
+                                --   ladder:[{code,name,limit_up_streak,change_pct,seal_amount,first_seal_time,zhaban_count,limit_stat}...]（键名=命名字典全名，样稿简写 streak/chg/seal/first/zha/stat 为演示态 M7 对齐）,
                                 --   events:[{time,code,name,tg,txt}...], panels:{big_face,ding_talk,strategy_alerts, pools:[{pool,enabled,last_ok_at,rate_state}]}}
                                 --   schema = GET /intraday/summary 响应 schema（同一 Kotlin DTO 序列化）
                                 --   字段定稿（2026-10-03 字段级对拍）：adr=涨跌家数比（adv/dec 家数两槽并列，样稿旧样例值 2300 系演示数据误用成交额口径，M7 对齐）；max_streak=最高板、gap_pct=竞价缺口%（§14.6 快照）补槽位；
@@ -1922,21 +1924,21 @@ IntradayCollectJob（Python 侧轮询进程 or Kotlin 调度 + Python 接口）
 ```sql
 daily_note(
   id        BIGSERIAL PRIMARY KEY,
-  st_date   DATE NOT NULL,              -- 笔记归属交易日（按天维度组织的唯一键）
+  trade_date   DATE NOT NULL,              -- 笔记归属交易日（按天维度组织的唯一键）
   page      VARCHAR(20) NOT NULL CHECK (page IN ('SENTIMENT','STRATEGY','INTRADAY','KLINE','GENERAL')),
                                         -- 来源页：情绪周期表/策略控制台/盘中监控/K线复盘/笔记本直接记
-  st_code   VARCHAR(20),                -- 个股笔记挂靠（K线页记某票，NULL=市场级笔记）
+  code   VARCHAR(20),                -- 个股笔记挂靠（K线页记某票，NULL=市场级笔记）
   content   TEXT NOT NULL,
   created_at TIMESTAMP DEFAULT NOW(),
   updated_at TIMESTAMP,
-  UNIQUE (st_date, page, st_code)       -- 同日同页同股一条，编辑覆盖（updated_at 留痕）
+  UNIQUE (trade_date, page, code)       -- 同日同页同股一条，编辑覆盖（updated_at 留痕）
 )
 ```
 
-- **各页入口**：四个页面右下角悬浮「笔记」按钮 → 侧滑面板：上方列出当天该页已有笔记（可编辑），下方输入框新增；K线页新增时自动带上当前查看的个股（st_code 挂靠），面板内可切换"仅本股/全市场"
+- **各页入口**：四个页面右下角悬浮「笔记」按钮 → 侧滑面板：上方列出当天该页已有笔记（可编辑），下方输入框新增；K线页新增时自动带上当前查看的个股（code 挂靠），面板内可切换"仅本股/全市场"
 - **笔记本页**（notes 样稿 docs/design/notes-mock.html，侧边栏第 5 项）：按天倒序一节一天，节内按来源页分组展示（页签徽标），当天可跨页补记（page=GENERAL）；支持按来源页/个股过滤
 - **联动（轻量）**：盘中监控的实时事件流、大面预警提供「引用到笔记」（预填事件摘要，人工补充判断）；情绪周期表的当日评级/周期阶段可在笔记本节头自动带出（只读上下文，不代写）
-- **API**：`GET /api/v1/notes?date=&page=&code=`、`POST /api/v1/notes`（upsert by UNIQUE 键）、`DELETE /api/v1/notes/{id}`；样稿 notes-mock 简写字段与 DTO 映射（2026-10-03 对拍补）：`text↔content`、`d↔st_date`、`t↔created_at`、`p↔page`、`c↔st_code`——M7 前端按 DTO 全名消费。
+- **API**：`GET /api/v1/notes?date=&page=&code=`、`POST /api/v1/notes`（upsert by UNIQUE 键）、`DELETE /api/v1/notes/{id}`；样稿 notes-mock 简写字段与 DTO 映射（2026-10-03 对拍补）：`text↔content`、`d↔trade_date`、`t↔created_at`、`p↔page`、`c↔code`——M7 前端按 DTO 全名消费。
 - **排期**：Step 9（0.5-1 天，可与 Step 8 并行）：表+API（0.5 天）→ 四页悬浮面板+笔记本页（0.5 天）
 
 **全局日期联动（复盘模式，2026-10-03 用户确认，样稿已体现）**：情绪周期表是全站**日历骨架**——在周期表点任意日期列，全站进入"该日复盘模式"：
@@ -1963,13 +1965,13 @@ daily_note(
 | B6 | c90/c70 绝对 qfq 坐标列除权后过期（§12.4.1 曾自相矛盾，正文已改） | 除权除息 Job，扫到已处理自动跳过 | **AdjustCheckStep**（挂 DailyCollectJob 末尾）：探针检测单股除权（前后复权基准跳变 / 分红送配接口对照，方法 Step 3 实测定）→ 重拉该股 stock_history → 全历史重算该股 signal_daily 筹码 8 列（递推秒级）→ 更新 stock_info.adj_processed_until 水位；Job 每日扫描，水位已覆盖的股**自动跳过**。日 K **不加行级标记列**：除权是股级事件，行级列全表同值纯冗余，股级水位等价实现「扫到已处理就跳过」 |
 | B7 | 老股筹码递推无 D_0；递推桶驻留内存单日不可重算 | 筹码尽量算准 | warm-up 规则：回填起点首日 D_0 =「前 60 交易日成交量加权均价」单峰近似，**前 60 个交易日筹码 8 列=NULL → 自动走 B2 跳过+记录**，第 61 日起入条件（宁可标空不用不准的数）；signal_daily 重算只有**区间回放**一种入口（复用 §13.5 模式），Step 6 显式增加 market_daily/sector_daily/signal_daily 三表历史补算步骤 |
 | B8 | 正文「6 个池接口」vs 5 池名单 vs pool CHECK 5 值 | 最小改动 | **定稿 5 池**：ZT/ZB/DT/STRONG/PREV（正文已改）；次新池 sub_new（探针实测存在）不进盘中主链（30 天边界与昨停池重叠、次新波动特性另类），列为可选扩展，CHECK 不动 |
-| B9 | daily_note UNIQUE(st_date,page,st_code) 对 st_code=NULL 失效（PG NULL≠NULL） | 从数据库读出来编辑，不做插入覆盖 | schema 改 `UNIQUE NULLS NOT DISTINCT`（PG16）；API 语义定稿：编辑=读出已有行 → PUT 更新该行，前端面板**永不盲插**；POST 带 if_updated_at 乐观锁，冲突返 409 |
+| B9 | daily_note UNIQUE(trade_date,page,code) 对 code=NULL 失效（PG NULL≠NULL） | 从数据库读出来编辑，不做插入覆盖 | schema 改 `UNIQUE NULLS NOT DISTINCT`（PG16）；API 语义定稿：编辑=读出已有行 → PUT 更新该行，前端面板**永不盲插**；POST 带 if_updated_at 乐观锁，冲突返 409 |
 
 ### 17.2 应修级（本次一并定稿，落地时实施）
 
-**调度**：SorosJob/SignalPrecomputeJob 各加 21:30 兜底 cron（完成标记：big_trend 按 data_type+end_date、signal_daily 按当日行数判存在）｜ 链序强制 DailyCollect→Sentiment→Signal（SignalPrecomputeJob 监听 SentimentCycleJob 完成事件，禁止并行监听 DailyCollectCompleted）｜ ApplicationReadyEvent 启动对账：查最近 N 交易日派生表齐全性，缺则 computeFor 补算 ｜ data_coverage=PARTIAL 的派生行次日滚动重拉后**重算**（防线④扩容）；21:30 兜底跳过条件=「存在且非 PARTIAL」｜ 全部盘后 Job 入口统一 `if(!tradingCalendar.isTradingDay(today)) return`（含 21:30 兜底）｜ 交易日历 2025/2026 覆盖探针**升级为上线前阻塞检查** ｜ 盘中 diff 基准持久化（重启读 intraday_pool_snap 最近一轮做基准）+ intraday_event 按 (trade_date,ev_type,st_code,5min 窗口) 去重 ｜ 回填避开交易日 19:00-22:00（运维约束），streak 补算 SQL 加 `WHERE st_date<今日` ｜ dragon_cycle 加 partial UNIQUE：`CREATE UNIQUE INDEX uq_dragon_active ON dragon_cycle(st_code) WHERE end_date IS NULL` ｜ 15:10 归档步纳入 21:30 兜底体系（查 intraday_archive 当日行数，缺则补跑）
+**调度**：SorosJob/SignalPrecomputeJob 各加 21:30 兜底 cron（完成标记：big_trend 按 data_type+end_date、signal_daily 按当日行数判存在）｜ 链序强制 DailyCollect→Sentiment→Signal（SignalPrecomputeJob 监听 SentimentCycleJob 完成事件，禁止并行监听 DailyCollectCompleted）｜ ApplicationReadyEvent 启动对账：查最近 N 交易日派生表齐全性，缺则 computeFor 补算 ｜ data_coverage=PARTIAL 的派生行次日滚动重拉后**重算**（防线④扩容）；21:30 兜底跳过条件=「存在且非 PARTIAL」｜ 全部盘后 Job 入口统一 `if(!tradingCalendar.isTradingDay(today)) return`（含 21:30 兜底）｜ 交易日历 2025/2026 覆盖探针**升级为上线前阻塞检查** ｜ 盘中 diff 基准持久化（重启读 intraday_pool_snap 最近一轮做基准）+ intraday_event 按 (trade_date,ev_type,code,5min 窗口) 去重 ｜ 回填避开交易日 19:00-22:00（运维约束），limit_up_streak 补算 SQL 加 `WHERE trade_date<今日` ｜ dragon_cycle 加 partial UNIQUE：`CREATE UNIQUE INDEX uq_dragon_active ON dragon_cycle(code) WHERE end_date IS NULL` ｜ 15:10 归档步纳入 21:30 兜底体系（查 intraday_archive 当日行数，缺则补跑）
 
-**数据**：yst_promotion 晋级率分母定稿——昨日涨停今日停牌=**计入分母、视为未晋级**（与 §4.8 停牌断板一致）｜ 回填起点前延续的连板 streak=1 加 BOOT 标注（先例 dragon_cycle BOOT）｜ /stock-search SQL 加 `WHERE NOT is_st AND NOT delisted` ｜ 戴帽前历史行口径成文：保留入库、进入全市场回测 universe、断档按「无行=停牌」语义、摘帽反向同理
+**数据**：yst_promotion 晋级率分母定稿——昨日涨停今日停牌=**计入分母、视为未晋级**（与 §4.8 停牌断板一致）｜ 回填起点前延续的连板 limit_up_streak=1 加 BOOT 标注（先例 dragon_cycle BOOT）｜ /stock-search SQL 加 `WHERE NOT is_st AND NOT delisted` ｜ 戴帽前历史行口径成文：保留入库、进入全市场回测 universe、断档按「无行=停牌」语义、摘帽反向同理
 
 **策略**：Kelly 查询两段式——先取 LIVE/PAPER 近 60 笔，不足 20 笔补 BACKTEST 凑；**样本 <20 笔一律不出 Kelly 建议仓位**（面板显「样本不足」，样稿「30 笔减半」文案作废待改）｜ PAPER 定位=执行单页「模拟单」手动登记入口（一期无自动模拟盘，trade_ledger.source='PAPER' 不是死值但生产者是人）｜ dryRun 试跑结果**不落 trade_ledger**，backtest_result.is_dry 标记、结果对比默认过滤 DRY ｜ alert_enabled=策略级开关（挂 strategy_config），结果对比页按钮语义=「对当前版本配置启用」，多份结果同策略时不产生歧义 ｜ backtest_result 加 config_id / config_version / evaluated_universe(JSONB 本次实际求值股票名单) / is_dry
 
@@ -2012,7 +2014,7 @@ daily_note(
 2. 【中高】池接口中文字段→英文 DTO 映射表缺失 → §13 补全量映射表（以种子实测键名为准）
 3. 【中】"六项关键字段全齐"仅 ZT 成立；DT"封单资金"≠ZT"封板资金" → §13 池别覆盖声明 + 归档缺列 NULL 策略
 4. 【中】kpi_series 缺 max_streak/gap_pct 槽位；adr 定稿=涨跌家数比（adv/dec 并列；样稿 2300 系演示数据误用成交额口径）→ §14.4 已落
-5. 【中】大肉/大面名单键名 mock `{pct,streak}` vs DDL `{change_pct,limit_up_streak}` → **以 DDL 为准，样稿 M7 对齐**
+5. 【中】大肉/大面名单键名 mock `{pct,limit_up_streak}` vs DDL `{change_pct,limit_up_streak}` → **以 DDL 为准，样稿 M7 对齐**
 6. 【中】C4 kline 响应 schema 未定义、筹码 8 列名样稿简写、avg_cost 无来源 → §12.4.1 补完整 schema + `avg_cost=close/(1+cost_dev/100)` 派生公式（不落列）
 7. 【低】样稿钉钉混在 events（tg='DD'）vs PLAN 独立 panels.ding_talk → **以 PLAN 为准，样稿 M7 对齐**；notes 简写映射已记 §12.9
 
