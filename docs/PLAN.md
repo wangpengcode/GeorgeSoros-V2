@@ -1459,6 +1459,7 @@ signal_daily(           -- 个股×日，只存"必须全市场排序才得出"�
 - **受控词表**：reason 只能由该股自己的 industry/concept_boards 词汇组合而成，禁自由发挥——保证可比较、可展示一致；板块归属条件本来就用结构化字段，reason 定位 = 复盘展示 + 人工研究，**不进 L2 条件词表**。
 - **诚实边界**：输入只有行情与板块结构，产出的是"题材归类式归因"（这只创新药业股涨停 → 归创新药主线），不是 THS 问财那种"ESMO 年会催化"事件级归因（那需要新闻/公告源，超本期范围）；页面展示标"系统生成"。
 - **失败不阻塞**：每日涨停 ~50-150 家，每日 1-2 次调用（主力 glm-5.3-flash，兜底 deepseek-v4-flash），schema 校验失败重试 1 次，仍失败 reason=null，不影响握手链；重跑按日期覆盖（幂等）。
+- **LLM 网关探针已实测（2026-10-03，网关 `llm.moontontech.net` /v1/messages Anthropic 兼容）**：①主备两模型均能产出受控词表 JSON 且解析通过 ✓ ②**两模型均默认输出 thinking 块且排在 text 前——解析必须按 `type=="text"` 过滤取块，禁止取 content[0]** ③glm **始终思考不可关闭**（报错明示），不传 thinking 参数时 500 max_tokens 被思考吃光正文截断（stop=max_tokens）→ **归因调用必须显式传 `thinking.budget_tokens`（实测 1024 生效，总预算 600 即完成）或 max_tokens≥2000 兜底** ④deepseek 兜底 500 预算即可，更省 ⑤网关错误形如 `{type:"error",error:{type:"invalid_request_error",code:...}}`，重试分流按 error.type 判断（可重试的 5xx/超时 vs 不可重试的 4xx 参数错）。
 - **探针**：验证主力模型是否有当日实时信息能力——若有，归因可升级为事件级（记 §14.7 同批探针）。
 
 ### 12.5 绩效与可复现
