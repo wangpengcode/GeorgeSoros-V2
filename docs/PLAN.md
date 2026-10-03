@@ -1446,6 +1446,8 @@ signal_daily(           -- 个股×日，只存"必须全市场排序才得出"�
 - market_env/limit_ecology/sector 三组条件的查询与情绪网页、涨停池接口共用这份数据，单一事实来源。
 - 精度折损已标注：炸板=日线近似（盘中触及涨停未封）、昨涨停溢价按收盘价口径。
 
+**筹码分布自算（2026-10-03 穿透定稿，路径 A）**：`signal_daily` 追加 6 列 profit_ratio（获利盘%）、cost_dev（成本偏离%）、c90_low/high/conc、c70_low/high/conc——不存分布曲线本身（~50MB/年）。递推 `D_t = D_{t-1}×(1−tr) + tr×triangular(qfq_high, qfq_low, qfq_close)`，价格坐标全程 qfq、180 桶。穿透解决的两个口径坑：①不用 amount/volume 算形状峰（不复权坐标与 qfq 混杂），峰=qfq_close；②不落绝对平均成本（qfq 重对基会漂移），落 cost_dev=平均成本/现价−1（比率对复权平移免疫）。边界处理：一字板 ±0.5% 扁平兜底、换手率 clamp ≤1、停牌无 bar 筹码冻结、上市首日全量换手。计算：全市场全量重算 ≈32 亿次浮点运算（5400 股×~2000 日×~300 桶）JVM 秒~分钟级，桶状态驻留内存不持久化，增量每日 O(股×桶)。东财 stock_cyq_em 源码级探针（docs/research/chip-cyq-probe.md）：**它不是服务端接口，是 akshare 本地跑东财前端 JS 的 150 档三角分布+换手衰减递推，且只返回 90 个交易日**——与我们路径 A 同族模型，无权威性优势，加 mini_racer 依赖与 WAF 对抗（TLS 指纹拦截、30+ 次触发 IP 封禁）→ 不进主链；对拍重定位=同 fqt=qfq 口径下校准峰位/衰减参数（预期同族差异 <2%），非真值校验。
+
 **复盘对标（2026-10-02 拆解同花顺「热点复盘」长图，ozone summary_image 接口）**：图中信息 → 本方案落点——涨停/跌停/炸板家数、总溢价幅 → market_daily；分级晋级率（一进二/二进三…）→ yst_promotion（本次补入）；是否首板/连板数 → limit_up_streak 词表组；涨停时间早→晚 → intraday_archive.first_seal_time（§十四，含秒级）；板块分组与板块涨停家数 → sector_daily。
 
 **涨停原因归因（2026-10-02 定稿 ② LLM 生成，用户确认）**：SignalPrecomputeJob 末步加 AttributionStep——输入当日 limit_up_list + sector_daily + stock_info 板块归属（industry/concept_boards），单次批量 prompt（全涨停名单一次调用），输出 JSON schema 校验后落库：`limit_up_list[].reason`（个股题材标签串）+ `sector_daily.driver_text`（板块主线一句话）。要点：
@@ -1526,7 +1528,7 @@ signals:
 
 #### 12.7.1 策略条件词表全量定稿（2026-10-02，借鉴经典量化 + A股超短口径）
 
-信号源白名单从 5 个扩到 **12 组**，全部可从一期数据底座派生（stock_history/limit_up_streak/limit_down_streak/sentiment_cycle/dragon_cycle/big_trend/stock_inflection_point/index_history/stock_info/concept_boards/stock_fundamentals）；运算符复用 equals/between/gte/lte/within_days。
+信号源白名单从 5 个扩到 **13 组**，全部可从一期数据底座派生（stock_history/limit_up_streak/limit_down_streak/sentiment_cycle/dragon_cycle/big_trend/stock_inflection_point/index_history/stock_info/concept_boards/stock_fundamentals）；运算符复用 equals/between/gte/lte/within_days。
 
 | # | 信号源 | 字段/条件 | 数据落点 |
 |---|--------|----------|---------|
@@ -1535,13 +1537,14 @@ signals:
 | 3 | limit_up_streak | between/gte | stock_history 派生列 |
 | 4 | sentiment_cycle | 术语标签 label within_days（反包/大肉/大面/止跌反核/晋级/断板） | §4.9 术语判定 |
 | 5 | price | drop_below pct（固定止损） | 回测内部 |
-| 6 | **price_action** | N日新高/新低、偏离 MA N%、开盘涨幅 gap（open vs 昨收）、振幅区间 | stock_history 日线派生 |
+| 6 | **price_action** | N日新高/新低、偏离 MA N%、开盘涨幅 gap（open vs 昨收）、振幅区间、MACD 金叉死叉（DIF/DEA/柱，EMA12/26/9，2026-10-03 补，B 类现算） | stock_history 日线派生 |
 | 7 | **volume** | 量比≥N、换手率区间、连续 N 日放量/缩量 | stock_history（量/流通股本） |
 | 8 | **limit_ecology** | 昨日涨停今日溢价、梯队排名（当前板数当日名次/是否最高板）、炸板（日线近似：high 触及涨停价但 close 未封，标注近似口径）、最高板归属 | stock_history 全市场聚合 |
 | 9 | **sector** | 同板块今日涨停家数≥N、板块内板数排名、板块涨幅榜前列 | stock_info 两 JSON 数组展开（jsonb_array_elements）+ sector_daily 聚合（§12.4.1/§4.8） |
 | 10 | **market_env** | 指数在 MA N 上/下、指数 N 日涨跌幅、涨跌家数比、昨日大面家数≥N | index_history + 全市场聚合 |
 | 11 | **stock_attr** | 流通市值区间、股价绝对值区间、上市天数（次新判定）、距前高 N% | stock_info + stock_fundamentals + stock_history |
 | 12 | **cycle_stage** | 周期阶段 equals 冰点/发酵/主升/高潮/退潮/混沌、龙头状态 RISING/BROKEN/DEAD、龙头断板后天数 | sentiment_cycle 标注升级为条件源 + dragon_cycle |
+| 13 | **chip**（2026-10-03 补，路径 A 自算定稿） | 获利盘比例 gte/lte/between、成本偏离% between、90%/70% 成本集中度区间 | signal_daily 筹码派生列（§12.4.1 递推设计），A 类直读 |
 
 **周期阶段升级说明**：冰点/退潮等原来只是 sentiment_cycle 的行内标注（§4.9），本词表将其升级为可用条件——使「冰点期买首板、主升期打高度龙、退潮期高低切」这类用户口径策略可直接用 YAML 表达（冰点首板= cycle_stage equals 冰点 within 2 + limit_up_streak equals 1 + stock_attr 低股价）。
 
@@ -1584,6 +1587,7 @@ signals:
 
 ```sql
 strategy_config(id, name UNIQUE, yaml TEXT, version, status DRAFT/ACTIVE/RETIRED,
+                alert_enabled BOOLEAN DEFAULT FALSE,   -- 盘中开仓预警开关（结果对比页开启，§14.9）
                 created_by, created_at, note)
 strategy_config_history(id, config_id, yaml, version, edited_at)  -- 每次保存留痕，可回滚可 diff
 ```
@@ -1592,7 +1596,8 @@ strategy_config_history(id, config_id, yaml, version, edited_at)  -- 每次保�
 
 **回测执行流（防御性）**：保存(校验：白名单/名称/条件完整性/日期区间) → DRAFT → 「试跑」固定先跑 60 交易日冒烟（配置错误 60 天内暴露，不白等 5 分钟全量）→ 通过才解锁「正式回测」→ `POST /api/v1/backtests` 异步 Job → 前端轮询状态 → 完成跳结果页。
 
-**结果页**：结果表（勾选 2 条进入对比）→ 详情（SVG 净值曲线 策略 vs 沪深300、指标卡、成交明细节选，完整明细落库并导入 trade_ledger(BACKTEST) 供 Kelly）→ 两两 diff 对比（优值高亮，params 已留档可复现）。
+**结果页**：结果表（勾选 2 条进入对比）→ 详情（SVG 净值曲线 策略 vs 沪深300 vs **等权基准**（同策略、等权仓位——直接检验 Kelly 链有无增益）、指标卡、成交明细节选，完整明细落库并导入 trade_ledger(BACKTEST) 供 Kelly）→ 两两 diff 对比（优值高亮，params 已留档可复现）。
+**指标卡 Kelly 组（2026-10-02 补，用户要求显性化）**：p（胜率）、b（盈亏比）、滚动 f*、样本数（已平仓笔数）、建议仓位%（f*/2 clamp 后）——与 §12.3 公式同源直读 trade_ledger；对比页 diff 含 Kelly 组；「启用盘中预警」按钮挂结果对比页（§14.9 闭环入口）。
 
 **接口（二期，追加到 API 清单）**：
 ```
@@ -1751,7 +1756,7 @@ IntradaySource 接口（Python 侧）
 - 交易时段判定：trading_calendar + 9:15-11:30 / 13:00-15:00 窗口，午休/非交易日不空转
 ```
 
-### 14.4 实时层表结构（新增三表）
+### 14.4 实时层表结构（新增四表：过程表 snap/event + 权威归档 archive + 渲染快照 replay）
 
 ```sql
 intraday_pool_snap(            -- 每轮池快照（追加，原始轮次保留 3 天供回溯调试）
@@ -1783,6 +1788,20 @@ intraday_archive(              -- 收盘归档（盘后权威表，词表升级�
   pool            CHAR(6),                 -- 归属池（ZT/ZB/DT...）
   UNIQUE (trade_date, st_code)
 );
+
+intraday_replay(               -- 日维度整页渲染快照，一日一行（2026-10-02 定稿：读模型/渲染契约表）
+  trade_date  DATE PRIMARY KEY,
+  complete    BOOLEAN DEFAULT FALSE,        -- 15:10 归档补齐后置 true；盘中只含已采样点
+  page        JSONB             -- 整页数据：{kpi_series:[{t:"09:30",zt:52,zb:18,dt:3,prem:1.66,adr:2300},...],
+                                --   ladder:[{code,name,streak,chg,seal,first,zha,stat}...],
+                                --   events:[...], panels:{big_face,ding_talk,strategy_alerts}}
+                                --   schema = GET /intraday/summary 响应 schema（同一 Kotlin DTO 序列化）
+);
+-- 用法与保证：回放 = WHERE trade_date=? 一次查询零 join，前端拿到即渲染（实时页/回放页同一渲染逻辑）；
+-- 盘中每 90s 采样点追加进当日行 kpi_series（240 次小 upsert，进程重启曲线不丢），
+-- 15:10 IntradayArchiveStep 归档时补齐 ladder/events/panels 并置 complete=true；
+-- 归档后自校验：page 反序列化 + schema 校验 + 同源对拍（ladder 条数=intraday_archive 当日行数、
+-- kpi 点数完整），失败钉钉告警——保证落库即渲染。量级 ~400KB/日 → 年 ~100MB，随 stock_history 同速增长可接受。
 ```
 
 **长历史自建（30 天窗口对策）**：每日 15:10 IntradayArchiveStep 用 `date=当日` 重新拉 6 个池接口做**权威归档**（池接口收盘后仍可查，比盘中最后一轮更稳）——自上线日起逐日积累封板时间/炸板/封单历史；**上线前的历史拉不到**（诚实边界，报告标注数据起点）。
@@ -1792,6 +1811,8 @@ intraday_archive(              -- 收盘归档（盘后权威表，词表升级�
 1. **实时页** `intraday.html`（样稿 docs/design/intraday-monitor-mock.html）：前端每 2-3s 轮询 `GET /api/v1/intraday/summary`（一次聚合：KPI+梯队+事件流+溢价曲线+大面预警+钉钉记录，无 WebSocket 基建）
 2. **钉钉盘中预警**（事件驱动，防刷屏）：龙头(最高板)炸板 / 高位股大面(强势池成员现价≤-5%) / 最高板易主 → 推；普通涨停不推
 3. **收盘归档 → 词表升级**：intraday_archive 落库后，§12.7.1 limit_ecology 信号源新增可用条件 first_seal_time（早封/晚封板）、zhaban_count、seal_amount——**回测口径自动升级**，数据起点=V2 上线日
+4. **历史复盘回放**（2026-10-02 定稿，用户需求）：intraday.html 正式版加日期选择器——选历史日期即切回放模式，数据源 = `intraday_replay` **单表单查询**（page JSONB 与实时 /summary 同一 DTO，渲染逻辑完全复用，落库前已过渲染自校验）；样稿里的演示时钟即回放引擎原型（时钟换成日期驱动）。当日盘后也可重放当日全貌
+5. **策略开仓预警**（2026-10-02 定稿）：alert_enabled 策略盘中求值，命中即 ALERT 事件 + Kelly 建议仓位推送（§14.9）
 
 ### 14.6 交易时段与调度
 
@@ -1809,3 +1830,21 @@ spot 的 total=59271 混入板块行疑点 / 盘中 bid_ask 五档有值性 / 5 
 ### 14.8 排期
 
 新增 **Step 7：盘中实时模块（3-4 天）**：Python 源+限频轮询 Job（1 天）→ 三表+事件 diff+归档（1 天）→ intraday.html+钉钉预警（1 天）→ 探针清单实测+联调（0.5-1 天）。
+
+### 14.9 盘中策略开仓预警（2026-10-02 定稿；依赖回测+策略控制台落地，Step 8/二期启用）
+
+**闭环**：结果对比页确认策略表现优 → 「启用盘中预警」（strategy_config.alert_enabled=true）→ 盘中每轮池/快照更新后，StrategyAlertEvaluator 对**涨停池∪候选池（~250 只）**求值 alert_enabled 策略的 entry 条件树（启动时已编译，§12.7）→ 命中 → `intraday_event(ev_type=ALERT, detail={strategy_id, 命中条件摘要, kelly:{仓位%, 整手股数, 置信度}})` → 钉钉推送 + intraday.html「策略预警」面板 + intraday_replay.page.alerts（回放可见当日触发史）。
+
+**数据口径穿透（诚实边界，提醒必须带标注）**：
+| 条件类别 | 盘中口径 | 权威性 |
+|---|---|---|
+| 昨日口径（sentiment_cycle/market_env/limit_ecology/sector/连板数） | 直接读预计算表 | 权威 ✓ |
+| 当日实时（price/volume/涨停判定） | 快照+涨停池近似（15-90s 粒度） | 预警级 |
+| 日线技术（MA/N 日新高等） | 实时价近似当日 bar | 预警级（可选 14:45 后才求值，压伪信号） |
+
+- 提醒文案统一带「**盘中预警，收盘确认**」——日频策略的权威判定在收盘 bar，盘中只是预预警；收盘后 PositionAdvisor 执行单（§12.8）才是正式单，两者同一 Kelly 链。
+- **预警带仓位不带裸信号**：detail.kelly 走 PositionAdvisor 同链（trade_ledger 滚动 60 笔 → f* → 半 Kelly → clamp 25%）——用户看到的直接是「策略 X + 股票 Y 命中〈冰点+首板〉，建议仓位 8%（400 股），置信度中」，可执行。
+- **防刷屏**：每策略×每股×每日 ≤1 条；条件失效（炸板/回落）不撤回只追加 FOLLOWUP 事件；钉钉只推 alert_enabled 策略，普通池事件照旧走 §14.5 原规则。
+- **非自动交易**：V2 不对接券商（§12.8 纪律不变），预警=建议+人工执行。
+- **性能**：策略个位数~几十 × 候选 ~250 只 × 已编译条件树，每轮毫秒级；挂在 IntradayCollectJob 轮询后，独立故障域（不进 §13.4 握手链），Evaluator 挂掉只影响预警不影响采集。
+- **新增排期 Step 8（1-1.5 天）**：Evaluator+条件映射（0.5 天）→ 钉钉+面板+replay.alerts（0.5 天）→ 伪信号实测调参（14:45 求值开关，0.5 天）。

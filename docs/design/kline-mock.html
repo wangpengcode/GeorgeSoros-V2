@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>K线复现样稿</title>
+<style>
+:root{
+  --bg:#0e1218;--panel:#151b24;--panel2:#1a2230;--line:#263140;
+  --fg:#d8dee9;--muted:#7d8b9e;--faint:#525f70;
+  --up:#e5484d;--down:#2fbf71;--gold:#e2b13c;--blue:#5b9dd9;--purple:#b48ce8;
+  font-size:14px;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--fg);font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
+  padding:16px 20px 40px;line-height:1.5}
+h1{font-size:17px;font-weight:600;letter-spacing:.5px}
+.sub{color:var(--muted);font-size:12px;margin-top:2px}
+.head{display:flex;justify-content:space-between;align-items:flex-end;gap:12px;flex-wrap:wrap;
+  border-bottom:1px solid var(--line);padding-bottom:10px;margin-bottom:12px}
+.quote{display:flex;gap:14px;align-items:baseline;flex-wrap:wrap}
+.q-name{font-size:15px;font-weight:600}
+.q-code{color:var(--muted);font-size:12px}
+.q-price{font-size:22px;font-weight:700;font-variant-numeric:tabular-nums}
+.q-chg{font-size:13px;font-weight:600;font-variant-numeric:tabular-nums}
+.up{color:var(--up)}.down{color:var(--down)}.gold{color:var(--gold)}.muted{color:var(--muted)}
+
+.controls{display:flex;gap:10px;align-items:center;margin-bottom:10px;flex-wrap:wrap}
+.controls label{font-size:12px;color:var(--muted)}
+input[type=range]{flex:1;min-width:200px;accent-color:var(--gold)}
+.day-label{font-size:12px;color:var(--gold);font-variant-numeric:tabular-nums;min-width:86px}
+
+.layout{display:grid;grid-template-columns:1fr 268px;gap:12px}
+@media(max-width:920px){.layout{grid-template-columns:1fr}}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:10px 12px}
+.panel h3{font-size:12px;font-weight:600;color:var(--muted);letter-spacing:1px;margin-bottom:6px}
+.charts{min-width:0}
+svg{display:block;width:100%;height:auto}
+
+.legend{display:flex;gap:14px;flex-wrap:wrap;font-size:11px;color:var(--muted);margin-bottom:4px}
+.legend i{display:inline-block;width:14px;height:2px;vertical-align:middle;margin-right:4px;border-radius:1px}
+.ma5{background:var(--gold)}.ma10{background:var(--blue)}.ma20{background:var(--purple)}.ma60{background:#c8d0dc}
+
+.infobar{font-size:11.5px;color:var(--muted);background:var(--panel2);border:1px solid var(--line);
+  border-radius:6px;padding:6px 10px;margin-bottom:10px;font-variant-numeric:tabular-nums;
+  display:flex;gap:14px;flex-wrap:wrap}
+.infobar b{color:var(--fg);font-weight:600}
+
+.chip-metrics{margin-top:10px;display:grid;grid-template-columns:1fr 1fr;gap:6px 10px;font-size:12px}
+.chip-metrics .k{color:var(--muted)}
+.chip-metrics .v{text-align:right;font-variant-numeric:tabular-nums;font-weight:600}
+.meter{grid-column:1/-1;height:8px;background:var(--down);border-radius:4px;overflow:hidden;margin-top:2px}
+.meter>i{display:block;height:100%;background:var(--up)}
+
+.note{margin-top:14px;font-size:11.5px;color:var(--faint);border-top:1px dashed var(--line);padding-top:8px}
+.note code{color:var(--muted);background:var(--panel2);padding:1px 5px;border-radius:4px}
+</style>
+</head>
+<body>
+
+<div class="head">
+  <div>
+    <h1>K线复现样稿 · 个股详情</h1>
+    <div class="sub">合成行情（确定性随机游走），指标公式真实：MA / MACD / 筹码递推同落地方案 · 全指标同 qfq 坐标系</div>
+  </div>
+  <div class="quote">
+    <span class="q-name">示例股份 <span class="q-code">600000</span></span>
+    <span class="q-price" id="qPrice">--</span>
+    <span class="q-chg" id="qChg">--</span>
+  </div>
+</div>
+
+<div class="controls">
+  <label>回放日</label>
+  <input type="range" id="daySlider" min="40" max="149" value="149">
+  <span class="day-label" id="dayLabel"></span>
+</div>
+
+<div class="infobar" id="infobar"></div>
+
+<div class="layout">
+  <div class="charts">
+    <div class="panel">
+      <div class="legend">
+        <span><i class="ma5"></i>MA5 <b id="vMA5" class="gold">--</b></span>
+        <span><i class="ma10"></i>MA10 <b id="vMA10" style="color:var(--blue)">--</b></span>
+        <span><i class="ma20"></i>MA20 <b id="vMA20" style="color:var(--purple)">--</b></span>
+        <span><i class="ma60"></i>MA60 <b id="vMA60" style="color:#c8d0dc">--</b></span>
+      </div>
+      <svg id="svgK" viewBox="0 0 1000 340"></svg>
+    </div>
+    <div class="panel" style="margin-top:10px">
+      <h3>成交量</h3>
+      <svg id="svgV" viewBox="0 0 1000 90"></svg>
+    </div>
+    <div class="panel" style="margin-top:10px">
+      <h3>MACD（EMA12 / EMA26 / DEA9）</h3>
+      <svg id="svgM" viewBox="0 0 1000 120"></svg>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h3>筹码分布 <span style="color:var(--faint)">（截至回放日递推）</span></h3>
+    <svg id="svgC" viewBox="0 0 240 340"></svg>
+    <div class="chip-metrics">
+      <span class="k">获利比例</span><span class="v up" id="mProfit">--</span>
+      <span class="k">平均成本</span><span class="v" id="mAvg">--</span>
+      <span class="k">成本偏离</span><span class="v" id="mDev">--</span>
+      <span class="k">90%成本区间</span><span class="v" id="mR90">--</span>
+      <span class="k">90%集中度</span><span class="v" id="mC90">--</span>
+      <span class="k">70%成本区间</span><span class="v" id="mR70">--</span>
+      <span class="k">70%集中度</span><span class="v" id="mC70">--</span>
+      <div class="meter"><i id="mMeter" style="width:0%"></i></div>
+      <span class="k">套牢盘</span><span class="v down" id="mTrap" style="grid-column:1/-1;text-align:left">--</span>
+    </div>
+  </div>
+</div>
+
+<div class="note">
+  口径：<code>MA/MACD/筹码全部基于同一 qfq close 序列</code>，除权日无指标断层；
+  筹码递推 <code>D_t = D_{t-1}×(1−tr) + tr×tri(high,low,close)</code>（tr=换手率 clamp≤1，一字板 ±0.5% 扁平兜底）；
+  集中度 = (90成本高−90成本低)/(90成本高+90成本低)，东财同口径可对拍。
+  拖动「回放日」滑杆，筹码分布逐日递推重建（演示 SignalPrecomputeJob 的递推过程）。
+</div>
+
+<script>
+"use strict";
+/* ---------- 确定性随机数据 ---------- */
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;var t=Math.imul(a^a>>>15,1|a);
+  t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296}}
+const rnd=mulberry32(20261003);
+function randn(){let u=0,v=0;while(u===0)u=rnd();while(v===0)v=rnd();
+  return Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*v)}
+
+const DAYS=150;
+// 阶段行情：趋势/盘整交替，让 MA/MACD 形态真实
+const regimes=[[30,.004,.018],[22,-.003,.022],[35,.008,.026],[18,-.005,.020],[45,.005,.024]];
+const bars=[];let close=12.4;
+let ri=0,rd=regimes[0];
+for(let i=0;i<DAYS;i++){
+  if(i===regimes.slice(0,ri+1).reduce((s,r)=>s+r[0],0)){ri++;rd=regimes[Math.min(ri,regimes.length-1)]}
+  const drift=rd[1],vol=rd[2];
+  const prevClose=close;
+  const open=prevClose*(1+randn()*vol*.3);
+  close=prevClose*(1+drift+randn()*vol);
+  const hi=Math.max(open,close)*(1+Math.abs(randn())*vol*.45);
+  const lo=Math.min(open,close)*(1-Math.abs(randn())*vol*.45);
+  const chg=(close/prevClose-1)*100;
+  const volm=(3.2e6*(1+Math.abs(chg)*.18)*(0.7+rnd()*0.8))|0;      // 股
+  const amount=volm*close;
+  const turnover=Math.min(19,Math.abs(chg)*.7+1.2+rnd()*4);        // %
+  bars.push({open,high:hi,low:lo,close,chg,vol:volm,amount,turnover});
+}
+// 交易日序列
+const dates=[];let d=new Date(2026,2,2);
+while(dates.length<DAYS){const w=d.getDay();if(w!==0&&w!==6)dates.push(d.toISOString().slice(0,10));d.setDate(d.getDate()+1)}
+const fmtD=s=>s.slice(5).replace("-","/");
+
+/* ---------- 指标公式（与落地同源） ---------- */
+function SMA(arr,n){return arr.map((_,i)=>i<n-1?null:arr.slice(i-n+1,i+1).reduce((a,b)=>a+b,0)/n)}
+function EMA(arr,n){const k=2/(n+1);let e=arr[0];return arr.map(v=>{e=k*v+(1-k)*e;return e})}
+const closes=bars.map(b=>b.close);
+const MA5=SMA(closes,5),MA10=SMA(closes,10),MA20=SMA(closes,20),MA60=SMA(closes,60);
+const dif=EMA(closes,12).map((v,i)=>v-EMA(closes,26)[i]);
+const dea=EMA(dif,9);
+const hist=dif.map((v,i)=>(v-dea[i])*2);
+
+/* ---------- 筹码递推（路径 A） ---------- */
+const PB=200;
+const gMin=Math.min(...bars.map(b=>b.low))*.97, gMax=Math.max(...bars.map(b=>b.high))*1.03;
+const bW=(gMax-gMin)/PB, bMid=Array.from({length:PB},(_,i)=>gMin+(i+.5)*bW);
+// 三角形分布：峰=close，底边 [low,high]；一字板兜底 ±0.5%
+function shape(b){const lo=Math.min(b.low,b.close*.995),hi=Math.max(b.high,b.close*1.005);
+  const w=new Float64Array(PB);let s=0;
+  for(let i=0;i<PB;i++){const p=bMid[i];let x=0;
+    if(p>=lo&&p<=hi){x=p<=b.close?(p-lo)/Math.max(1e-9,b.close-lo):(hi-p)/Math.max(1e-9,hi-b.close)}
+    w[i]=x;s+=x}
+  if(s>0)for(let i=0;i<PB;i++)w[i]/=s;return w}
+function chipAt(day){let dist=new Float64Array(PB);
+  for(let t=0;t<=day;t++){const tr=Math.min(bars[t].turnover/100,1);const sh=shape(bars[t]);
+    for(let i=0;i<PB;i++)dist[i]=dist[i]*(1-tr)+tr*sh[i]}
+  return dist}
+function chipStats(dist,close){let total=0,wsum=0,profit=0,cum=0;
+  const marks={p10:null,p25:null,p75:null,p90:null};const need=[10,25,75,90];
+  for(let i=0;i<PB;i++){total+=dist[i];wsum+=bMid[i]*dist[i];if(bMid[i]<close)profit+=dist[i]}
+  for(let i=0;i<PB;i++){cum+=dist[i];const pct=cum/total*100;
+    for(const nd of need)if(marks["p"+nd]===null&&pct>=nd)marks["p"+nd]=bMid[i]}
+  const avg=wsum/total;
+  return{profit,avg,dev:avg/close-1,
+    r90:[marks.p10,marks.p90],c90:(marks.p90-marks.p10)/(marks.p90+marks.p10)*100,
+    r70:[marks.p25,marks.p75],c70:(marks.p75-marks.p25)/(marks.p75+marks.p25)*100}}
+
+/* ---------- SVG 绘制 ---------- */
+const NS="http://www.w3.org/2000/svg";
+function el(tag,attrs,parent){const e=document.createElementNS(NS,tag);
+  for(const k in attrs)e.setAttribute(k,attrs[k]);if(parent)parent.appendChild(e);return e}
+function clear(svg){while(svg.firstChild)svg.removeChild(svg.firstChild);return svg}
+
+const W=1000,xStep=W/DAYS,padL=6,padR=64;
+const pMin=Math.min(...bars.map(b=>b.low))*.985,pMax=Math.max(...bars.map(b=>b.high))*1.015;
+const yP=p=>padL*0+(340-18)*(1-(p-pMin)/(pMax-pMin))+6;
+const xC=i=>i*xStep+xStep/2;
+function gridY(svg,fnY){for(let g=0;g<=5;g++){const p=pMin+(pMax-pMin)*g/5,y=fnY(p);
+  el("line",{x1:0,y1:y,x2:W-padR+8,y2:y,stroke:"var(--line)","stroke-width":.6},svg);
+  el("text",{x:W-padR+12,y:y+3.5,fill:"var(--faint)","font-size":10},svg).textContent=p.toFixed(2)}}
+function dateAxis(svg,y0){for(let i=0;i<DAYS;i+=25)
+  el("text",{x:xC(i),y:y0,fill:"var(--faint)","font-size":10,"text-anchor":"middle"},svg).textContent=fmtD(dates[i])}
+
+function drawK(day){const svg=clear(document.getElementById("svgK"));
+  gridY(svg,yP);dateAxis(svg,332);
+  for(let i=0;i<=day;i++){const b=bars[i],up=b.close>=b.open,c=up?"var(--up)":"var(--down)",x=xC(i);
+    el("line",{x1:x,y1:yP(b.high),x2:x,y2:yP(b.low),stroke:c,"stroke-width":1},svg);
+    const yO=yP(b.open),yC=yP(b.close);
+    el("rect",{x:x-xStep*.32,y:Math.min(yO,yC),width:xStep*.64,height:Math.max(1,Math.abs(yO-yC)),
+      fill:up?"none":c,stroke:c,"stroke-width":1},svg)}
+  const lines=[[MA5,"var(--gold)"],[MA10,"var(--blue)"],[MA20,"var(--purple)"],[MA60,"#c8d0dc"]];
+  for(const[arr,c]of lines){let pts="";
+    for(let i=0;i<=day;i++)if(arr[i]!=null)pts+=`${xC(i)},${yP(arr[i])} `;
+    el("polyline",{points:pts,fill:"none",stroke:c,"stroke-width":1.1},svg)}
+  const cp=bars[day].close;
+  el("line",{x1:0,y1:yP(cp),x2:W-padR+8,y2:yP(cp),stroke:"var(--gold)","stroke-width":.8,"stroke-dasharray":"4 3"},svg);
+  el("rect",{x:W-padR+2,y:yP(cp)-8,width:60,height:16,rx:3,fill:"var(--gold)"},svg);
+  el("text",{x:W-padR+32,y:yP(cp)+3.5,fill:"#0e1218","font-size":10,"text-anchor":"middle","font-weight":"700"},svg)
+    .textContent=cp.toFixed(2)}
+
+function drawV(day){const svg=clear(document.getElementById("svgV"));
+  const vmax=Math.max(...bars.slice(0,day+1).map(b=>b.vol));
+  for(let i=0;i<=day;i++){const b=bars[i],h=b.vol/vmax*72;
+    el("rect",{x:xC(i)-xStep*.32,y:84-h,width:xStep*.64,height:h,
+      fill:b.close>=b.open?"var(--up)":"var(--down)",opacity:.75},svg)}
+  dateAxis(svg,89)}
+
+function drawM(day){const svg=clear(document.getElementById("svgM"));
+  const vis=dif.slice(0,day+1).concat(dea.slice(0,day+1),hist.slice(0,day+1));
+  const m=Math.max(...vis.map(Math.abs))*1.15||1;
+  const yV=v=>60-(v/m)*48;
+  el("line",{x1:0,y1:yV(0),x2:W-padR+8,y2:yV(0),stroke:"var(--line)","stroke-width":.6},svg);
+  for(let i=0;i<=day;i++){const v=hist[i];
+    el("rect",{x:xC(i)-xStep*.3,y:Math.min(yV(0),yV(v)),width:xStep*.6,height:Math.max(.8,Math.abs(yV(v)-yV(0))),
+      fill:v>=0?"var(--up)":"var(--down)",opacity:.7},svg)}
+  for(const[arr,c]of[[dif,"var(--gold)"],[dea,"var(--blue)"]]){let pts="";
+    for(let i=0;i<=day;i++)pts+=`${xC(i)},${yV(arr[i])} `;
+    el("polyline",{points:pts,fill:"none",stroke:c,"stroke-width":1.1},svg)}
+  el("text",{x:4,y:12,fill:"var(--faint)","font-size":10},svg)
+    .textContent=`DIF ${dif[day].toFixed(3)}  DEA ${dea[day].toFixed(3)}  MACD ${hist[day].toFixed(3)}`}
+
+function drawChip(day){const svg=clear(document.getElementById("svgC"));
+  const dist=chipAt(day),close=bars[day].close;
+  const st=chipStats(dist,close);
+  const wMax=Math.max(...dist)*1.05,cw=240-46;
+  for(let g=0;g<=4;g++){const p=pMin+(pMax-pMin)*g/4,y=yP(p);
+    el("line",{x1:36,y1:y,x2:236,y2:y,stroke:"var(--line)","stroke-width":.5},svg);
+    el("text",{x:2,y:y+3.5,fill:"var(--faint)","font-size":9.5},svg).textContent=p.toFixed(1)}
+  for(let i=0;i<PB;i++){if(dist[i]<1e-6)continue;const y=yP(bMid[i]);
+    el("rect",{x:36,y:y-.75,width:dist[i]/wMax*cw,height:1.5,
+      fill:bMid[i]<close?"var(--up)":"var(--down)",opacity:.85},svg)}
+  el("line",{x1:36,y1:yP(close),x2:236,y2:yP(close),stroke:"var(--gold)","stroke-width":.9,"stroke-dasharray":"3 2"},svg);
+  document.getElementById("mProfit").textContent=(st.profit*100).toFixed(1)+"%";
+  document.getElementById("mAvg").textContent=st.avg.toFixed(2);
+  document.getElementById("mDev").textContent=(st.dev*100>=0?"+":"")+(st.dev*100).toFixed(1)+"%";
+  document.getElementById("mDev").className="v "+(st.dev>=0?"up":"down");
+  document.getElementById("mR90").textContent=st.r90[0].toFixed(2)+" ~ "+st.r90[1].toFixed(2);
+  document.getElementById("mC90").textContent=st.c90.toFixed(1)+"%";
+  document.getElementById("mR70").textContent=st.r70[0].toFixed(2)+" ~ "+st.r70[1].toFixed(2);
+  document.getElementById("mC70").textContent=st.c70.toFixed(1)+"%";
+  document.getElementById("mMeter").style.width=(st.profit*100).toFixed(1)+"%";
+  document.getElementById("mTrap").textContent=((1-st.profit)*100).toFixed(1)+"% 的筹码成本高于现价"}
+
+/* ---------- 信息条 / 报价 / 回放 ---------- */
+const fb=document.getElementById("infobar");
+function info(day){const b=bars[day];
+  const f=(v,d=2)=>v==null?"--":v.toFixed(d);
+  fb.innerHTML=`<span>日期 <b>${dates[day]}</b></span>
+    <span>开 <b class="${b.close>=b.open?'up':'down'}">${f(b.open)}</b></span>
+    <span>高 <b class="up">${f(b.high)}</b></span>
+    <span>低 <b class="down">${f(b.low)}</b></span>
+    <span>收 <b>${f(b.close)}</b></span>
+    <span>涨幅 <b class="${b.chg>=0?'up':'down'}">${b.chg>=0?"+":""}${f(b.chg)}%</b></span>
+    <span>量 <b>${(b.vol/1e6).toFixed(2)}百万股</b></span>
+    <span>换手 <b>${f(b.turnover,1)}%</b></span>
+    <span>MACD <b class="${hist[day]>=0?'up':'down'}">${f(hist[day],3)}</b></span>`}
+
+function render(day){
+  document.getElementById("qPrice").textContent=bars[day].close.toFixed(2);
+  const chg=bars[day].chg,qc=document.getElementById("qChg");
+  qc.textContent=(chg>=0?"+":"")+chg.toFixed(2)+"%";
+  qc.className="q-chg "+(chg>=0?"up":"down");
+  document.getElementById("qPrice").className="q-price "+(chg>=0?"up":"down");
+  document.getElementById("vMA5").textContent=MA5[day].toFixed(2);
+  document.getElementById("vMA10").textContent=MA10[day].toFixed(2);
+  document.getElementById("vMA20").textContent=MA20[day].toFixed(2);
+  document.getElementById("vMA60").textContent=MA60[day]==null?"--":MA60[day].toFixed(2);
+  document.getElementById("dayLabel").textContent=dates[day]+"（"+(day+1)+"/"+DAYS+"）";
+  drawK(day);drawV(day);drawM(day);drawChip(day);info(day)}
+
+const slider=document.getElementById("daySlider");
+slider.addEventListener("input",()=>render(+slider.value));
+render(149);
+</script>
+</body>
+</html>
