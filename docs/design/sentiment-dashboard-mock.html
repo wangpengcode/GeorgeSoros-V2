@@ -293,6 +293,19 @@ syncChip();render();
 
   <div class="lists" id="lists"></div>
 
+  <div class="tablebox" id="gs-collapsebox">
+    <h3>崩塌池 / 止跌反核（collapse_count · rebound_count；口径：近 3 日最高连板≥3 且断板 → 入池，池内今日止跌收红=反核）</h3>
+    <div style="display:flex;gap:26px;flex-wrap:wrap;align-items:center;font-size:13px;padding:2px 0">
+      <span>崩塌池 <b style="color:#e5484d;font-size:16px">6</b> 家</span>
+      <span>今日止跌反核 <b style="color:#2fbf71;font-size:16px">3</b> 家</span>
+      <span style="color:#7d8b9e;font-size:12px">反核率 50%（≥40% 为情绪止跌信号之一）</span>
+      <span style="color:#525f70;font-size:12px">池内：恒久科技(D1) · 中马传动(D2) · 迪生力(D3) …</span>
+    </div>
+  </div>
+  <div class="tablebox" id="gs-termsbox">
+    <h3>术语汇总（复盘展示 · 不进策略条件词表）</h3>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;padding:2px 0"><span title="崩塌池成员今日止跌收红" style="cursor:help;font-size:12px;padding:3px 10px;border-radius:12px;border:1px solid #232d3d;background:#1a2230;color:#aeb9c9">反核止跌</span><span title="池内当日跌幅 ≤-5% 的高位股" style="cursor:help;font-size:12px;padding:3px 10px;border-radius:12px;border:1px solid #232d3d;background:#1a2230;color:#aeb9c9">大面</span><span title="昨 N-1 板今日晋级 N 板的家数占比" style="cursor:help;font-size:12px;padding:3px 10px;border-radius:12px;border:1px solid #232d3d;background:#1a2230;color:#aeb9c9">晋级率</span><span title="当日市场最高连板" style="cursor:help;font-size:12px;padding:3px 10px;border-radius:12px;border:1px solid #232d3d;background:#1a2230;color:#aeb9c9">高度龙</span><span title="涨停家数冰点（情绪最低段）" style="cursor:help;font-size:12px;padding:3px 10px;border-radius:12px;border:1px solid #232d3d;background:#1a2230;color:#aeb9c9">冰点</span><span title="高度龙断板后的周期下行段" style="cursor:help;font-size:12px;padding:3px 10px;border-radius:12px;border:1px solid #232d3d;background:#1a2230;color:#aeb9c9">退潮</span><span title="连板中断（昨涨停今未涨停）" style="cursor:help;font-size:12px;padding:3px 10px;border-radius:12px;border:1px solid #232d3d;background:#1a2230;color:#aeb9c9">断板</span><span title="断板后 3 交易日内再涨停" style="cursor:help;font-size:12px;padding:3px 10px;border-radius:12px;border:1px solid #232d3d;background:#1a2230;color:#aeb9c9">反包</span><span title="炸板家数 /（涨停+炸板）" style="cursor:help;font-size:12px;padding:3px 10px;border-radius:12px;border:1px solid #232d3d;background:#1a2230;color:#aeb9c9">炸板率</span><span title="强势池内当日涨幅 ≥+5%" style="cursor:help;font-size:12px;padding:3px 10px;border-radius:12px;border:1px solid #232d3d;background:#1a2230;color:#aeb9c9">大肉</span></div>
+  </div>
   <div class="tablebox" id="gs-dragonbox">
     <h3>龙头生命周期 · dragon_cycle 状态机（§4.9：大/小周期由龙头定义；停牌延续周期；断板 3 交易日反包窗口）</h3>
     <div id="gs-dragonrow" style="display:flex;gap:22px;flex-wrap:wrap;align-items:center;font-size:12.5px;padding:2px 0 4px"></div>
@@ -745,5 +758,17 @@ if(GS_DL.date){
     if(j>0&&base[j-1]&&fmt(base[j-1].date)===GS_DL.date){th.style.color="#e2b13c";th.style.textShadow="0 0 8px rgba(226,177,60,.6)";}
   });
 }
+})();
+</script>
+<script id="gs-navdl">
+/* §17.3 日期透传：侧边栏跳转携带当前复盘日期 ?date=（五页统一；已带 date 的链接不重复追加） */
+(function(){
+"use strict";
+if(!window.GS_DL||!GS_DL.date)return;
+document.querySelectorAll(".gs-nav a[href]").forEach(function(a){
+  var h=a.getAttribute("href");
+  if(h.indexOf("date=")>-1)return;
+  a.setAttribute("href",h+(h.indexOf("?")>-1?"&":"?")+"date="+encodeURIComponent(GS_DL.date));
+});
 })();
 </script>

@@ -223,14 +223,14 @@ syncChip();render();
         <div id="chart"></div>
       </div>
       <div class="panel">
-        <h2>大面预警 · 高位股实时跌幅</h2>
+        <h2>大面预警 · 高位股实时跌幅 <span style="color:#7d8b9e;font-size:11px;font-weight:normal">点击行 → 引用到笔记</span></h2>
         <ul class="warn" id="warn"></ul>
         <div class="legend">口径：近3日最高连板≥3 或 近5日涨幅≥50%（强势池成员）现价 ≤ -5%</div>
       </div>
     </div>
     <div>
       <div class="panel">
-        <h2>实时事件流</h2>
+        <h2>实时事件流 <span style="color:#7d8b9e;font-size:11px;font-weight:normal">点击行 → 引用到笔记（预填摘要）</span></h2>
         <div class="feed" id="feed"></div>
       </div>
       <div class="panel">
@@ -252,6 +252,39 @@ syncChip();render();
         </div>
         <div class="legend">候选池 = 涨停池 ∪ 条件命中 ∪ universe 成员；每策略×股×日 ≤1 条 ALERT；只预警不自动交易</div>
       </div>
+      <div class="panel">
+        <h2>数据池状态 · 5 池健康灯（§17.1 B8 定稿口径）</h2>
+        <div id="poolstat"></div>
+        <div class="legend">轮询 15-30s/池 · 限频=3 次重试+指数退避+抖动 · 点状态灯切换启用/停用（停用池不参与事件 diff 与 15:10 归档）</div>
+      </div>
+      <script id="gs-poolstat">
+      (function(){
+      "use strict";
+      var POOLS=[
+        {n:"涨停池 ZT",ok:true,t:"10:03:12",r:"正常"},
+        {n:"炸板池 ZB",ok:true,t:"10:03:12",r:"正常"},
+        {n:"跌停池 DT",ok:true,t:"10:02:45",r:"正常"},
+        {n:"强势池 STRONG",ok:true,t:"10:03:12",r:"正常"},
+        {n:"昨涨停池 PREV",ok:false,t:"10:01:38",r:"限频退避中"}];
+      function draw(){
+        document.getElementById("poolstat").innerHTML=POOLS.map(function(p,i){
+          var dot=p.ok?"#2fbf71":"#e2b13c";
+          return '<div style="display:flex;align-items:center;gap:10px;padding:5px 0;border-bottom:1px solid #232d3d;font-size:12.5px">'
+            +'<span class="gs-pdot" data-i="'+i+'" title="点击切换启用/停用" style="cursor:pointer;flex:none;width:10px;height:10px;border-radius:50%;background:'+dot+';box-shadow:0 0 6px '+dot+'"></span>'
+            +'<b style="width:118px">'+p.n+'</b>'
+            +'<span style="color:#7d8b9e">最近成功 '+p.t+'</span>'
+            +'<span style="margin-left:auto;color:'+(p.r==="正常"?"#7d8b9e":"#e2b13c")+'">'+p.r+'</span>'
+            +'<span style="width:36px;text-align:right;color:'+(p.ok?"#7d8b9e":"#e5484d")+'">'+(p.ok?"启用":"停用")+'</span></div>';
+        }).join("");
+      }
+      document.getElementById("poolstat").addEventListener("click",function(e){
+        var d=e.target.closest(".gs-pdot");if(!d)return;
+        var i=+d.getAttribute("data-i");POOLS[i].ok=!POOLS[i].ok;
+        POOLS[i].r=POOLS[i].ok?"正常":"已停用";draw();
+      });
+      draw();
+      })();
+      </script>
     </div>
   </div>
 </div>
@@ -316,7 +349,8 @@ function renderKpis(){
   const rows=[
     ['涨停家数',kpi.zt,'', 'red'],['跌停家数',kpi.dt,'','green'],['炸板家数',kpi.zb,'','goldc'],
     ['最高板',kpi.maxStreak+'板','','goldc'],['昨涨停溢价',pct(kpi.prem),'实时','goldc'],
-    ['涨跌家数比',kpi.advDec.toFixed(2),'','faintc']];
+    ['涨跌家数比',kpi.advDec.toFixed(2),'','faintc'],
+    ['竞价缺口','+1.8%','9:25 竞价','goldc']];
   document.getElementById('kpis').innerHTML=rows.map(r=>
     '<div class="k"><div class="l">'+r[0]+'</div><div class="v '+r[3]+'">'+r[1]+'<span class="d faintc">'+r[2]+'</span></div></div>').join('');
 }
@@ -421,5 +455,37 @@ if(GS_DL.date<LAUNCH){
     +'该日无盘中回放数据 · 盘中归档自上线日 '+LAUNCH+' 起（intraday_replay 仅覆盖上线后交易日）<br>'
     +'<span style="color:#7d8b9e">日线口径不受影响：情绪周期 / K线 / 笔记对该日正常可用</span></div>');
 }
+})();
+</script>
+<script id="gs-quote2note">
+/* §15 联动：事件流/大面预警行点击 → 预填到笔记（引用事件摘要，人工补充判断；事件委托，重渲染不受影响） */
+(function(){
+"use strict";
+var feed=document.getElementById("feed"),warn=document.getElementById("warn");
+var ta=document.getElementById("gs-nta"),fab=document.getElementById("gs-nfab");
+function bind(box,label){
+  if(!box)return;
+  box.addEventListener("click",function(e){
+    var it=e.target;
+    while(it&&it.parentNode!==box)it=it.parentNode;
+    if(!it||it===box)return;
+    var t=(it.textContent||"").replace(/\s+/g," ").trim().slice(0,80);
+    if(ta)ta.value="["+label+"] "+t;
+    if(fab)fab.click();
+  });
+}
+bind(feed,"盘中事件");bind(warn,"大面预警");
+})();
+</script>
+<script id="gs-navdl">
+/* §17.3 日期透传：侧边栏跳转携带当前复盘日期 ?date=（五页统一；已带 date 的链接不重复追加） */
+(function(){
+"use strict";
+if(!window.GS_DL||!GS_DL.date)return;
+document.querySelectorAll(".gs-nav a[href]").forEach(function(a){
+  var h=a.getAttribute("href");
+  if(h.indexOf("date=")>-1)return;
+  a.setAttribute("href",h+(h.indexOf("?")>-1?"&":"?")+"date="+encodeURIComponent(GS_DL.date));
+});
 })();
 </script>

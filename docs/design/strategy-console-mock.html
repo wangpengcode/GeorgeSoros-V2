@@ -811,3 +811,15 @@ document.getElementById("wlbtn").addEventListener("click",function(){
 });
 wlRender();
 </script>
+<script id="gs-navdl">
+/* §17.3 日期透传：侧边栏跳转携带当前复盘日期 ?date=（五页统一；已带 date 的链接不重复追加） */
+(function(){
+"use strict";
+if(!window.GS_DL||!GS_DL.date)return;
+document.querySelectorAll(".gs-nav a[href]").forEach(function(a){
+  var h=a.getAttribute("href");
+  if(h.indexOf("date=")>-1)return;
+  a.setAttribute("href",h+(h.indexOf("?")>-1?"&":"?")+"date="+encodeURIComponent(GS_DL.date));
+});
+})();
+</script>

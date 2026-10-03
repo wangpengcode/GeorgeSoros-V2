@@ -151,7 +151,7 @@ if(GS_DL.date){
 <div id="gs-nfab" class="gs-nfab">✎<small>笔记</small></div>
 <div id="gs-nmask" class="gs-nmask"></div>
 <aside id="gs-npanel" class="gs-npanel">
-  <div class="gs-nhead"><b>笔记 · K线复盘</b><span>今天 · 按天留档</span><button class="gs-nclose" id="gs-nclose">×</button></div>
+  <div class="gs-nhead"><b>笔记 · K线复盘</b><span>今天 · 按天留档</span><span id="gs-nscope" style="margin-left:auto;display:flex;gap:4px;align-items:center"><span class="gs-sc" data-s="ALL" style="cursor:pointer;font-size:10.5px;padding:1px 8px;border-radius:9px;border:1px solid #e2b13c;color:#e2b13c">全市场</span><span class="gs-sc" data-s="ONE" style="cursor:pointer;font-size:10.5px;padding:1px 8px;border-radius:9px;border:1px solid #263140;color:#7d8b9e">仅本股</span></span><button class="gs-nclose" id="gs-nclose">×</button></div>
   <div class="gs-nlist" id="gs-nlist"></div>
   <div class="gs-nfoot">
     <div class="gs-nchip" id="gs-nchip">市场级笔记（不挂个股）</div>
@@ -163,6 +163,7 @@ if(GS_DL.date){
 (function(){
 "use strict";
 var CFG={page:"KLINE",code:"600000"};
+var SCOPE="ALL";
 var DEMO=[["15:05","600000","90% 集中度 8.4 谷底抬升，获利盘 62%，回调看 5 日线支撑。"]];
 var list=document.getElementById("gs-nlist"),panel=document.getElementById("gs-npanel"),
     mask=document.getElementById("gs-nmask"),ta=document.getElementById("gs-nta"),
@@ -171,6 +172,7 @@ function esc(s){return s.replace(/&/g,"&amp;").replace(/</g,"&lt;")}
 function render(){
   var h="";
   DEMO.forEach(function(n,i){
+    if(SCOPE==="ONE"&&n[1]!==CFG.code)return;
     h+='<div class="gs-nitem"><div class="m"><span>'+n[0]+'</span>'
       +(n[1]?'<span class="code">'+n[1]+'</span>':'')+'</div><div class="t">'+esc(n[2])+'</div></div>';
   });
@@ -191,7 +193,18 @@ document.getElementById("gs-nadd").addEventListener("click",function(){
 });
 document.addEventListener("keydown",function(e){if(e.key==="Escape")close();});
 /* K线页：注入方会在其主脚本后更新 CFG.code —— 暴露钩子 */
-window.GS_NOTE_SYNC=function(code){CFG.code=code;syncChip();};
+var scopeBox=document.getElementById("gs-nscope");
+if(scopeBox)scopeBox.addEventListener("click",function(e){
+  var c=e.target.closest(".gs-sc");if(!c)return;
+  SCOPE=c.getAttribute("data-s");
+  scopeBox.querySelectorAll(".gs-sc").forEach(function(x){
+    var on=x.getAttribute("data-s")===SCOPE;
+    x.style.border="1px solid "+(on?"#e2b13c":"#263140");
+    x.style.color=on?"#e2b13c":"#7d8b9e";
+  });
+  render();
+});
+window.GS_NOTE_SYNC=function(code){CFG.code=code;syncChip();render();};
 syncChip();render();
 })();
 </script>
@@ -512,5 +525,17 @@ var sl=document.getElementById("daySlider");if(sl)sl.value=i;render(i);
 var s=document.getElementById("daySlider");
 if(s)s.value=i;
 render();
+})();
+</script>
+<script id="gs-navdl">
+/* §17.3 日期透传：侧边栏跳转携带当前复盘日期 ?date=（五页统一；已带 date 的链接不重复追加） */
+(function(){
+"use strict";
+if(!window.GS_DL||!GS_DL.date)return;
+document.querySelectorAll(".gs-nav a[href]").forEach(function(a){
+  var h=a.getAttribute("href");
+  if(h.indexOf("date=")>-1)return;
+  a.setAttribute("href",h+(h.indexOf("?")>-1?"&":"?")+"date="+encodeURIComponent(GS_DL.date));
+});
 })();
 </script>
