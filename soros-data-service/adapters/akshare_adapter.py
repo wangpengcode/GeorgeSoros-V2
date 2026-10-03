@@ -36,6 +36,8 @@ from adapters.base import BaseAdapter, SourceError
 from constants import (
     AKSHARE_VOLUME_MULTIPLIER,
     AKSHARE_AMOUNT_MULTIPLIER,
+    FUNDAMENTALS_AMOUNT_MULTIPLIER,
+    BOARD_TYPE_INDUSTRY,
     SINA_INDEX_VOLUME_MULTIPLIER,
     TENCENT_INDEX_VOLUME_MULTIPLIER,
     to_index_em_symbol,
@@ -69,6 +71,9 @@ class AkshareAdapter(BaseAdapter):
         self._supports_is_st = True          # st_em / stop_em
         self._supports_delisted = False      # 退市状态由 baostock 提供
         self._supports_index = True          # 指数日K（sina→腾讯→东财 链）
+        self._supports_fundamentals = True   # stock_yjbb_em（PLAN §11.1，仅 akshare）
+        self._supports_board_members = True  # stock_board_industry/concept_*_em（PLAN §4.8，仅 akshare）
+        self._board_members_degraded = False  # 板块成分拉取降级标记（单板块失败置 True，响应透传）
 
     # ---- 日 K 线（PLAN §5.4）----
     def _sync_fetch_daily_bars(self, code: str, start: str, end: str, adjust: str) -> List[dict]:
@@ -167,6 +172,76 @@ class AkshareAdapter(BaseAdapter):
         if df is None or df.empty or "trade_date" not in df.columns:
             raise SourceError("akshare 交易日历为空或列名未知")
         return [str(d)[:10] for d in df["trade_date"].tolist()]
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # 业绩报表 / 板块成分（PLAN Step 5a：仅 akshare，mootdx 永不参与）
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def _sync_fetch_fundamentals(self, report_date: str) -> List[dict]:
+        """AKShare stock_yjbb_em → [{code, revenue, net_profit}]。
+
+        - 列名复合形式（PLAN §11.1 源码确认）：`营业总收入-营业总收入` / `净利润-净利润`；
+        - 单位亿元 ×1e8 → 元（PLAN §11.1 / §2.4 fundamentals 单位=元）；
+        - 单次调用返回全市场（akshare 内部自动分页抓全市场）。
+        """
+        df = ak.stock_yjbb_em(date=report_date)
+        if df is None or df.empty:
+            return []
+        code_col = next((c for c in df.columns if c in ("股票代码", "代码")), None)
+        if code_col is None:
+            raise SourceError(f"stock_yjbb_em 列名未知: {list(df.columns)}")
+        # 复合列名探底：以"营业总收入-" / "净利润-" 前缀为准（防 akshare 版本列名漂移）
+        revenue_col = next((c for c in df.columns if c.startswith("营业总收入-")), None)
+        net_profit_col = next((c for c in df.columns if c.startswith("净利润-")), None)
+        stocks = []
+        for _, row in df.iterrows():
+            code = str(row[code_col]).strip().zfill(6)
+            stocks.append({
+                "code": code,
+                "revenue": (_f(row[revenue_col]) if revenue_col else 0.0) * FUNDAMENTALS_AMOUNT_MULTIPLIER,
+                "net_profit": (_f(row[net_profit_col]) if net_profit_col else 0.0) * FUNDAMENTALS_AMOUNT_MULTIPLIER,
+            })
+        return stocks
+
+    def _sync_fetch_board_members(self, board_type: str) -> dict:
+        """东财板块成分 → {板块名: [codes...]}（PLAN §4.8）。
+
+        - 行业每日全量：stock_board_industry_name_em → stock_board_industry_cons_em（≈86 个）；
+        - 概念每周全量：stock_board_concept_name_em → stock_board_concept_cons_em（≈400+ 个）；
+        - 单板块成分失败降级跳过（不炸整批）；板块列表为空/列名未知抛 SourceError；
+        - 只关注当前成分快照（覆盖写，不保留成分历史，§4.8）。
+        """
+        if board_type == BOARD_TYPE_INDUSTRY:
+            name_fn = ak.stock_board_industry_name_em
+            cons_fn = ak.stock_board_industry_cons_em
+        else:
+            name_fn = ak.stock_board_concept_name_em
+            cons_fn = ak.stock_board_concept_cons_em
+        self._board_members_degraded = False
+        name_df = name_fn()
+        if name_df is None or name_df.empty:
+            raise SourceError(f"板块列表为空: {board_type}")
+        name_col = "板块名称"
+        if name_col not in name_df.columns:
+            raise SourceError(f"板块列表列名未知: {list(name_df.columns)}")
+        boards: dict = {}
+        for _, row in name_df.iterrows():
+            board_name = str(row[name_col]).strip()
+            try:
+                cons_df = cons_fn(symbol=board_name)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("板块 %s 成分获取失败: %s", board_name, exc)
+                self._board_members_degraded = True
+                continue
+            if cons_df is None or cons_df.empty:
+                continue
+            codes = []
+            for v in cons_df.get("代码", []):
+                s = str(v).strip().zfill(6)
+                if s.isdigit() and len(s) == 6:
+                    codes.append(s)
+            boards[board_name] = codes
+        return boards
 
     # ══════════════════════════════════════════════════════════════════════════
     # 指数日K（PLAN Step 4，探针选源结论见类 KDoc）

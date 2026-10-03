@@ -2,6 +2,7 @@ package com.soros.v2.job
 
 import com.soros.v2.config.DataCollectionProperties
 import com.soros.v2.domain.Board
+import com.soros.v2.domain.BoardType
 import com.soros.v2.domain.DataSourceType
 import com.soros.v2.domain.DingTalkEvent
 import com.soros.v2.entity.StockInfo
@@ -10,11 +11,16 @@ import com.soros.v2.service.PythonDataServiceClient
 import com.soros.v2.service.StockHistoryService
 import com.soros.v2.service.StockInfoService
 import com.soros.v2.service.TradingCalendarService
+import com.soros.v2.service.dto.BoardMembersRequest
+import com.soros.v2.service.dto.CrossValidateRequest
+import com.soros.v2.service.dto.CrossValidateResponse
 import com.soros.v2.service.dto.DailyBar
 import com.soros.v2.service.dto.DailyBarsBatchRequest
 import com.soros.v2.service.dto.DailyBarsBatchResponse
 import com.soros.v2.service.dto.DailyCollectCompleted
 import com.soros.v2.service.dto.FailedBar
+import com.soros.v2.service.dto.FundamentalsRequest
+import com.soros.v2.service.dto.FundamentalsStockDto
 import com.soros.v2.service.dto.SaveBatchResult
 import com.soros.v2.service.dto.StockBarsResult
 import com.soros.v2.service.dto.StockListDto
@@ -99,6 +105,10 @@ class DailyCollectJobTest {
             return batchResponse
         }
         override suspend fun fetchTradingCalendar(): List<String> = emptyList()
+        override suspend fun fetchFundamentals(request: FundamentalsRequest): List<FundamentalsStockDto> = emptyList()
+        override suspend fun fetchBoardMembers(request: BoardMembersRequest): Map<String, List<String>> = emptyMap()
+        override suspend fun fetchDailyBarsCross(request: CrossValidateRequest): CrossValidateResponse =
+            CrossValidateResponse("ok")
     }
 
     /** Fake StockInfo 服务：可设定 refreshStockList 返回（suspend 规避 Mockito Continuation 匹配问题） */
@@ -110,6 +120,8 @@ class DailyCollectJobTest {
             refreshCalls++
             return refreshResult
         }
+        override suspend fun backfillIpoDates(): Int = 0
+        override suspend fun refreshBoardSnapshot(boardType: BoardType): Int = 0
         override fun findByCode(code: String): StockInfo? = refreshResult.firstOrNull { it.code == code }
         override fun saveBenchmarkIndices(): Int = 0
     }

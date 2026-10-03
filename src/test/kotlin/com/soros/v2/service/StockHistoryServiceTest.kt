@@ -8,9 +8,14 @@ import com.soros.v2.entity.StockInfo
 import com.soros.v2.repository.DataQualityLogRepository
 import com.soros.v2.repository.StockHistoryRepository
 import com.soros.v2.repository.TradingCalendarRepository
+import com.soros.v2.service.dto.BoardMembersRequest
+import com.soros.v2.service.dto.CrossValidateRequest
+import com.soros.v2.service.dto.CrossValidateResponse
 import com.soros.v2.service.dto.DailyBar
 import com.soros.v2.service.dto.DailyBarsBatchRequest
 import com.soros.v2.service.dto.DailyBarsBatchResponse
+import com.soros.v2.service.dto.FundamentalsRequest
+import com.soros.v2.service.dto.FundamentalsStockDto
 import com.soros.v2.service.dto.SaveBatchResult
 import com.soros.v2.service.dto.StockBarsResult
 import com.soros.v2.util.CollectMetrics
@@ -83,6 +88,10 @@ class StockHistoryServiceTest {
             return fetchDailyBarsBatchResponse
         }
         override suspend fun fetchTradingCalendar(): List<String> = emptyList()
+        override suspend fun fetchFundamentals(request: FundamentalsRequest): List<FundamentalsStockDto> = emptyList()
+        override suspend fun fetchBoardMembers(request: BoardMembersRequest): Map<String, List<String>> = emptyMap()
+        override suspend fun fetchDailyBarsCross(request: CrossValidateRequest): CrossValidateResponse =
+            CrossValidateResponse("ok")
     }
 
     private fun service(

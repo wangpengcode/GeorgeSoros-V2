@@ -60,11 +60,14 @@ class BaseAdapter(abc.ABC):
         self.circuit_breaker = circuit_breaker
         self.rate_limiter = rate_limiter
         # 能力标记（Router 决策依据，PLAN §11.1：stock-list/is_st/退市永不走 mootdx；
-        # 指数日K能力仅 akshare（sina/东财/腾讯链），mootdx 永不参与）
+        # 指数日K能力仅 akshare（sina/东财/腾讯链），mootdx 永不参与；
+        # 业绩报表/板块成分仅 akshare（PLAN Step 5a），mootdx/baostock 均不参与）
         self._supports_stock_list = False
         self._supports_is_st = False
         self._supports_delisted = False
         self._supports_index = False
+        self._supports_fundamentals = False
+        self._supports_board_members = False
 
     @property
     def health_state(self) -> str:
@@ -120,6 +123,24 @@ class BaseAdapter(abc.ABC):
         return self._call_guarded(self._sync_fetch_index_daily, code, start, end, adjust)
 
     def _sync_fetch_index_daily(self, code: str, start: str, end: str, adjust: str) -> List[dict]:
+        raise NotImplementedError
+
+    # ---- 业绩报表（仅 akshare，mootdx 永不参与，PLAN §11.1）----
+    def fetch_fundamentals(self, report_date: str) -> List[dict]:
+        if not self._supports_fundamentals:
+            raise SourceUnavailableError(f"{self.source_name}: 不支持业绩报表")
+        return self._call_guarded(self._sync_fetch_fundamentals, report_date)
+
+    def _sync_fetch_fundamentals(self, report_date: str) -> List[dict]:
+        raise NotImplementedError
+
+    # ---- 板块成分（仅 akshare，mootdx 永不参与，PLAN §4.8）----
+    def fetch_board_members(self, board_type: str) -> dict:
+        if not self._supports_board_members:
+            raise SourceUnavailableError(f"{self.source_name}: 不支持板块成分")
+        return self._call_guarded(self._sync_fetch_board_members, board_type)
+
+    def _sync_fetch_board_members(self, board_type: str) -> dict:
         raise NotImplementedError
 
     # ---- 交易日历 ----
@@ -219,15 +240,24 @@ class DataRouter:
         """只走 baostock/akshare（mootdx 永不参与，PLAN §11.1）。
 
         - 列表主源 AKShare（内部 stock_info_a_code_name → stock_zh_a_spot_em 备源）
-        - 退市集合 baostock query_stock_basic（status != '1'）
+        - 退市集合 + ipo_date 均取 baostock query_stock_basic（status != '1' / ipoDate 列）
+        - 单次 query_stock_basic 同时产出 delisted 与 ipo_date（避免双拉）
         """
-        # 1) 退市状态（baostock；失败则降级为全 False，不炸整批）
+        # 1) baostock query_stock_basic 一次调用 → 退市集合 + ipo_date map（失败降级，不炸整批）
         delisted: set = set()
+        ipo_date_map: dict = {}
         baostock = self.adapters[SOURCE_BAOSTOCK]
         try:
-            delisted = baostock.fetch_delisted_codes()
+            for r in baostock.fetch_stock_basic_rows():
+                if r.get("type") != "1":
+                    continue
+                bare = r["code"].split(".")[-1]
+                if r.get("status") != "1":
+                    delisted.add(bare)
+                if r.get("ipo_date"):
+                    ipo_date_map[bare] = r["ipo_date"]
         except (SourceError, SourceUnavailableError) as exc:
-            logger.warning("stock-list: 退市状态获取失败，delisted 全部置 False（%s）", exc)
+            logger.warning("stock-list: 退市状态/ipo_date 获取失败，降级（%s）", exc)
 
         # 2) 股票列表（AKShare 主源；若 akshare 整体失败则尝试 baostock 兜底）
         stocks: List[dict] = []
@@ -241,7 +271,7 @@ class DataRouter:
             except Exception as inner:  # noqa: BLE001
                 raise SourceError(f"stock-list 所有源失败: akshare({exc}); baostock({inner})") from inner
 
-        # 3) 合并退市标记 + market/board 过滤
+        # 3) 合并退市标记 + ipo_date + market/board 过滤
         result: List[dict] = []
         for item in stocks:
             code = item["code"]
@@ -250,6 +280,7 @@ class DataRouter:
             if board != BOARD_ALL and item["board"] != board:
                 continue
             item["delisted"] = code in delisted
+            item["ipo_date"] = ipo_date_map.get(code)
             result.append(item)
         return result
 
@@ -272,6 +303,7 @@ class DataRouter:
                 "board": derive_board(bare),
                 "is_st": False,
                 "delisted": status != "1",
+                "ipo_date": r.get("ipo_date"),
             })
         return stocks
 
@@ -279,3 +311,61 @@ class DataRouter:
     def fetch_trading_calendar(self) -> List[str]:
         # 主源 AKShare tool_trade_date_hist_sina（探针实测 PASS，一次全量）
         return self.adapters[SOURCE_AKSHARE].fetch_trading_calendar()
+
+    # ---- 业绩报表（仅 akshare，mootdx 永不参与，PLAN §11.1）----
+    def fetch_fundamentals(self, report_date: str) -> List[dict]:
+        """业绩报表：仅 akshare（stock_yjbb_em）。mootdx/baostock 均无此能力。"""
+        return self.adapters[SOURCE_AKSHARE].fetch_fundamentals(report_date)
+
+    # ---- 板块成分（仅 akshare，mootdx 永不参与，PLAN §4.8）----
+    def fetch_board_members(self, board_type: str) -> dict:
+        """板块成分：仅 akshare（stock_board_industry/concept_*_em 链）。mootdx 永不参与。
+
+        返回 {boards:{板块名:[codes]}, degraded:bool}——degraded 标记任一板块成分拉取失败
+        （单板块失败降级跳过，消费侧据此跳过清空，防止部分源故障误清全库）。
+        """
+        adapter = self.adapters[SOURCE_AKSHARE]
+        boards = adapter.fetch_board_members(board_type)
+        return {
+            "boards": boards,
+            "degraded": bool(getattr(adapter, "_board_members_degraded", False)),
+        }
+
+    # ---- 双源交叉验证（baostock + akshare，mootdx 永不参与，PLAN §11.2）----
+    def fetch_daily_bars_cross(
+        self, codes: List[str], start: str, end: str, adjust: str
+    ) -> Tuple[Dict[str, dict], List[dict]]:
+        """§11.2 双源交叉验证：每 code 独立从 baostock/akshare 各抓一次，mootdx 永不参与。
+
+        返回 (results, failed)：
+        - results = {code: {source: {source, count, data[]}}}；源无数据也占位
+          {source, count:0, data:[]}（方便 Kotlin 侧按共同日期对齐）
+        - failed = [{code, reason}] 仅双源均 ParameterError（理论不发生，跨源参数一致）
+        """
+        sources = [self.adapters[SOURCE_BAOSTOCK], self.adapters[SOURCE_AKSHARE]]
+        results: Dict[str, dict] = {}
+        failed: List[dict] = []
+        for code in codes:
+            per_source: Dict[str, dict] = {}
+            errors: List[str] = []
+            for adapter in sources:
+                try:
+                    bars = adapter.fetch_daily_bars(code, start, end, adjust)
+                    per_source[adapter.source_name] = {
+                        "source": adapter.source_name, "count": len(bars), "data": bars,
+                    }
+                except SourceUnavailableError as exc:
+                    errors.append(f"{adapter.source_name}: {exc}")
+                    per_source[adapter.source_name] = {"source": adapter.source_name, "count": 0, "data": []}
+                except SourceError as exc:
+                    errors.append(f"{adapter.source_name}: {exc}")
+                    per_source[adapter.source_name] = {"source": adapter.source_name, "count": 0, "data": []}
+                except ParameterError as exc:
+                    errors.append(f"{adapter.source_name}: 参数错误 ({exc})")
+                    per_source[adapter.source_name] = {"source": adapter.source_name, "count": 0, "data": []}
+                    break
+            if per_source:
+                results[code] = per_source
+            else:
+                failed.append({"code": code, "reason": "; ".join(errors) if errors else "双源均无数据"})
+        return results, failed

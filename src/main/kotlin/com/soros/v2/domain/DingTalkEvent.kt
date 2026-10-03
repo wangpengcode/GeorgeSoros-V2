@@ -14,6 +14,7 @@ enum class DingTalkEventLevel { ERROR, WARN, INFO }
  * - DELIST_SUSPECT                                     → 每股 1 条
  * - SOURCE_DEGRADED                                    → 同类 10 分钟 1 条
  * - DAILY_COLLECT_SUMMARY                              → 每日 digest
+ * - CROSS_VALIDATE_MISMATCH                           → 每交易日 1 条（§11.2 只观测不修正）
  */
 enum class DingTalkEvent(val level: DingTalkEventLevel) {
     PYTHON_SERVICE_OFFLINE(DingTalkEventLevel.ERROR),
@@ -21,6 +22,7 @@ enum class DingTalkEvent(val level: DingTalkEventLevel) {
     ADJUSTMENT_DRIFT_UNRESOLVED(DingTalkEventLevel.ERROR),
     DELIST_SUSPECT(DingTalkEventLevel.WARN),
     SOURCE_DEGRADED(DingTalkEventLevel.WARN),
+    CROSS_VALIDATE_MISMATCH(DingTalkEventLevel.ERROR),
     DAILY_COLLECT_SUMMARY(DingTalkEventLevel.INFO),
     ;
 }

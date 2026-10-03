@@ -158,3 +158,19 @@ ERROR_PARAM_INVALID = "PARAM_INVALID"
 ERROR_NOT_FOUND = "NOT_FOUND"
 ERROR_STOCK_LIST_FAILED = "STOCK_LIST_FAILED"
 ERROR_TRADING_CALENDAR_FAILED = "TRADING_CALENDAR_FAILED"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 业绩报表 / 板块归属 / 交叉验证（PLAN Step 5a 新增能力，2026-10-03）
+# ──────────────────────────────────────────────────────────────────────────────
+# 业绩报表单位换算（PLAN §11.1：AKShare stock_yjbb_em 单位亿元 → 元）
+FUNDAMENTALS_AMOUNT_MULTIPLIER = 1e8
+
+# 板块归属（PLAN §4.8：行业每日 / 概念每周，东财 stock_board_*_em 链）
+BOARD_TYPE_INDUSTRY = "industry"
+BOARD_TYPE_CONCEPT = "concept"
+BOARD_TYPES = (BOARD_TYPE_INDUSTRY, BOARD_TYPE_CONCEPT)
+
+# 新增端点错误码（PLAN §11.1 错误信封 error.code 单点区段）
+ERROR_FUNDAMENTALS_FAILED = "FUNDAMENTALS_FAILED"
+ERROR_BOARD_MEMBERS_FAILED = "BOARD_MEMBERS_FAILED"
+ERROR_CROSS_VALIDATE_FAILED = "CROSS_VALIDATE_FAILED"

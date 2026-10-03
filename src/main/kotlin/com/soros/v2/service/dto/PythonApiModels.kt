@@ -31,6 +31,8 @@ data class StockListDto(
     @JsonProperty("board") val board: String,
     @JsonProperty("is_st") val isSt: Boolean,
     @JsonProperty("delisted") val delisted: Boolean,
+    /** BaoStock query_stock_basic ipoDate（YYYY-MM-DD；§4.8 IPO 首 5 日守卫；Step 5a 增补） */
+    @JsonProperty("ipo_date") val ipoDate: String? = null,
 )
 
 /** Python /api/v1/trading-calendar 响应（§11.1：一次全量 dates[]，YYYY-MM-DD） */
@@ -82,4 +84,64 @@ data class StockBarsResult(
 data class FailedBar(
     @JsonProperty("code") val code: String,
     @JsonProperty("reason") val reason: String,
+)
+
+/**
+ * Python /api/v1/fundamentals（§11.1：AKShare stock_yjbb_em，report_date=季度末 YYYYMMDD）。
+ *
+ * - report_date 为 8 位 YYYYMMDD（PLAN §11.1 契约字面量，与 AKShare 输入一致）；
+ * - revenue / net_profit 单位=元（Python 侧源亿元 ×1e8）。
+ */
+data class FundamentalsRequest(
+    @JsonProperty("report_date") val reportDate: String,
+)
+
+/** Python /api/v1/fundamentals 响应（§11.1：{stocks:[{code,revenue,net_profit}]}） */
+data class FundamentalsResponse(
+    @JsonProperty("status") val status: String,
+    @JsonProperty("stocks") val stocks: List<FundamentalsStockDto>,
+)
+
+/** 单股财务（revenue/net_profit 单位=元，源亿元 ×1e8；§2.4 fundamentals 单位元） */
+data class FundamentalsStockDto(
+    @JsonProperty("code") val code: String,
+    @JsonProperty("revenue") val revenue: BigDecimal,
+    @JsonProperty("net_profit") val netProfit: BigDecimal,
+)
+
+/** Python /api/v1/board-members 请求（§4.8：industry 每日 / concept 每周） */
+data class BoardMembersRequest(
+    @JsonProperty("board_type") val boardType: String,
+)
+
+/** Python /api/v1/board-members 响应（§4.8：{boards:{板块名:[codes]}} 覆盖写快照 + 降级标记） */
+data class BoardMembersResponse(
+    @JsonProperty("status") val status: String,
+    @JsonProperty("boards") val boards: Map<String, List<String>> = emptyMap(),
+    /** 任一板块拉取失败/降级 → true（Python 侧单板块失败跳过，§4.8 防御） */
+    @JsonProperty("degraded") val degraded: Boolean = false,
+)
+
+/** 板块成分快照（§4.8 覆盖写消费侧：boards + degraded 降级标记，防部分源故障误清全库） */
+data class BoardMembersSnapshot(
+    @JsonProperty("boards") val boards: Map<String, List<String>> = emptyMap(),
+    @JsonProperty("degraded") val degraded: Boolean = false,
+)
+
+/** Python /api/v1/daily-bars/cross-validate 请求（§11.2：双源交叉验证，只观测不修正） */
+data class CrossValidateRequest(
+    @JsonProperty("codes") val codes: List<String>,
+    @JsonProperty("start_date") val startDate: String,
+    @JsonProperty("end_date") val endDate: String,
+    @JsonProperty("adjust") val adjust: String = "qfq",
+)
+
+/**
+ * Python /api/v1/daily-bars/cross-validate 响应（§11.2）。
+ * results: {code: {source: {source,count,data[]}}}；mootdx 永不参与；源无数据也占位 count=0。
+ */
+data class CrossValidateResponse(
+    @JsonProperty("status") val status: String,
+    @JsonProperty("results") val results: Map<String, Map<String, StockBarsResult>> = emptyMap(),
+    @JsonProperty("failed") val failed: List<FailedBar> = emptyList(),
 )

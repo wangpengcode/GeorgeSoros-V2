@@ -13,7 +13,11 @@ from typing import Optional
 
 from pydantic import BaseModel, Field, field_validator
 
-from constants import is_valid_tradeable_code
+from constants import (
+    BOARD_TYPES,
+    is_stock_code,
+    is_valid_tradeable_code,
+)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # /daily-bars/batch
@@ -103,6 +107,7 @@ class StockItem(BaseModel):
     board: str           # MAIN / GEM / STAR
     is_st: bool          # 仅用于"识别并排除"
     delisted: bool       # 是否退市（缺失≠退市，人工确认才置 true）
+    ipo_date: Optional[str] = None  # BaoStock query_stock_basic ipoDate（YYYY-MM-DD；缺失=null）
 
 
 class StockListResponse(BaseModel):
@@ -129,6 +134,100 @@ class HealthResponse(BaseModel):
 # ──────────────────────────────────────────────────────────────────────────────
 class CalendarResponse(BaseModel):
     dates: list[str]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# /fundamentals（PLAN §11.1：AKShare stock_yjbb_em，report_date=季度末 YYYYMMDD）
+# ──────────────────────────────────────────────────────────────────────────────
+class FundamentalsRequest(BaseModel):
+    report_date: str = Field(..., description="报告期季度末 YYYYMMDD（如 20241231）")
+
+    @field_validator("report_date")
+    @classmethod
+    def _validate_report_date(cls, v: str) -> str:
+        if len(v) != 8 or not v.isdigit():
+            raise ValueError(f"report_date 必须为 YYYYMMDD（如 20241231），收到: {v!r}")
+        return v
+
+
+class FundamentalsStockItem(BaseModel):
+    code: str               # 裸数字 6 位
+    revenue: float          # 元（源亿元 ×1e8）
+    net_profit: float       # 元
+
+
+class FundamentalsResponse(BaseModel):
+    status: str = "ok"
+    stocks: list[FundamentalsStockItem]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# /board-members（PLAN §4.8：东财板块成分，industry 每日 / concept 每周）
+# ──────────────────────────────────────────────────────────────────────────────
+class BoardMembersRequest(BaseModel):
+    board_type: str = Field(..., description="industry / concept")
+
+    @field_validator("board_type")
+    @classmethod
+    def _validate_board_type(cls, v: str) -> str:
+        if v not in BOARD_TYPES:
+            raise ValueError(f"board_type 仅支持 industry/concept，收到: {v!r}")
+        return v
+
+
+class BoardMembersResponse(BaseModel):
+    status: str = "ok"
+    boards: dict[str, list[str]]   # {板块名: [裸数字 codes...]}
+    degraded: bool = False         # 任一板块成分拉取失败/降级 → true（§4.8 消费侧跳过清空，防误清全库）
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# /daily-bars/cross-validate（PLAN §11.2：双源交叉验证，mootdx 永不参与）
+# ──────────────────────────────────────────────────────────────────────────────
+class CrossValidateRequest(BaseModel):
+    codes: list[str] = Field(..., description="证券代码：裸数字 6 位股票（指数/非股票不受支持）")
+    start_date: str = Field(..., description="起始日期 YYYY-MM-DD")
+    end_date: str = Field(..., description="结束日期 YYYY-MM-DD（含）")
+    adjust: str = Field("qfq", description="复权方式：qfq / hfq / none")
+
+    @field_validator("codes")
+    @classmethod
+    def _validate_codes(cls, v: list[str]) -> list[str]:
+        if not v:
+            raise ValueError("codes 不能为空")
+        cleaned = []
+        for raw in v:
+            code = str(raw).strip()
+            if not is_stock_code(code):
+                raise ValueError(
+                    f"cross-validate 仅支持股票裸数字 6 位（指数/非股票不受支持），收到: {code!r}"
+                )
+            cleaned.append(code)
+        return cleaned
+
+    @field_validator("start_date", "end_date")
+    @classmethod
+    def _validate_dates(cls, v: str) -> str:
+        return _validate_date(v)
+
+    @field_validator("adjust")
+    @classmethod
+    def _validate_adjust(cls, v: str) -> str:
+        if v not in ("qfq", "hfq", "none"):
+            raise ValueError(f"adjust 仅支持 qfq/hfq/none，收到: {v!r}")
+        return v
+
+
+class CrossSourceResult(BaseModel):
+    source: str
+    count: int
+    data: list[Bar]
+
+
+class CrossValidateResponse(BaseModel):
+    status: str = "ok"
+    results: dict[str, dict[str, CrossSourceResult]]  # {code: {source: result}}；源无数据 count=0 data=[]
+    failed: list[dict] = Field(default_factory=list, description="[{code, reason}] 双源均失败进 failed[]")
 
 
 # ──────────────────────────────────────────────────────────────────────────────

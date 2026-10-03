@@ -60,6 +60,8 @@
 | seal_amount vs seal_order_amount | 同名前缀不同义 | 封板资金（ZT）vs 封单资金（DT）——映射表显式区分 |
 | payload / page / detail | 概念不同 | 原样快照 / 整页渲染 / 事件详情（三种 JSONB） |
 | st_change（历史留痕） | 已废误名 | V1 换手率误名，字典留痕防旧记忆复活 |
+| max_trade_date | 响应键（非列名） | GET /history/max/date/{code} 增量锚点响应键（V1 兼容语义，非 schema 列，§5 枚举表不收录） |
+| degraded | 响应键（非列名） | POST /board-members 降级标记（任一板块拉取失败/降级 → true，消费侧跳过清空防误清全库；非 schema 列，§5 枚举表不收录） |
 
 ## 四、JSONB 内部键（同受本册约束）
 

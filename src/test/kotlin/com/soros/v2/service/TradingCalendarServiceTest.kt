@@ -1,8 +1,13 @@
 package com.soros.v2.service
 
 import com.soros.v2.repository.TradingCalendarRepository
+import com.soros.v2.service.dto.BoardMembersRequest
+import com.soros.v2.service.dto.CrossValidateRequest
+import com.soros.v2.service.dto.CrossValidateResponse
 import com.soros.v2.service.dto.DailyBarsBatchRequest
 import com.soros.v2.service.dto.DailyBarsBatchResponse
+import com.soros.v2.service.dto.FundamentalsRequest
+import com.soros.v2.service.dto.FundamentalsStockDto
 import com.soros.v2.service.dto.StockListDto
 import java.time.LocalDate
 import kotlinx.coroutines.runBlocking
@@ -54,6 +59,10 @@ class TradingCalendarServiceTest {
         override suspend fun fetchDailyBarsBatch(request: DailyBarsBatchRequest): DailyBarsBatchResponse =
             DailyBarsBatchResponse("ok")
         override suspend fun fetchTradingCalendar(): List<String> = calendarDates
+        override suspend fun fetchFundamentals(request: FundamentalsRequest): List<FundamentalsStockDto> = emptyList()
+        override suspend fun fetchBoardMembers(request: BoardMembersRequest): Map<String, List<String>> = emptyMap()
+        override suspend fun fetchDailyBarsCross(request: CrossValidateRequest): CrossValidateResponse =
+            CrossValidateResponse("ok")
     }
 
     private fun service(pythonClient: FakePythonClient = FakePythonClient()): TradingCalendarServiceImpl =

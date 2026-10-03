@@ -26,4 +26,7 @@ interface StockHistoryRepository : JpaRepository<StockHistory, Long> {
     /** 该股最大交易日（采集水位 / 对账） */
     @Query("SELECT MAX(h.tradeDate) FROM StockHistory h WHERE h.code = :code")
     fun findMaxTradeDateByCode(@Param("code") code: String): LocalDate?
+
+    /** 指定交易日全部涨停行（§4.8 涨停梯队 / 最高板：is_limit_up 前置判定列） */
+    fun findByTradeDateAndIsLimitUpTrue(tradeDate: LocalDate): List<StockHistory>
 }

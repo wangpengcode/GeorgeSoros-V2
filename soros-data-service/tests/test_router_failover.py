@@ -13,8 +13,16 @@ from helpers import StubAdapter, make_bar, raise_error
 
 def _router(baostock_bars=None, akshare_bars=None, mootdx_bars=None,
             baostock_delisted=None, akshare_stock_list=None):
+    """baostock_delisted 兼容旧签名：DataRouter.fetch_stock_list 现在用 fetch_stock_basic_rows()
+    （Step 5a 一次取退市+ipo_date），把 delisted 集合转为 query_stock_basic 行。"""
+    basic_rows = []
+    for code in (baostock_delisted or set()):
+        basic_rows.append({
+            "code": f"sh.{code}", "code_name": code, "ipo_date": "2000-01-01",
+            "out_date": "", "type": "1", "status": "0",
+        })
     return DataRouter([
-        StubAdapter("baostock", bars=baostock_bars, delisted=baostock_delisted),
+        StubAdapter("baostock", bars=baostock_bars, stock_basic_rows=basic_rows),
         StubAdapter("akshare", bars=akshare_bars, stock_list=akshare_stock_list),
         StubAdapter("mootdx", bars=mootdx_bars),
     ])

@@ -20,8 +20,8 @@ BAR_CONTRACT_KEYS = {
     "date", "code", "open", "high", "low", "close",
     "volume", "amount", "change_percent", "turnover", "prev_close",
 }
-# PLAN §11.1 stock-list 元素契约键集合
-STOCK_ITEM_KEYS = {"code", "name", "market", "board", "is_st", "delisted"}
+# PLAN §11.1 stock-list 元素契约键集合（Step 5a 增补 ipo_date：BaoStock query_stock_basic 回填）
+STOCK_ITEM_KEYS = {"code", "name", "market", "board", "is_st", "delisted", "ipo_date"}
 HEALTH_SOURCES = ("baostock", "akshare", "mootdx")
 
 
@@ -210,11 +210,22 @@ def test_daily_bars_batch_codes_over_batch_max_422_envelope(monkeypatch, make_cl
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _akshare_stock_list_router(df, st_codes, delisted=set()):
+    """构造 stock-list router：baostock 侧由 delisted 集合转为 query_stock_basic 行（含 ipo_date）。
+
+    DataRouter.fetch_stock_list 现在用 fetch_stock_basic_rows() 一次取退市+ipo_date（Step 5a），
+    StubAdapter 的 delisted 参数已被 stock_basic_rows 取代。
+    """
     akshare = AkshareAdapter(FakeCircuitBreaker(), FakeRateLimiter())
     akshare._stock_list_df = lambda: df
     akshare._fetch_st_codes = lambda: st_codes
+    basic_rows = []
+    for code in delisted:
+        basic_rows.append({
+            "code": f"sh.{code}", "code_name": code, "ipo_date": "2000-01-01",
+            "out_date": "", "type": "1", "status": "0",
+        })
     return DataRouter([
-        StubAdapter("baostock", delisted=delisted),
+        StubAdapter("baostock", stock_basic_rows=basic_rows),
         akshare,
         StubAdapter("mootdx"),
     ])

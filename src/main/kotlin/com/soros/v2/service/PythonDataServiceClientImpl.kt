@@ -2,8 +2,16 @@ package com.soros.v2.service
 
 import com.soros.v2.exception.PythonClientException
 import com.soros.v2.exception.SorosBaseException
+import com.soros.v2.service.dto.BoardMembersRequest
+import com.soros.v2.service.dto.BoardMembersResponse
+import com.soros.v2.service.dto.BoardMembersSnapshot
+import com.soros.v2.service.dto.CrossValidateRequest
+import com.soros.v2.service.dto.CrossValidateResponse
 import com.soros.v2.service.dto.DailyBarsBatchRequest
 import com.soros.v2.service.dto.DailyBarsBatchResponse
+import com.soros.v2.service.dto.FundamentalsRequest
+import com.soros.v2.service.dto.FundamentalsResponse
+import com.soros.v2.service.dto.FundamentalsStockDto
 import com.soros.v2.service.dto.PythonHealthResponse
 import com.soros.v2.service.dto.StockListDto
 import com.soros.v2.service.dto.StockListResponse
@@ -106,6 +114,39 @@ class PythonDataServiceClientImpl(
             DEFAULT_RETRY_COUNT,
         ).dates
     }
+
+    override suspend fun fetchFundamentals(request: FundamentalsRequest): List<FundamentalsStockDto> =
+        executeWithBreaker("fundamentals") {
+            callApi(
+                webClient,
+                { webClient.post().uri("/api/v1/fundamentals").bodyValue(request).retrieve() },
+                FundamentalsResponse::class.java,
+                DEFAULT_RETRY_COUNT,
+            ).stocks
+        }
+
+    override suspend fun fetchBoardMembers(request: BoardMembersRequest): Map<String, List<String>> =
+        fetchBoardMembersSnapshot(request).boards
+
+    override suspend fun fetchBoardMembersSnapshot(request: BoardMembersRequest): BoardMembersSnapshot =
+        executeWithBreaker("board-members") {
+            callApi(
+                webClient,
+                { webClient.post().uri("/api/v1/board-members").bodyValue(request).retrieve() },
+                BoardMembersResponse::class.java,
+                DEFAULT_RETRY_COUNT,
+            ).let { BoardMembersSnapshot(boards = it.boards, degraded = it.degraded) }
+        }
+
+    override suspend fun fetchDailyBarsCross(request: CrossValidateRequest): CrossValidateResponse =
+        executeWithBreaker("daily-bars-cross-validate") {
+            callApi(
+                webClient,
+                { webClient.post().uri("/api/v1/daily-bars/cross-validate").bodyValue(request).retrieve() },
+                CrossValidateResponse::class.java,
+                DEFAULT_RETRY_COUNT,
+            )
+        }
 
     /** 请求区间是否超阈值（backfill profile 判定；internal 供单测直接验证边界语义） */
     internal fun requestRangeExceeds(request: DailyBarsBatchRequest, days: Long): Boolean = try {
