@@ -1,0 +1,57 @@
+# =============================================================================
+# GeorgeSoros-V2 application.yml（PLAN §13.1 全样，2026-10-03 穿透销账定稿）
+# 密钥只走环境变量，不进 git；测试环境由 @ServiceConnection 覆盖 datasource
+# =============================================================================
+spring:
+  application:
+    name: soros-v2
+  datasource:
+    url: jdbc:postgresql://localhost:5432/soros
+    username: soros
+    password: ${SOROS_DB_PASSWORD:}          # 环境变量注入，不进 git；生产必须显式设置
+    hikari:
+      maximum-pool-size: 10                 # 单机内部用途（采集+API+回放），10 足够
+      minimum-idle: 2
+      connection-timeout: 5000
+      max-lifetime: 1800000                 # 30min，小于 PG 端 idle 超时
+  jpa:
+    hibernate:
+      ddl-auto: validate                    # 结构变更只走 Flyway，Hibernate 永不改表
+    open-in-view: false                     # 无视图层懒加载需求，关掉省连接
+    properties:
+      hibernate:
+        jdbc:
+          batch_size: 500                   # saveBatch 批量插入
+        order_inserts: true
+        order_updates: true
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+
+server:
+  port: 19890                               # V2 新端口（V1=19889，完全独立无切换，§七.5）
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,metrics             # §13.3：/actuator/metrics 自用，不引 Prometheus
+
+soros:
+  collect:
+    cron: "0 0 20 * * ?"                    # §4.7 防线①
+    default-start-date: 2021-10-01          # 近 5 年
+    batch-size: 50                          # 每次 HTTP 请求股票数
+    rolling-window-days: 10                 # §4.7 防线④
+  python-client:
+    base-url: http://localhost:8000         # Python FastAPI（§13.2 超时按 profile）
+  backfill:
+    copy-batch-rows: 50000                  # stage 批大小
+  sentiment:
+    big-meat-threshold: 5.0
+    big-face-threshold: -5.0
+    pool:     { min-streak: 3, min-limit-ups: 2, min-5d-gain: 50 }
+    collapse: { min-streak: 2, max-5d-drop: 30 }
+    dragon:   { observe-days: 3, small-max-limit_up_streak: 7 }   # §4.9 状态机
+  dingtalk:
+    webhook: ${SOROS_DINGTALK_WEBHOOK:}     # §11.3；M6 用测试地址验证

@@ -1,0 +1,25 @@
+# Gradle
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# 运行时产物（§13.3 日志按天轮转 14 天，不进 git）
+logs/
+*.log
+
+# 本地覆盖（密钥只走环境变量，见 PLAN §13.1）
+application-local.yml
+
+# macOS
+.DS_Store
+
+# Claude 会话工作流状态（临时性）
+.claude/workflows/*.json
+
+# 防御：环境变量文件（当前密钥只走环境变量，不用 .env）
+.env*
