@@ -671,8 +671,9 @@ function equity(seed,annual,maxdd){
 }
 function equitySvg(seed,annual,maxdd){
   const {out,bout}=equity(seed,annual);
+  const ew=out.map((v,i)=>1+(v-1)*0.62+(bout[i]-1)*0.28);
   const W=640,H=220,P=36;
-  const all=out.concat(bout),lo=Math.min.apply(null,all),hi=Math.max.apply(null,all);
+  const all=out.concat(bout,ew),lo=Math.min.apply(null,all),hi=Math.max.apply(null,all);
   const X=i=>P+i*(W-2*P)/(out.length-1);
   const Y=v=>H-24-(v-lo)/(hi-lo)*(H-48);
   const path=a=>a.map((v,i)=>(i?'L':'M')+X(i).toFixed(1)+','+Y(v).toFixed(1)).join(' ');
@@ -682,8 +683,9 @@ function equitySvg(seed,annual,maxdd){
     g+='<text x="'+(P-4)+'" y="'+(y+4)+'" fill="#7c8aa0" font-size="10" text-anchor="end">'+(1+(hi-lo)*(1-k/2)).toFixed(2)+'</text>';}
   const bh=bout.map((v,i)=>'M'+X(i).toFixed(1)+','+H-24+'L'+X(i).toFixed(1)+','+Y(v).toFixed(1)).join(' ');
   return '<svg viewBox="0 0 '+W+' '+H+'" style="width:100%;max-width:760px;background:#0a0e14;border:1px solid var(--line);border-radius:6px">'+
-    '<title>策略净值（红实线）vs 沪深300（灰虚线）</title>'+g+
+    '<title>策略净值（红实线）vs 沪深300（灰虚线）vs 等权基准（紫点线）</title>'+g+
     '<path d="'+bh+'" stroke="#4a566b" stroke-width="1.2" stroke-dasharray="4 3" fill="none"/>'+
+    '<path d="'+path(ew)+'" stroke="#b48ce8" stroke-width="1.2" stroke-dasharray="2 4" fill="none"/>'+
     '<path d="'+path(out)+'" stroke="#e5484d" stroke-width="1.8" fill="none"/>'+
     '<text x="'+(W-P)+'" y="'+(H-6)+'" fill="#7c8aa0" font-size="10" text-anchor="end">180 交易日 · 起点净值=1.00</text></svg>';
 }
@@ -717,22 +719,31 @@ function renderResults(){
     '<td><span class="badge '+(r.dry?'b-draft':'b-active')+'">'+(r.dry?'DRY':'DONE')+'</span></td></tr>').join('');
   renderDetail();renderDiff();
 }
+function kellyF(r){const b=1.4+r.seed%10/10;return Math.max(0,r.win-(1-r.win)/b)}
+function kellyPos(r){return Math.min(kellyF(r)/2*100,25).toFixed(1)}
+function toggleAlert(btn){const on=btn.dataset.on==='1';btn.dataset.on=on?'':'1';
+  btn.textContent=on?'🔔 启用盘中预警':'✓ 已启用 alert_enabled=true（盘中求值，收盘确认）';
+  btn.classList.toggle('gold',!on);}
 function renderDetail(){
   const r=RESULTS.find(x=>x.id===selResult);
   const d=document.getElementById('detail');
   if(!r){d.innerHTML='<div class="hint">点击行查看净值曲线 / 指标 / 成交明细</div>';return}
   d.innerHTML='<h2 style="font-size:13px;color:var(--gold);letter-spacing:1px">'+esc(r.strat)+' · '+r.range+
-    (r.dry?'（试跑）':'')+'</h2><div style="margin-top:10px">'+equitySvg(r.seed,r.annual,r.maxdd)+'</div>'+
+    (r.dry?'（试跑）':'')+'</h2><button class="btn" style="margin-left:10px;font-size:11px;padding:2px 10px;vertical-align:middle" onclick="toggleAlert(this)" data-on="">🔔 启用盘中预警</button><div style="margin-top:10px">'+equitySvg(r.seed,r.annual,r.maxdd)+'</div>'+
     '<div class="metrics">'+
     [['年化',pct(r.annual),cls(r.annual)],['最大回撤',pct(r.maxdd),'green'],['Sharpe',r.sharpe.toFixed(2),''],
-     ['胜率',(r.win*100).toFixed(1)+'%',''],['盈亏比',(1.4+r.seed%10/10).toFixed(2),''],['超额vs300',pct(r.excess),cls(r.excess)]]
-    .map(m=>'<div class="m"><div class="l">'+m[0]+'</div><div class="v '+m[2]+'">'+m[1]+'</div></div>').join('')+'</div>'+
+     ['胜率',(r.win*100).toFixed(1)+'%',''],['盈亏比',(1.4+r.seed%10/10).toFixed(2),''],['超额vs300',pct(r.excess),cls(r.excess)],
+     ['Kelly p',(r.win*100).toFixed(0)+'%',''],['Kelly b',(1.4+r.seed%10/10).toFixed(2),''],
+     ['滚动 f*',(kellyF(r)*100).toFixed(1)+'%',''],['建议仓位',kellyPos(r)+'%','gold'],['样本数',r.trades+' 笔','']]
+    .map(m=>'<div class="m"><div class="l">'+m[0]+'</div><div class="v '+m[2]+'"'+(m[2]==='gold'?' style="color:var(--gold)"':'')+'>'+m[1]+'</div></div>').join('')+'</div>'+
+    '<div class="legend">Kelly 组：滚动 60 笔 trade_ledger → f* = p−(1−p)/b → 半 Kelly，上限 25%；样本不足 30 笔自动减半</div>'+
     '<div class="legend">成交明细（节选 6 笔 · 完整明细落库并可导入 trade_ledger(BACKTEST) 供 Kelly 滚动 60 笔估计）</div>'+
     tradesHtml(r.seed);
 }
 const DIFF_KEYS=[['年化',r=>pct(r.annual),r=>r.annual,true],['最大回撤',r=>pct(r.maxdd),r=>r.maxdd,true],
   ['Sharpe',r=>r.sharpe.toFixed(2),r=>r.sharpe,true],['胜率',r=>(r.win*100).toFixed(1)+'%',r=>r.win,true],
-  ['交易笔数',r=>r.trades,r=>r.trades,false],['超额vs300',r=>pct(r.excess),r=>r.excess,true]];
+  ['交易笔数',r=>r.trades,r=>r.trades,false],['超额vs300',r=>pct(r.excess),r=>r.excess,true],
+  ['Kelly 建议仓位',r=>kellyPos(r)+'%',r=>+kellyPos(r),true]];
 function renderDiff(){
   const box=document.getElementById('diffbox');
   const sel=RESULTS.filter(r=>cmpSet.has(r.id)).slice(0,2);

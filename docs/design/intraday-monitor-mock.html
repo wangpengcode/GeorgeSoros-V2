@@ -238,6 +238,20 @@ syncChip();render();
         <ul class="warn" id="dd"></ul>
         <div class="legend">策略：龙头炸板/高位大面/最高板易主 → 推送；普通涨停不推（防刷屏）</div>
       </div>
+      <div class="panel">
+        <h2>策略开仓预警 · ALERT（§14.9）</h2>
+        <div style="border:1px solid #232d3d;background:#1a2230;border-radius:6px;padding:8px 12px;margin-bottom:8px">
+          <div><b>PCB 突破</b> × 002475 立讯精密 <span style="border:1px solid #e5484d;color:#e5484d;font-size:10.5px;padding:0 6px;border-radius:4px;margin-left:4px">盘中预警，收盘确认</span></div>
+          <div style="color:#7d8b9e;font-size:12px;margin-top:2px">命中：突破 20 日高 + 量比 2.3（与回测口径一致）· 14:45 日线口径求值</div>
+          <div style="font-size:12px;margin-top:2px">Kelly 建议仓位 <b style="color:#e2b13c">8%</b>（滚动 60 笔 f*=16.4% → 半 Kelly → 上限 25%）</div>
+        </div>
+        <div style="border:1px solid #232d3d;background:#1a2230;border-radius:6px;padding:8px 12px;margin-bottom:8px">
+          <div><b>存储芯片动量</b> × 300308 中际旭创 <span style="border:1px solid #e5484d;color:#e5484d;font-size:10.5px;padding:0 6px;border-radius:4px;margin-left:4px">盘中预警，收盘确认</span></div>
+          <div style="color:#7d8b9e;font-size:12px;margin-top:2px">命中：MACD 金叉 + 获利盘 71% &gt; 65</div>
+          <div style="font-size:12px;margin-top:2px">Kelly 建议仓位 <b style="color:#e2b13c">5%</b>（样本仅 23 笔，置信度低 → 自动减半）</div>
+        </div>
+        <div class="legend">候选池 = 涨停池 ∪ 条件命中 ∪ universe 成员；每策略×股×日 ≤1 条 ALERT；只预警不自动交易</div>
+      </div>
     </div>
   </div>
 </div>
