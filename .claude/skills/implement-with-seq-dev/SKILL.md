@@ -30,7 +30,9 @@ allowed-tools: Read, Write, Edit, Glob, Grep, Bash, Agent, AskUserQuestion, Task
 ```bash
 # JDK 21（本机当前只有 JDK 26；M1 首日需 brew install openjdk@21 或下载 Temurin 21）
 # JAVA_HOME 禁止硬编码 26
-export JAVA_HOME=$(/usr/libexec/java_home -v 21)
+# 注意：brew 的 openjdk@21 是 keg-only，未注册进 macOS JVM 目录，
+# `/usr/libexec/java_home -v 21` 会静默回退到 26 —— 禁止用 java_home，必须用显式路径
+export JAVA_HOME=/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home
 export PATH="$JAVA_HOME/bin:$PATH"
 ```
 
@@ -333,7 +335,9 @@ Agent(.claude/agents/test-writer.md, prompt:
 Test Writer 完成后，先运行测试检查是否全部通过：
 
 ```bash
-export JAVA_HOME=$(/usr/libexec/java_home -v 21)
+# 注意：brew 的 openjdk@21 是 keg-only，未注册进 macOS JVM 目录，
+# `/usr/libexec/java_home -v 21` 会静默回退到 26 —— 禁止用 java_home，必须用显式路径
+export JAVA_HOME=/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home
 ./gradlew test --tests "com.soros.v2.service.{domain}.{TestClassName}" -q
 ```
 
