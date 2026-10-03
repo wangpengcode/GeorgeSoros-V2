@@ -1451,7 +1451,21 @@ signal_daily(           -- 个股×日，只存"必须全市场排序才得出"�
 
 **筹码分布自算（2026-10-03 穿透定稿，路径 A）**：`signal_daily` 追加 6 列 profit_ratio（获利盘%）、cost_dev（成本偏离%）、c90_low/high/conc、c70_low/high/conc——不存分布曲线本身（~50MB/年）。递推 `D_t = D_{t-1}×(1−tr) + tr×triangular(qfq_high, qfq_low, qfq_close)`，价格坐标全程 qfq、180 桶。穿透解决的两个口径坑：①不用 amount/volume 算形状峰（不复权坐标与 qfq 混杂），峰=qfq_close；②不落绝对平均成本（qfq 重对基会漂移），落 cost_dev=平均成本/现价−1（比率对复权平移免疫）；c90/c70 四个绝对 qfq 坐标列除权日会过期，由 AdjustCheckStep 全历史重算（§17.1 B6）。边界处理：一字板 ±0.5% 扁平兜底、换手率 clamp ≤1、停牌无 bar 筹码冻结、上市首日全量换手。计算：全市场全量重算 ≈32 亿次浮点运算（5400 股×~2000 日×~300 桶）JVM 秒~分钟级，桶状态驻留内存不持久化，增量每日 O(股×桶)。东财 stock_cyq_em 源码级探针（docs/research/chip-cyq-probe.md）：**它不是服务端接口，是 akshare 本地跑东财前端 JS 的 150 档三角分布+换手衰减递推，且只返回 90 个交易日**——与我们路径 A 同族模型，无权威性优势，加 mini_racer 依赖与 WAF 对抗（TLS 指纹拦截、30+ 次触发 IP 封禁）→ 不进主链；对拍重定位=同 fqt=qfq 口径下校准峰位/衰减参数（预期同族差异 <2%），非真值校验。
 
-**K 线页展示端点（2026-10-03 §17.5 C4 补）**：`GET /api/v1/stocks/{code}/kline?from=&to=` —— stock_history（qfq OHLC+量额）∘ signal_daily 筹码 8 列一次聚合返回；MA/MACD/换手等衍生指标前端现算（样稿同款公式）；叠加全局日期联动 ?date=（§15.2）回放日截断。不用 V1 兼容端点 /history/daily 供前端（webhook 语义，口径不同）。
+**K 线页展示端点（2026-10-03 §17.5 C4 补；响应 schema 2026-10-03 字段级对拍定稿）**：`GET /api/v1/stocks/{code}/kline?from=&to=` —— stock_history（qfq OHLC+量额）∘ signal_daily 筹码 8 列一次聚合返回；MA/MACD/换手等衍生指标前端现算（样稿同款公式）；叠加全局日期联动 ?date=（§15.2）回放日截断。不用 V1 兼容端点 /history/daily 供前端（webhook 语义，口径不同）。响应 schema：
+
+```json
+{ "code": "600000", "bars": [ {
+    "date": "2026-09-30",
+    "open": 9.22, "high": 9.49, "low": 9.16, "close": 9.48,
+    "volume": 147484820, "amount": 1386209937.38,
+    "chip": { "profit_ratio": 92.9, "cost_dev": -1.2,
+              "c90_low": 8.10, "c90_high": 9.55, "c90_conc": 61.2,
+              "c70_low": 8.65, "c70_high": 9.40, "c70_conc": 43.8,
+              "avg_cost": 9.59 } } ] }
+```
+- chip 8 列名与 signal_daily DDL **一字不差**（样稿 `st.{profit,dev,r90[],c90,...}` 简写为演示态，M7 对齐；r90/r70 区间端点在 DTO 拆平为 c90_low/c90_high，前端拼回）。
+- `avg_cost` = 现算派生 `close/(1+cost_dev/100)`（cost_dev 定义=(close−avg_cost)/avg_cost×100，反解即得），**不新增库列**；cost_dev 为 NULL（warm-up 前 60 日，§17 ⑥）的 bar 整个 chip=null，前端画"筹码暂缺"。
+- 换手率现算 = volume/float_shares×100（float_shares 来自 stock_info，§17.1 B1）。
 
 **复盘对标（2026-10-02 拆解同花顺「热点复盘」长图，ozone summary_image 接口）**：图中信息 → 本方案落点——涨停/跌停/炸板家数、总溢价幅 → market_daily；分级晋级率（一进二/二进三…）→ yst_promotion（本次补入）；是否首板/连板数 → limit_up_streak 词表组；涨停时间早→晚 → intraday_archive.first_seal_time（§十四，含秒级）；板块分组与板块涨停家数 → sector_daily。
 
@@ -1464,7 +1478,7 @@ signal_daily(           -- 个股×日，只存"必须全市场排序才得出"�
 
 ### 12.5 绩效与可复现
 
-年化 (1+R)^(252/交易日数)−1、最大回撤、Sharpe（rf=0,√252）、胜率/盈亏比/换手率、对沪深300 超额（index_history sh000001）。落库 `backtest_result(id, strategy_name, params JSONB, start_date, end_date, metrics JSONB, equity_curve JSONB, data_snapshot{maxDate,rowCount}, git_sha, created_at)`——params+data_snapshot+git_sha 三件套保证可复现。
+年化 (1+R)^(252/交易日数)−1、最大回撤、Sharpe（rf=0,√252）、胜率/盈亏比/换手率、对沪深300 超额（index_history sh000001）。落库 `backtest_result(id, strategy_name, params JSONB, start_date, end_date, metrics JSONB, equity_curve JSONB, data_snapshot{maxDate,rowCount}, git_sha, created_at)`——params+data_snapshot+git_sha 三件套保证可复现。**metrics JSONB 键名定稿（2026-10-03 对拍，console 回测指标卡与此一一对应）**：`{annual_return, max_drawdown, sharpe, win_rate, profit_loss_ratio, turnover, excess_vs_hs300, total_trades}`。
 
 ### 12.6 测试与性能
 
@@ -1768,8 +1782,23 @@ IntradaySource 接口（Python 侧）
   └─ (预留) L2Source   ← 更远期：正规 Level-2 授权
 ```
 
+**池接口字段中→英映射表（2026-10-03 字段级对拍补，种子 docs/seed/pool_snapshot_*.json 为实测键名）**——Python 摄取层用此表统一转英文 DTO，禁止两侧各自发明：
+
+| 源字段（中文键） | DTO 字段 | 出现池别 |
+|---|---|---|
+| 代码 / 名称 / 涨跌幅 / 最新价 / 成交额 / 流通市值 / 总市值 / 换手率 / 所属行业 | code / name / chg / price / amount / float_mv / total_mv / turnover / industry | 全 5 池 |
+| 首次封板时间 / 炸板次数 / 涨停统计 | first_seal_time / zhaban_count / limit_stat | ZT/ZB/STRONG（"涨停统计"样稿缩写 stat） |
+| 最后封板时间 / 封板资金 / 连板数 | last_seal_time / seal_amount / streak | 仅 ZT（连板数样稿缩写 lbc） |
+| 涨停价 / 涨速 / 振幅 | limit_price / speed / amplitude | ZB/ZT/PREV/STRONG 视池而定，空缺=缺列 |
+| 动态市盈率 / 封单资金 / 板上成交额 / 连续跌停 / 开板次数 | pe_ttm / **seal_order_amount**（注意：DT 口径是"封单资金"，≠ZT"封板资金" seal_amount，两个独立字段）/ board_amount / dt_streak / open_count | 仅 DT |
+| 是否新高 / 量比 / 入选理由 | is_new_high / vol_ratio / select_reason | 仅 STRONG |
+| 昨日封板时间 / 昨日连板数 | prev_seal_time / prev_streak | 仅 PREV |
+
+**池别字段覆盖声明（对拍修正）**：此前"六项关键字段全齐"表述不精确——**仅 ZT 六项全齐**；ZB 缺 最后封板时间/封板资金/连板数，DT 无连板概念（用 dt_streak），STRONG 仅涨停统计，PREV 全为"昨日"口径。`intraday_archive` 权威归档时非 ZT 成员缺列落 **NULL**（列允许 NULL，不造默认值）；原样 JSONB 快照（intraday_pool_snap）保留各池全量原样字段不受影响。
+
 ### 14.3 轮询与限频（东财 2025-04 起 IP 级限频，封禁实测 ~5h）
 
+```
 ```
 - 涨停池 4 接口（ZT/ZB/DT/STRONG）各 15-30s、错峰相位（不同时发）
 - 全市场快照 90s + 随机抖动
@@ -1816,10 +1845,13 @@ intraday_archive(              -- 收盘归档（盘后权威表，词表升级�
 intraday_replay(               -- 日维度整页渲染快照，一日一行（2026-10-02 定稿：读模型/渲染契约表）
   trade_date  DATE PRIMARY KEY,
   complete    BOOLEAN DEFAULT FALSE,        -- 15:10 归档补齐后置 true；盘中只含已采样点
-  page        JSONB             -- 整页数据：{kpi_series:[{t:"09:30",zt:52,zb:18,dt:3,prem:1.66,adr:2300},...],
+  page        JSONB             -- 整页数据：{kpi_series:[{t:"09:30",zt:52,zb:18,dt:3,prem:1.66,adr:2.3,adv:3200,dec:1400,max_streak:5,gap_pct:1.2},...],
                                 --   ladder:[{code,name,streak,chg,seal,first,zha,stat}...],
-                                --   events:[...], panels:{big_face,ding_talk,strategy_alerts}}
+                                --   events:[{time,code,name,tg,txt}...], panels:{big_face,ding_talk,strategy_alerts, pools:[{pool,enabled,last_ok_at,rate_state}]}}
                                 --   schema = GET /intraday/summary 响应 schema（同一 Kotlin DTO 序列化）
+                                --   字段定稿（2026-10-03 字段级对拍）：adr=涨跌家数比（adv/dec 家数两槽并列，样稿旧样例值 2300 系演示数据误用成交额口径，M7 对齐）；max_streak=最高板、gap_pct=竞价缺口%（§14.6 快照）补槽位；
+                                --   events 槽位展开 {time,code,name,tg,txt}（tg=事件类型标签，钉钉记录走独立 panels.ding_talk 不混入 events，样稿混流为演示态 M7 对齐）；
+                                --   pools=池状态面板运行时态（enabled ∘ intraday_pool_state；last_ok_at/rate_state 来自轮询器内存态，**不入库**，重启清零可接受）
 );
 -- 用法与保证：回放 = WHERE trade_date=? 一次查询零 join，前端拿到即渲染（实时页/回放页同一渲染逻辑）；
 -- 盘中每 90s 采样点追加进当日行 kpi_series（240 次小 upsert，进程重启曲线不丢），
@@ -1904,7 +1936,7 @@ daily_note(
 - **各页入口**：四个页面右下角悬浮「笔记」按钮 → 侧滑面板：上方列出当天该页已有笔记（可编辑），下方输入框新增；K线页新增时自动带上当前查看的个股（st_code 挂靠），面板内可切换"仅本股/全市场"
 - **笔记本页**（notes 样稿 docs/design/notes-mock.html，侧边栏第 5 项）：按天倒序一节一天，节内按来源页分组展示（页签徽标），当天可跨页补记（page=GENERAL）；支持按来源页/个股过滤
 - **联动（轻量）**：盘中监控的实时事件流、大面预警提供「引用到笔记」（预填事件摘要，人工补充判断）；情绪周期表的当日评级/周期阶段可在笔记本节头自动带出（只读上下文，不代写）
-- **API**：`GET /api/v1/notes?date=&page=&code=`、`POST /api/v1/notes`（upsert by UNIQUE 键）、`DELETE /api/v1/notes/{id}`
+- **API**：`GET /api/v1/notes?date=&page=&code=`、`POST /api/v1/notes`（upsert by UNIQUE 键）、`DELETE /api/v1/notes/{id}`；样稿 notes-mock 简写字段与 DTO 映射（2026-10-03 对拍补）：`text↔content`、`d↔st_date`、`t↔created_at`、`p↔page`、`c↔st_code`——M7 前端按 DTO 全名消费。
 - **排期**：Step 9（0.5-1 天，可与 Step 8 并行）：表+API（0.5 天）→ 四页悬浮面板+笔记本页（0.5 天）
 
 **全局日期联动（复盘模式，2026-10-03 用户确认，样稿已体现）**：情绪周期表是全站**日历骨架**——在周期表点任意日期列，全站进入"该日复盘模式"：
@@ -1971,3 +2003,19 @@ daily_note(
 | C4 | K 线页无展示端点（/history/daily 是 V1 兼容 webhook，前端不该吃） | 补端点 | `GET /api/v1/stocks/{code}/kline`（§12.4.1 已落：OHLC ∘ 筹码 8 列聚合，衍生指标前端算） |
 
 §17.3 待办 ①② 已完成（commit d8e3290：盘中池状态面板 + 样稿增补 6 项）。
+
+### 17.6 字段级三方对拍（2026-10-03，fork 代理机审 + 人工定稿）
+
+对拍范围：PLAN API schema ↔ 5 样稿页面 JS 实际读取字段 ↔ 种子五池快照实测键名。**一致项**：ladder 8 字段与 §14.4 一字不差；情绪页主行 10 字段全有出处；自选股成员表与 watchlist_member 吻合；notes page 枚举一致；panels.strategy_alerts 命名统一已生效。**7 缺口定稿**（修改已全部落正文）：
+
+1. 【高】池状态面板健康灯/最近成功/限频三样无落点 → **定稿=运行时态**：summary 响应 `pools:[{pool,enabled,last_ok_at,rate_state}]`，不入库（§14.4 已落）
+2. 【中高】池接口中文字段→英文 DTO 映射表缺失 → §13 补全量映射表（以种子实测键名为准）
+3. 【中】"六项关键字段全齐"仅 ZT 成立；DT"封单资金"≠ZT"封板资金" → §13 池别覆盖声明 + 归档缺列 NULL 策略
+4. 【中】kpi_series 缺 max_streak/gap_pct 槽位；adr 定稿=涨跌家数比（adv/dec 并列；样稿 2300 系演示数据误用成交额口径）→ §14.4 已落
+5. 【中】大肉/大面名单键名 mock `{pct,streak}` vs DDL `{change_pct,limit_up_streak}` → **以 DDL 为准，样稿 M7 对齐**
+6. 【中】C4 kline 响应 schema 未定义、筹码 8 列名样稿简写、avg_cost 无来源 → §12.4.1 补完整 schema + `avg_cost=close/(1+cost_dev/100)` 派生公式（不落列）
+7. 【低】样稿钉钉混在 events（tg='DD'）vs PLAN 独立 panels.ding_talk → **以 PLAN 为准，样稿 M7 对齐**；notes 简写映射已记 §12.9
+
+**无法判定→定稿**：console 回测指标卡 `r.win/r.trades` ↔ metrics JSONB → §12.5 键名定稿（8 键，console 消费同名）；intraday 样稿未实际消费 strategy_alerts（演示态，M7 实装）。
+
+**样稿侧遗留对齐项（M7 批次，不阻塞落地）**：大肉/大面键名、adr 演示值、events 钉钉混流、kline chip 简写名、notes 简写字段。
