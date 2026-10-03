@@ -12,5 +12,6 @@ import org.springframework.context.annotation.Configuration
     PythonClientProperties::class,
     DingTalkProperties::class,
     SentimentProperties::class,
+    BackfillProperties::class,
 )
 class PropertiesConfig

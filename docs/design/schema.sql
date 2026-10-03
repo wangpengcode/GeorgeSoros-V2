@@ -367,3 +367,30 @@ CREATE TABLE daily_note (
     updated_at TIMESTAMP,               -- 行更新时间
     UNIQUE NULLS NOT DISTINCT (trade_date, page, code)  -- §17.1 B9：NULL 视同相等，市场级笔记(code=NULL)同样唯一；编辑=PUT 更新已有行，永不盲插
 );
+
+-- =============================================================================
+-- 七、回填中转表（非领域表，§六.1 COPY 两段式；只存瞬态，无主键/唯一约束，不参与 JPA）
+-- =============================================================================
+
+-- stock_history_stage：UNLOGGED 中转表（不写 WAL，更快、崩溃自清）
+-- 结构=主表数据列全同（含派生列，默认 false/0），但去 id / 无 UNIQUE/CHECK 约束（约束拖慢 COPY）；
+-- 生命周期：BackfillJob COPY INTO → ON CONFLICT (code,trade_date) DO UPDATE 合并 → TRUNCATE → 下一批。
+-- 派生列不经过 saveBatch 派生路径，合并后必须由窗口 SQL 补算（§六.6 recompute_limit_streaks.sql）。
+CREATE UNLOGGED TABLE stock_history_stage (
+    code               VARCHAR(20) NOT NULL,   -- 600000（裸数字，不带 sh/sz）
+    trade_date         DATE NOT NULL,          -- 交易日
+    open               NUMERIC(12,4),          -- 前复权 qfq；涨停判定与 change_pct 用不复权口径，坐标永不混用
+    close              NUMERIC(12,4),          -- 前复权 qfq；涨停判定与 change_pct 用不复权口径，坐标永不混用
+    high               NUMERIC(12,4),          -- 前复权 qfq；涨停判定与 change_pct 用不复权口径，坐标永不混用
+    low                NUMERIC(12,4),          -- 前复权 qfq；涨停判定与 change_pct 用不复权口径，坐标永不混用
+    volume             BIGINT,                 -- 统一单位=股（AKShare/mootdx 手×100，探针实测校准）
+    amount             NUMERIC(20,4),          -- 成交额（元）
+    change_pct         NUMERIC(10,4),          -- 涨跌幅%（不复权口径）
+    turnover_rate      NUMERIC(10,4),          -- 换手率%
+    is_limit_up        BOOLEAN DEFAULT FALSE,  -- 涨停（按原始 change_pct + board 阈值判定）
+    is_limit_down      BOOLEAN DEFAULT FALSE,  -- 跌停
+    limit_up_streak    SMALLINT DEFAULT 0,     -- 连板数（首板=1，0=非涨停/断板；§4.8 派生）
+    limit_down_streak  SMALLINT DEFAULT 0,     -- 跌停连板（§4.9 崩塌池，镜像派生）
+    data_source        VARCHAR(20) DEFAULT 'UNKNOWN', -- 数据来源（failover 可见性）
+    created_at         TIMESTAMP DEFAULT NOW() -- 行创建时间
+);  -- 列注释见 V4__stock_history_stage.sql（与主表同文）

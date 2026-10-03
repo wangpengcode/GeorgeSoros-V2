@@ -17,6 +17,7 @@ import com.soros.v2.service.dto.DailyBarsBatchRequest
 import com.soros.v2.service.dto.SaveBatchResult
 import com.soros.v2.util.CollectMetrics
 import com.soros.v2.util.DataValidator
+import com.soros.v2.util.LimitStreakComputer
 import com.soros.v2.util.LimitUpDetector
 import java.math.BigDecimal
 import java.time.LocalDate
@@ -205,7 +206,9 @@ class StockHistoryServiceImpl(
         var written = 0
         for (bar in sorted) {
             val (isLimitUp, isLimitDown) = LimitUpDetector.detect(bar.changePercent, board)
-            val ipoGuard = isWithinIpoGuard(ipoDate, bar.date)
+            val ipoGuard = LimitStreakComputer.isWithinIpoGuard(ipoDate, bar.date) { d, n ->
+                tradingCalendarService.recentTradingDays(d, n)
+            }
             val finalLimitUp = isLimitUp && !ipoGuard
             val finalLimitDown = isLimitDown && !ipoGuard
 
@@ -217,25 +220,17 @@ class StockHistoryServiceImpl(
                 ?: prevDate?.let { d -> historyRepository.findByCodeAndTradeDate(code, d)?.limitDownStreak?.let { s -> s.toInt() } }
                 ?: 0
 
-            val streak = if (finalLimitUp) baseStreak + 1 else 0
-            val streakDown = if (finalLimitDown) baseDownStreak + 1 else 0
+            val streak = LimitStreakComputer.nextStreak(finalLimitUp, baseStreak)
+            val streakDown = LimitStreakComputer.nextStreak(finalLimitDown, baseDownStreak)
 
             val entity = historyRepository.findByCodeAndTradeDate(code, bar.date) ?: StockHistory()
-            entity.applyBar(code, bar, source, finalLimitUp, finalLimitDown, streak, streakDown)
+            entity.applyBar(code, bar, source, finalLimitUp, finalLimitDown, streak.toInt(), streakDown.toInt())
             historyRepository.save(entity)
-            derivedStreaks[bar.date] = streak.toShort()
-            derivedDownStreaks[bar.date] = streakDown.toShort()
+            derivedStreaks[bar.date] = streak
+            derivedDownStreaks[bar.date] = streakDown
             written++
         }
         return written
-    }
-
-    /** §4.8 IPO 首 5 日守卫：距 ipo_date 不足 5 个交易日 → true（强制 is_limit_up/down=false、streak=0） */
-    private fun isWithinIpoGuard(ipoDate: LocalDate?, barDate: LocalDate): Boolean {
-        if (ipoDate == null) return false
-        val fiveBack = tradingCalendarService.recentTradingDays(barDate, 5)
-        if (fiveBack.size < 5) return true
-        return ipoDate > fiveBack.first()
     }
 
     private fun writeQualityLog(code: String, issueType: QualityIssueType, detail: String, source: DataSourceType) {

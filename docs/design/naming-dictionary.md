@@ -62,6 +62,7 @@
 | st_change（历史留痕） | 已废误名 | V1 换手率误名，字典留痕防旧记忆复活 |
 | max_trade_date | 响应键（非列名） | GET /history/max/date/{code} 增量锚点响应键（V1 兼容语义，非 schema 列，§5 枚举表不收录） |
 | degraded | 响应键（非列名） | POST /board-members 降级标记（任一板块拉取失败/降级 → true，消费侧跳过清空防误清全库；非 schema 列，§5 枚举表不收录） |
+| stock_history_stage | **表级特例**（非字段） | 回填 COPY 中转表（§六.1，UNLOGGED，无主键/唯一约束/CHECK——约束拖慢 COPY）；列名/口径与 stock_history 全同，不新增任何字段 |
 
 ## 四、JSONB 内部键（同受本册约束）
 
@@ -222,3 +223,17 @@
 | `code` | 证券代码（响应键复用列名语义） | /stock-search、/stocks/{code}/actions |
 | `name` | 名称（响应键复用列名语义） | /stock-search、/terms actions[] |
 | `industry` | 行业 JSON 数组（主行业=第一个，展示用；响应键复用列名语义） | /stock-search、limit_up_list 系列 |
+| `status` | 回填任务状态（IDLE/RUNNING/COMPLETED/FAILED；非列名语义随端点，与 dragon_cycle.status 同名字典留痕） | POST /jobs/backfill、GET /jobs/backfill/status |
+| `progress` | 回填进度对象（非列名） | GET /jobs/backfill/status |
+| `total_codes` | 本次回填股票总数 | GET /jobs/backfill/status 响应 progress |
+| `processed_codes` | 已处理股票数（成功+失败） | GET /jobs/backfill/status 响应 progress |
+| `succeeded_codes` | 入库成功股票数 | GET /jobs/backfill/status 响应 progress |
+| `failed_codes` | 失败股票数 | GET /jobs/backfill/status 响应 progress |
+| `total_batches` | 总批数 | GET /jobs/backfill/status 响应 progress |
+| `processed_batches` | 已处理批数 | GET /jobs/backfill/status 响应 progress |
+| `total_rows` | 本次回填目标总行数（0=尚未确定） | GET /jobs/backfill/status 响应 progress |
+| `processed_rows` | 已入库行数（COPY 合并进主表） | GET /jobs/backfill/status 响应 progress |
+| `current_batch` | 当前批序号（1-based） | GET /jobs/backfill/status 响应 progress |
+| `started_at` | 启动时间（ISO-8601） | GET /jobs/backfill/status 响应 progress |
+| `finished_at` | 结束时间（ISO-8601；null=运行中） | GET /jobs/backfill/status 响应 progress |
+| `error` | 失败原因（仅 FAILED 非 null） | GET /jobs/backfill/status 响应 |

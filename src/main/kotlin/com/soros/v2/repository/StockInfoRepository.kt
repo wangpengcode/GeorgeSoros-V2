@@ -33,6 +33,9 @@ interface StockInfoRepository : JpaRepository<StockInfo, Int> {
     /** 有效股票数（非 ST/非退市；§11.1 披露季采集幂等跳过的期望水位） */
     fun countByIsStFalseAndDelistedFalse(): Long
 
+    /** 有效股票全量清单（非 ST/非退市；§六 回填股票清单数据源，ST 隔离铁律：is_st 仅用于排除） */
+    fun findByIsStFalseAndDelistedFalse(): List<StockInfo>
+
     /** 随机抽 N 只非 ST/非退市有效股代码（§11.2 交叉验证小样本；仅 MAIN/GEM/STAR 参与） */
     @Query(
         value = """

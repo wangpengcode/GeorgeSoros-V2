@@ -14,6 +14,8 @@ import org.testcontainers.junit.jupiter.Testcontainers
 /**
  * M1 脚手架冒烟测试（TestContainers PostgreSQL 16）：
  * 断言口径 = 2026-10-03 docker 权威校验（26 表 / 44 索引含 PK+UNIQUE 自动索引 / pg_trgm）。
+ * Step6 增量：V4__stock_history_stage.sql 新增 UNLOGGED 中转表（无 id/无约束/无索引，COPY 两段式瞬态，
+ * PLAN §六.1）→ 表数 26→27，索引仍 44（stage 不建索引）。
  */
 @SpringBootTest
 @Testcontainers
@@ -34,14 +36,14 @@ class SorosApplicationTests(
     }
 
     @Test
-    fun `flyway migrates 26 tables with 44 indexes`() {
+    fun `flyway migrates 27 tables with 44 indexes`() {
         val tables = jdbc.queryForObject(
             "SELECT count(*) FROM information_schema.tables " +
                 "WHERE table_schema='public' AND table_type='BASE TABLE' " +
                 "AND table_name <> 'flyway_schema_history'",
             Int::class.java,
         ) ?: fail("queryForObject 返回 null，异常状态")
-        assertEquals(26, tables, "V1__init_schema.sql 应建 26 张表（与 schema.sql、命名字典一致）")
+        assertEquals(27, tables, "V1 建 26 张业务表 + V4 stock_history_stage UNLOGGED 中转表（PLAN §六.1，无 id/无约束）")
 
         val indexes = jdbc.queryForObject(
             "SELECT count(*) FROM pg_indexes WHERE schemaname='public' " +

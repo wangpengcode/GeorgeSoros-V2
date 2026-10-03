@@ -33,7 +33,9 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-reactor")
     implementation("org.flywaydb:flyway-core")
     implementation("org.flywaydb:flyway-database-postgresql") // Flyway 10+ PostgreSQL 独立模块
-    runtimeOnly("org.postgresql:postgresql")
+    // PG driver：runtimeOnly → implementation——BackfillJob 编译期引用 org.postgresql.PGConnection/CopyManager
+    // （PLAN §六.1 COPY 两段式，PG CopyManager 而非逐行 INSERT）
+    implementation("org.postgresql:postgresql")
 
     testImplementation("org.springframework.boot:spring-boot-starter-test")
     testImplementation("org.springframework.boot:spring-boot-testcontainers")

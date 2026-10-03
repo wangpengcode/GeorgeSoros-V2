@@ -30,6 +30,10 @@ interface StockHistoryRepository : JpaRepository<StockHistory, Long> {
     @Query("SELECT MAX(h.tradeDate) FROM StockHistory h WHERE h.code = :code")
     fun findMaxTradeDateByCode(@Param("code") code: String): LocalDate?
 
+    /** 区间内有行的代码清单（去重升序，§六.6⑤ 派生列抽查对拍候选池，确定性抽样） */
+    @Query("SELECT DISTINCT h.code FROM StockHistory h WHERE h.tradeDate BETWEEN :start AND :end ORDER BY h.code")
+    fun findDistinctCodesByTradeDateBetween(@Param("start") start: LocalDate, @Param("end") end: LocalDate): List<String>
+
     /** 指定交易日全部涨停行（§4.8 涨停梯队 / 最高板：is_limit_up 前置判定列） */
     fun findByTradeDateAndIsLimitUpTrue(tradeDate: LocalDate): List<StockHistory>
 }
