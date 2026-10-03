@@ -163,6 +163,34 @@ body{padding-left:176px!important}
   <a href="notes-mock.html"><b>笔记本</b><i>按天汇总 · 跨页记录</i></a>
   <div class="gs-foot">同一 qfq 数据底座<br>情绪 → 决策 → 执行 → 复盘</div>
 </nav>
+<div id="gs-dlbar" class="gs-dlbar">⏪ 复盘模式 · <b></b> · 全站联动
+  <small>（日期选自情绪周期表，情绪/盘中/K线/笔记停在同一天；URL ?date= 共享）</small>
+  <a onclick="GS_DL.back()">回到今日</a>
+</div>
+<style id="gs-dlcss">
+.gs-dlbar{display:none;align-items:center;gap:10px;background:linear-gradient(90deg,rgba(226,177,60,.16),rgba(226,177,60,.04));border-bottom:1px solid rgba(226,177,60,.45);color:#e2b13c;font-size:12.5px;padding:7px 18px}
+.gs-dlbar.on{display:flex}
+.gs-dlbar b{font-variant-numeric:tabular-nums}
+.gs-dlbar small{color:#7d8b9e}
+.gs-dlbar a{color:#5b9dd9;cursor:pointer;text-decoration:underline;white-space:nowrap}
+</style>
+<script id="gs-dljs">
+(function(){
+"use strict";
+var q=new URLSearchParams(location.search),d=q.get("date"),TODAY="2026-10-02";
+window.GS_DL={date:(d&&d!==TODAY)?d:null,
+  set:function(x){var u=new URL(location.href);
+    if(x&&x!==TODAY){u.searchParams.set("date",x);}else{u.searchParams.delete("date");}
+    location.href=u.toString();},
+  back:function(){this.set(null);}};
+if(GS_DL.date){
+  var b=document.getElementById("gs-dlbar");
+  b.classList.add("on");
+  b.querySelector("b").textContent=GS_DL.date;
+}
+})();
+</script>
+
 <style id="gs-notecss">
 .gs-nfab{position:fixed;right:18px;bottom:18px;z-index:60;width:46px;height:46px;border-radius:50%;background:#1a2230;border:1px solid #e2b13c;color:#e2b13c;cursor:pointer;box-shadow:0 4px 14px rgba(0,0,0,.45);display:flex;flex-direction:column;align-items:center;justify-content:center;font-size:13px;line-height:1.1}
 .gs-nfab small{font-size:9.5px;letter-spacing:1px}
@@ -675,4 +703,27 @@ document.addEventListener('click', function(ev) {
   if (t && t.dataset.k) { openEditor(t); return; }
   if (!editor.contains(ev.target)) closeEditor();
 });
+</script>
+<script id="gs-dlpage">
+/* 日期联动源点：点情绪周期表任意日期列 → 全站进入该日复盘模式 */
+(function(){
+"use strict";
+var tbl=document.getElementById("tbl");
+tbl.title="点击任意日期列 → 全站联动到该日";
+tbl.style.cursor="pointer";
+tbl.addEventListener("click",function(e){
+  var c=e.target.closest("td,th");if(!c)return;
+  var i;
+  if(c.tagName==="TD"){i=c.dataset.i!=null?+c.dataset.i:null;}
+  else{i=Array.prototype.indexOf.call(c.parentNode.children,c)-1;}
+  if(i==null||i<0||!base[i])return;
+  GS_DL.set(fmt(base[i].date));
+});
+/* 复盘模式：高亮选中列 */
+if(GS_DL.date){
+  Array.prototype.forEach.call(tbl.querySelectorAll("thead th"),function(th,j){
+    if(j>0&&base[j-1]&&fmt(base[j-1].date)===GS_DL.date){th.style.color="#e2b13c";th.style.textShadow="0 0 8px rgba(226,177,60,.6)";}
+  });
+}
+})();
 </script>

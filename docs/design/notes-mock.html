@@ -73,6 +73,34 @@ body{padding-left:176px!important}
   <a href="notes-mock.html" class="on"><b>笔记本</b><i>按天汇总 · 跨页记录</i></a>
   <div class="gs-foot">同一 qfq 数据底座<br>情绪 → 决策 → 执行 → 复盘</div>
 </nav>
+<div id="gs-dlbar" class="gs-dlbar">⏪ 复盘模式 · <b></b> · 全站联动
+  <small>（日期选自情绪周期表，情绪/盘中/K线/笔记停在同一天；URL ?date= 共享）</small>
+  <a onclick="GS_DL.back()">回到今日</a>
+</div>
+<style id="gs-dlcss">
+.gs-dlbar{display:none;align-items:center;gap:10px;background:linear-gradient(90deg,rgba(226,177,60,.16),rgba(226,177,60,.04));border-bottom:1px solid rgba(226,177,60,.45);color:#e2b13c;font-size:12.5px;padding:7px 18px}
+.gs-dlbar.on{display:flex}
+.gs-dlbar b{font-variant-numeric:tabular-nums}
+.gs-dlbar small{color:#7d8b9e}
+.gs-dlbar a{color:#5b9dd9;cursor:pointer;text-decoration:underline;white-space:nowrap}
+</style>
+<script id="gs-dljs">
+(function(){
+"use strict";
+var q=new URLSearchParams(location.search),d=q.get("date"),TODAY="2026-10-02";
+window.GS_DL={date:(d&&d!==TODAY)?d:null,
+  set:function(x){var u=new URL(location.href);
+    if(x&&x!==TODAY){u.searchParams.set("date",x);}else{u.searchParams.delete("date");}
+    location.href=u.toString();},
+  back:function(){this.set(null);}};
+if(GS_DL.date){
+  var b=document.getElementById("gs-dlbar");
+  b.classList.add("on");
+  b.querySelector("b").textContent=GS_DL.date;
+}
+})();
+</script>
+
 <div class="wrap">
   <h1>笔记本</h1>
   <div class="sub">按天汇总各页面笔记 · 人工复盘日志（不进策略条件） · 各页右下角 ✎ 按钮随手记</div>
@@ -153,4 +181,25 @@ document.querySelectorAll(".fchip").forEach(c=>c.addEventListener("click",()=>{
   c.classList.add("on");curFilter=c.dataset.f;render();
 }));
 render();
+</script>
+<script id="gs-dlpage">
+/* 日期联动：定位/高亮该日小节；无该日笔记则给诚实空态 */
+(function(){
+"use strict";
+if(!GS_DL.date)return;
+var hit=null;
+document.querySelectorAll(".dayhead b").forEach(function(b){
+  if(b.textContent===GS_DL.date)hit=b;
+});
+if(hit){
+  var h=hit.closest(".dayhead");
+  h.style.borderBottomColor="rgba(226,177,60,.6)";
+  hit.style.textShadow="0 0 8px rgba(226,177,60,.6)";
+  h.scrollIntoView({block:"start"});
+}else{
+  document.querySelector(".wrap").insertAdjacentHTML("afterbegin",
+    '<div style="border:1px solid rgba(226,177,60,.45);background:rgba(226,177,60,.07);color:#e2b13c;padding:9px 14px;border-radius:8px;font-size:12.5px;margin-bottom:12px">'
+    +'复盘模式 '+GS_DL.date+'：该日暂无笔记（笔记自上线起累积；历史日期只带出当日市场上下文，人工内容为空）</div>');
+}
+})();
 </script>
