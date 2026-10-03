@@ -25,6 +25,7 @@ repositories {
 
 dependencies {
     implementation("org.springframework.boot:spring-boot-starter-web")
+    implementation("org.springframework.boot:spring-boot-starter-webflux") // §13.2 PythonDataServiceClient WebClient（与 MVC 共存，MVC 优先）
     implementation("org.springframework.boot:spring-boot-starter-data-jpa")
     implementation("org.springframework.boot:spring-boot-starter-actuator") // §13.3 /actuator/health + metrics
     implementation("com.fasterxml.jackson.module:jackson-module-kotlin")
@@ -38,6 +39,8 @@ dependencies {
     testImplementation("org.springframework.boot:spring-boot-testcontainers")
     testImplementation("org.testcontainers:postgresql")
     testImplementation("org.testcontainers:junit-jupiter")
+    // Step 4 测试专用：PythonDataServiceClientImpl / DingTalkNotifierImpl 的 HTTP 契约测试用 MockWebServer 模拟 Python/钉钉端
+    testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
 }
 
 tasks.test {

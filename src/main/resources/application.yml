@@ -5,6 +5,9 @@
 spring:
   application:
     name: soros-v2
+  jackson:
+    deserialization:
+      fail-on-unknown-properties: true   # §2.4 第④层 代码单点层：契约漂移启动/测试期失败
   datasource:
     url: jdbc:postgresql://localhost:5432/soros
     username: soros
@@ -39,7 +42,7 @@ management:
 
 soros:
   collect:
-    cron: "0 0 20 * * ?"                    # §4.7 防线①
+    cron: "0 0 20 * * MON-FRI"              # §4.7 防线①；MON-FRI（§4.4 周末非交易日不空转）
     default-start-date: 2021-10-01          # 近 5 年
     batch-size: 50                          # 每次 HTTP 请求股票数
     rolling-window-days: 10                 # §4.7 防线④
