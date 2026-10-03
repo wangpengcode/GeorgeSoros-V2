@@ -50,6 +50,10 @@ CREATE TABLE stock_info (
     industry       TEXT,                        -- JSON 数组（一股可属多行业，主行业=第一个，展示用）
     concept_boards TEXT,                        -- JSON 数组
     search_key     VARCHAR(300),                -- 小写 name+全拼+拼音首字母，pg_trgm 模糊搜索
+    float_shares   BIGINT,                      -- 流通股本（股）；东财快照流通市值÷收盘价反推，BaoStock profit 季度对拍（§17.1 B1）
+    total_shares   BIGINT,                      -- 总股本（股）；市值=股本×当日收盘价，条件求值时现算不落市值列
+    shares_updated_at TIMESTAMP,                -- 股本刷新时间
+    adj_processed_until DATE,                   -- 除权处理水位（§17.1 B6）：AdjustCheckStep 重算完该股筹码后更新，扫描时水位覆盖即跳过
     updated_at     TIMESTAMP DEFAULT NOW()
 );
 CREATE INDEX idx_stock_info_board  ON stock_info (board);
@@ -70,7 +74,7 @@ CREATE TABLE data_quality_log (
     id         SERIAL PRIMARY KEY,
     check_date DATE NOT NULL,
     stock_code VARCHAR(20) NOT NULL,
-    issue_type VARCHAR(50) NOT NULL,            -- ADJUSTMENT_DRIFT / DELIST_SUSPECT / ...
+    issue_type VARCHAR(50) NOT NULL,            -- ADJUSTMENT_DRIFT / DELIST_SUSPECT / CONDITION_SKIP(§17.1 B2 条件跳过问题表) / ...
     detail     TEXT,
     source     VARCHAR(20),
     created_at TIMESTAMP DEFAULT NOW()
@@ -150,6 +154,8 @@ CREATE TABLE dragon_cycle (
     created_at     TIMESTAMP DEFAULT NOW(),
     updated_at     TIMESTAMP DEFAULT NOW()
 );
+-- §17.2 I6：进行中周期每股唯一（事件触发+兜底 cron 双跑防重复插行）
+CREATE UNIQUE INDEX uq_dragon_active ON dragon_cycle (st_code) WHERE end_date IS NULL;
 
 -- =============================================================================
 -- 三、信号预计算层（3 张，SignalPrecomputeJob 事件触发，查询永不回扫日线）
@@ -231,6 +237,10 @@ CREATE TABLE backtest_result (
     end_date      DATE NOT NULL,
     metrics       JSONB,                        -- 年化/回撤/Sharpe/胜率/盈亏比/Kelly 组…
     equity_curve  JSONB,                        -- 策略 vs 沪深300 vs 等权基准
+    config_id     INT REFERENCES strategy_config(id),  -- §17.2：结果↔配置版本绑定
+    config_version INT,                         -- 保存时点的 strategy_config.version
+    evaluated_universe JSONB,                   -- §17.1 B3：本次实际求值的股票名单（实盘下单前守卫校验）
+    is_dry        BOOLEAN DEFAULT FALSE,        -- §17.2：试跑标记，不落台账、对比默认过滤
     data_snapshot JSONB,                        -- {maxDate,rowCount}
     git_sha       VARCHAR(40),
     created_at    TIMESTAMP DEFAULT NOW()
@@ -245,10 +255,12 @@ CREATE TABLE trade_ledger (
     pnl        NUMERIC(16,2),
     pnl_ratio  NUMERIC(10,4),
     source     VARCHAR(10) NOT NULL CHECK (source IN ('BACKTEST','PAPER','LIVE')),
+    backtest_result_id BIGINT,                 -- §17.1 B5：BACKTEST 行溯源到 backtest_result.id
     created_at TIMESTAMP DEFAULT NOW()
 );
 CREATE INDEX idx_ledger_strategy_close ON trade_ledger (strategy, close_date DESC);
--- Kelly 只查：WHERE strategy=? AND close_date IS NOT NULL ORDER BY close_date DESC LIMIT 60
+-- Kelly 只查（§17.2 两段式）：先 LIVE/PAPER 近 60 笔，不足 20 笔补 BACKTEST；
+-- 样本 <20 笔一律不出建议仓位。BACKTEST 导入铁律：先 DELETE WHERE strategy=? AND source='BACKTEST' 再整批插入（不重复算）
 
 CREATE TABLE account_state (
     id         SERIAL PRIMARY KEY,
@@ -343,5 +355,5 @@ CREATE TABLE daily_note (
     content    TEXT NOT NULL,
     created_at TIMESTAMP DEFAULT NOW(),
     updated_at TIMESTAMP,
-    UNIQUE (st_date, page, st_code)             -- 同日同页同股一条，编辑覆盖
+    UNIQUE NULLS NOT DISTINCT (st_date, page, st_code)  -- §17.1 B9：NULL 视同相等，市场级笔记(st_code=NULL)同样唯一；编辑=PUT 更新已有行，永不盲插
 );

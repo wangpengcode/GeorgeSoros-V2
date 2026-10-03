@@ -1446,7 +1446,7 @@ signal_daily(           -- 个股×日，只存"必须全市场排序才得出"�
 - market_env/limit_ecology/sector 三组条件的查询与情绪网页、涨停池接口共用这份数据，单一事实来源。
 - 精度折损已标注：炸板=日线近似（盘中触及涨停未封）、昨涨停溢价按收盘价口径。
 
-**筹码分布自算（2026-10-03 穿透定稿，路径 A）**：`signal_daily` 追加 6 列 profit_ratio（获利盘%）、cost_dev（成本偏离%）、c90_low/high/conc、c70_low/high/conc——不存分布曲线本身（~50MB/年）。递推 `D_t = D_{t-1}×(1−tr) + tr×triangular(qfq_high, qfq_low, qfq_close)`，价格坐标全程 qfq、180 桶。穿透解决的两个口径坑：①不用 amount/volume 算形状峰（不复权坐标与 qfq 混杂），峰=qfq_close；②不落绝对平均成本（qfq 重对基会漂移），落 cost_dev=平均成本/现价−1（比率对复权平移免疫）。边界处理：一字板 ±0.5% 扁平兜底、换手率 clamp ≤1、停牌无 bar 筹码冻结、上市首日全量换手。计算：全市场全量重算 ≈32 亿次浮点运算（5400 股×~2000 日×~300 桶）JVM 秒~分钟级，桶状态驻留内存不持久化，增量每日 O(股×桶)。东财 stock_cyq_em 源码级探针（docs/research/chip-cyq-probe.md）：**它不是服务端接口，是 akshare 本地跑东财前端 JS 的 150 档三角分布+换手衰减递推，且只返回 90 个交易日**——与我们路径 A 同族模型，无权威性优势，加 mini_racer 依赖与 WAF 对抗（TLS 指纹拦截、30+ 次触发 IP 封禁）→ 不进主链；对拍重定位=同 fqt=qfq 口径下校准峰位/衰减参数（预期同族差异 <2%），非真值校验。
+**筹码分布自算（2026-10-03 穿透定稿，路径 A）**：`signal_daily` 追加 6 列 profit_ratio（获利盘%）、cost_dev（成本偏离%）、c90_low/high/conc、c70_low/high/conc——不存分布曲线本身（~50MB/年）。递推 `D_t = D_{t-1}×(1−tr) + tr×triangular(qfq_high, qfq_low, qfq_close)`，价格坐标全程 qfq、180 桶。穿透解决的两个口径坑：①不用 amount/volume 算形状峰（不复权坐标与 qfq 混杂），峰=qfq_close；②不落绝对平均成本（qfq 重对基会漂移），落 cost_dev=平均成本/现价−1（比率对复权平移免疫）；c90/c70 四个绝对 qfq 坐标列除权日会过期，由 AdjustCheckStep 全历史重算（§17.1 B6）。边界处理：一字板 ±0.5% 扁平兜底、换手率 clamp ≤1、停牌无 bar 筹码冻结、上市首日全量换手。计算：全市场全量重算 ≈32 亿次浮点运算（5400 股×~2000 日×~300 桶）JVM 秒~分钟级，桶状态驻留内存不持久化，增量每日 O(股×桶)。东财 stock_cyq_em 源码级探针（docs/research/chip-cyq-probe.md）：**它不是服务端接口，是 akshare 本地跑东财前端 JS 的 150 档三角分布+换手衰减递推，且只返回 90 个交易日**——与我们路径 A 同族模型，无权威性优势，加 mini_racer 依赖与 WAF 对抗（TLS 指纹拦截、30+ 次触发 IP 封禁）→ 不进主链；对拍重定位=同 fqt=qfq 口径下校准峰位/衰减参数（预期同族差异 <2%），非真值校验。
 
 **复盘对标（2026-10-02 拆解同花顺「热点复盘」长图，ozone summary_image 接口）**：图中信息 → 本方案落点——涨停/跌停/炸板家数、总溢价幅 → market_daily；分级晋级率（一进二/二进三…）→ yst_promotion（本次补入）；是否首板/连板数 → limit_up_streak 词表组；涨停时间早→晚 → intraday_archive.first_seal_time（§十四，含秒级）；板块分组与板块涨停家数 → sector_daily。
 
@@ -1739,7 +1739,7 @@ Kotlin 不做"换个数据源重试"（避免双重点燃）；Kotlin 侧仅对 
 
 | 数据 | 接口 | 关键结论 | 用途 |
 |------|------|---------|------|
-| 涨停/炸板/跌停/强势/昨日涨停池（6 接口） | `stock_zt_pool_em` 等 | **六项关键字段全齐**：首次/最后封板时间、炸板次数、封板资金、连板数、涨停统计；date 参数可查历史但**仅保留 ~30 天**（且部分池传老日期静默返回空）；单请求全量无翻页 | 梯队榜/事件 diff/收盘归档（超短核心） |
+| 涨停/炸板/跌停/强势/昨日涨停池（**5 池接口定稿**，§17.1 B8；次新池 sub_new 不进主链） | `stock_zt_pool_em` 等 | **六项关键字段全齐**：首次/最后封板时间、炸板次数、封板资金、连板数、涨停统计；date 参数可查历史但**仅保留 ~30 天**（且部分池传老日期静默返回空）；单请求全量无翻页 | 梯队榜/事件 diff/收盘归档（超短核心） |
 | 全市场实时快照 | `stock_zh_a_spot_em` | 23 列，有最新价/涨跌幅/涨速，**无盘口无涨跌停价**；内部分页 55-60 页、30-90s、批内时点不同步 → 只能低频 | 涨跌家数、大面预警（90s+抖动） |
 | 单只盘口五档 | `stock_bid_ask_em` | 含五档+涨跌停价，单只请求 | 只查候选名单（梯队+预警 ~50 只） |
 | 盘前竞价分时 | `stock_zh_a_hist_pre_min_em` | 当日分时**含集合竞价** | 9:25 竞价 gap 探测（竞价情绪） |
@@ -1814,7 +1814,7 @@ intraday_replay(               -- 日维度整页渲染快照，一日一行（2
 -- kpi 点数完整），失败钉钉告警——保证落库即渲染。量级 ~400KB/日 → 年 ~100MB，随 stock_history 同速增长可接受。
 ```
 
-**长历史自建（30 天窗口对策）**：每日 15:10 IntradayArchiveStep 用 `date=当日` 重新拉 6 个池接口做**权威归档**（池接口收盘后仍可查，比盘中最后一轮更稳）——自上线日起逐日积累封板时间/炸板/封单历史；**上线前的历史拉不到**（诚实边界，报告标注数据起点）。
+**长历史自建（30 天窗口对策）**：每日 15:10 IntradayArchiveStep 用 `date=当日` 重新拉 5 个池接口做**权威归档**（池接口收盘后仍可查，比盘中最后一轮更稳）——自上线日起逐日积累封板时间/炸板/封单历史；**上线前的历史拉不到**（诚实边界，报告标注数据起点）。
 
 ### 14.5 消费出口
 
@@ -1843,7 +1843,7 @@ spot 的 total=59271 混入板块行疑点 / 盘中 bid_ask 五档有值性 / 5 
 
 ### 14.9 盘中策略开仓预警（2026-10-02 定稿；依赖回测+策略控制台落地，Step 8/二期启用）
 
-**闭环**：结果对比页确认策略表现优 → 「启用盘中预警」（strategy_config.alert_enabled=true）→ 盘中每轮池/快照更新后，StrategyAlertEvaluator 对**涨停池∪候选池（~250 只）**求值 alert_enabled 策略的 entry 条件树（启动时已编译，§12.7）→ 命中 → `intraday_event(ev_type=ALERT, detail={strategy_id, 命中条件摘要, kelly:{仓位%, 整手股数, 置信度}})` → 钉钉推送 + intraday.html「策略预警」面板 + intraday_replay.page.alerts（回放可见当日触发史）。
+**闭环**：结果对比页确认策略表现优 → 「启用盘中预警」（strategy_config.alert_enabled=true）→ 盘中每轮池/快照更新后，StrategyAlertEvaluator 对**涨停池∪候选池（~250 只）**求值 alert_enabled 策略的 entry 条件树（启动时已编译，§12.7）→ 命中 → `intraday_event(ev_type=ALERT, detail={strategy_id, 命中条件摘要, kelly:{仓位%, 整手股数, 置信度}})` → 钉钉推送 + intraday.html「策略预警」面板 + intraday_replay.page.panels.strategy_alerts（回放可见当日触发史；字段名与 §14.4 快照 schema 统一）。
 
 **数据口径穿透（诚实边界，提醒必须带标注）**：
 | 条件类别 | 盘中口径 | 权威性 |
@@ -1888,3 +1888,49 @@ daily_note(
 - **各页行为**：情绪表=联动源点（点列即跳转+选中列高亮）；盘中监控=顶部回放徽标（intraday_replay 单表单查询）+ **上线日之前显示诚实空态**（"该日无盘中回放数据，日线口径不受影响"——盘中归档仅覆盖上线后交易日，这是唯一硬边界）；K线复盘=回放日滑杆直接定位该日（筹码递推/指标全部重算）；笔记本=滚动定位高亮该日小节，无该日笔记则提示"笔记自上线起累积，历史日期只带出当日市场上下文"；策略控制台=横幅提示该日口径
 - **数据边界（穿透结论）**：情绪周期表/kline/笔记/信号均可回补任意历史日期（日线底座 5 年）；唯独 intraday_replay 有上线日边界——日期选择器对"上线日前"的日期在盘中页置灰或空态，二选一实现时取空态（信息量更大）
 - 样稿联动件 `gs-dlbar/gs-dljs` 注入五页（零依赖、URL query 传递）；顺手修复 kline-mock 的 toISOString 东八区日期偏移（与情绪页同款 bug，改本地时区格式化）
+
+---
+
+## 十七、穿透审计整改定稿（2026-10-03）
+
+> 4 个审计视角（数据链路 / 调度时序 / 策略回测 / 盘中前端）并行穿透 PLAN+schema+样稿，用户逐条裁定。**本节与正文冲突时，以本节为准。**
+
+### 17.1 阻塞级 9 条（全部定稿）
+
+| # | 问题 | 裁定 | 落点 |
+|---|---|---|---|
+| B1 | stock_attr「流通市值区间」无数据落点 | 补数据源 | stock_info 加 float_shares / total_shares（单位=股）；DailyCollectJob 每日从东财快照流通市值/总市值 ÷ 收盘价反推回写，BaoStock profit 季度对拍校准；**市值不落列**，条件求值时=股本×当日收盘价现算 |
+| B2 | 条件求值 null 语义全篇未定 | 算不出的跳过 + 问题表记录 | 全局纪律（置于 §12.7.1 首条）：任一条件输入为 null → 该股该日该条件=不命中，跳过并写 data_quality_log(issue_type='CONDITION_SKIP', detail=条件名+原因)。**不新建表——data_quality_log 就是问题表**，加这个 issue_type 即可 |
+| B3 | 回测区间可早于信号数据起点 | 从最早一条数据开始用；收益要真实 | 回测入口 start_date 自动夹到 max(请求起点, signal_daily 最早日)，结果页标注「实际起点=X（数据所限）」；停牌日冻结估值不计区间收益（正文 §12 已有，此处重申为铁律） |
+| B4 | 周期条件读建议值还是人工值未定 | 都按一个本子算 | **唯一口径：条件只读 big_cycle_sug / small_cycle_sug（建议值）**；人工确认值（big_cycle/small_cycle）仅展示，永不进任何条件 |
+| B5 | trade_ledger 重跑污染 Kelly（直接连实盘下单金额） | 不要重复算 | 正式回测导入台账前先 `DELETE FROM trade_ledger WHERE strategy=? AND source='BACKTEST'` 再整批插入；trade_ledger 加 backtest_result_id 可空列（溯源）；同策略回测任务加锁互斥 |
+| B6 | c90/c70 绝对 qfq 坐标列除权后过期（§12.4.1 曾自相矛盾，正文已改） | 除权除息 Job，扫到已处理自动跳过 | **AdjustCheckStep**（挂 DailyCollectJob 末尾）：探针检测单股除权（前后复权基准跳变 / 分红送配接口对照，方法 Step 3 实测定）→ 重拉该股 stock_history → 全历史重算该股 signal_daily 筹码 8 列（递推秒级）→ 更新 stock_info.adj_processed_until 水位；Job 每日扫描，水位已覆盖的股**自动跳过**。日 K **不加行级标记列**：除权是股级事件，行级列全表同值纯冗余，股级水位等价实现「扫到已处理就跳过」 |
+| B7 | 老股筹码递推无 D_0；递推桶驻留内存单日不可重算 | 筹码尽量算准 | warm-up 规则：回填起点首日 D_0 =「前 60 交易日成交量加权均价」单峰近似，**前 60 个交易日筹码 8 列=NULL → 自动走 B2 跳过+记录**，第 61 日起入条件（宁可标空不用不准的数）；signal_daily 重算只有**区间回放**一种入口（复用 §13.5 模式），Step 6 显式增加 market_daily/sector_daily/signal_daily 三表历史补算步骤 |
+| B8 | 正文「6 个池接口」vs 5 池名单 vs pool CHECK 5 值 | 最小改动 | **定稿 5 池**：ZT/ZB/DT/STRONG/PREV（正文已改）；次新池 sub_new（探针实测存在）不进盘中主链（30 天边界与昨停池重叠、次新波动特性另类），列为可选扩展，CHECK 不动 |
+| B9 | daily_note UNIQUE(st_date,page,st_code) 对 st_code=NULL 失效（PG NULL≠NULL） | 从数据库读出来编辑，不做插入覆盖 | schema 改 `UNIQUE NULLS NOT DISTINCT`（PG16）；API 语义定稿：编辑=读出已有行 → PUT 更新该行，前端面板**永不盲插**；POST 带 if_updated_at 乐观锁，冲突返 409 |
+
+### 17.2 应修级（本次一并定稿，落地时实施）
+
+**调度**：SorosJob/SignalPrecomputeJob 各加 21:30 兜底 cron（完成标记：big_trend 按 data_type+end_date、signal_daily 按当日行数判存在）｜ 链序强制 DailyCollect→Sentiment→Signal（SignalPrecomputeJob 监听 SentimentCycleJob 完成事件，禁止并行监听 DailyCollectCompleted）｜ ApplicationReadyEvent 启动对账：查最近 N 交易日派生表齐全性，缺则 computeFor 补算 ｜ data_coverage=PARTIAL 的派生行次日滚动重拉后**重算**（防线④扩容）；21:30 兜底跳过条件=「存在且非 PARTIAL」｜ 全部盘后 Job 入口统一 `if(!tradingCalendar.isTradingDay(today)) return`（含 21:30 兜底）｜ 交易日历 2025/2026 覆盖探针**升级为上线前阻塞检查** ｜ 盘中 diff 基准持久化（重启读 intraday_pool_snap 最近一轮做基准）+ intraday_event 按 (trade_date,ev_type,st_code,5min 窗口) 去重 ｜ 回填避开交易日 19:00-22:00（运维约束），streak 补算 SQL 加 `WHERE st_date<今日` ｜ dragon_cycle 加 partial UNIQUE：`CREATE UNIQUE INDEX uq_dragon_active ON dragon_cycle(st_code) WHERE end_date IS NULL` ｜ 15:10 归档步纳入 21:30 兜底体系（查 intraday_archive 当日行数，缺则补跑）
+
+**数据**：yst_promotion 晋级率分母定稿——昨日涨停今日停牌=**计入分母、视为未晋级**（与 §4.8 停牌断板一致）｜ 回填起点前延续的连板 streak=1 加 BOOT 标注（先例 dragon_cycle BOOT）｜ /stock-search SQL 加 `WHERE NOT is_st AND NOT delisted` ｜ 戴帽前历史行口径成文：保留入库、进入全市场回测 universe、断档按「无行=停牌」语义、摘帽反向同理
+
+**策略**：Kelly 查询两段式——先取 LIVE/PAPER 近 60 笔，不足 20 笔补 BACKTEST 凑；**样本 <20 笔一律不出 Kelly 建议仓位**（面板显「样本不足」，样稿「30 笔减半」文案作废待改）｜ PAPER 定位=执行单页「模拟单」手动登记入口（一期无自动模拟盘，trade_ledger.source='PAPER' 不是死值但生产者是人）｜ dryRun 试跑结果**不落 trade_ledger**，backtest_result.is_dry 标记、结果对比默认过滤 DRY ｜ alert_enabled=策略级开关（挂 strategy_config），结果对比页按钮语义=「对当前版本配置启用」，多份结果同策略时不产生歧义 ｜ backtest_result 加 config_id / config_version / evaluated_universe(JSONB 本次实际求值股票名单) / is_dry
+
+**策略执行守卫（B3 衍生，用户铁律）**：实盘/PAPER 执行单与盘中 ALERT 下单前**必须校验目标股 ∈ 该策略最近一次正式回测的 evaluated_universe**，不在名单 → 拒绝下单并推钉钉——策略只对回测覆盖过的股生效，绝不在未验证的股上真实买卖
+
+**盘中前端**：§14.6 补时刻表（9:25-9:30 竞价间隙池语义、11:30-13:00 午休冻结标记、15:00-15:10 窗口、边界轮次 inclusive）并列入 §14.7 必测清单 ｜ §14.4 声明**事件流=90s 采样级非逐笔**（<90s 一闪而过的炸板可能漏），15:10 归档对拍 ZB 计数作完整性校验 ｜ DTO 字段统一 `panels.strategy_alerts`（§14.9 正文两处 page.alerts 已改）｜ 上线日由 API 派生 `min(intraday_replay.trade_date)`，前端不硬编码；replay 无行返回 `200 + {empty:true, launch_date}`（非 404）｜ 14:45 日线口径求值：筹码类条件读 **T-1 signal_daily**（标注口径），当日价量实时近似；「直接读预计算表 market_env」措辞更正（market_env 是 §12.7 条件组非表）｜ 预警候选池枚举定稿=涨停池∪强势池∪universe 成员∪当日条件命中（轮询时现算）｜ nav 跳转 JS 统一追加当前 ?date=（mock 同步修改）
+
+### 17.3 新增需求待办（2026-10-03 用户提出）
+
+1. **数据池可视化**：盘中 mock 加「池状态」面板——5 池各自健康灯/最近成功时间/限频状态/启用开关，可视化切换
+2. **样稿增补清单**：竞价态 KPI 卡、「引用到笔记」按钮、情绪页崩塌池/反核数展示位、笔记面板「仅本股/全市场」切换控件、术语汇总展示位、nav date 透传
+
+### 17.4 穿透评分（满分 100）
+
+| 状态 | 分值 | 说明 |
+|---|---|---|
+| 整改前（4 Agent 审计出 9 阻塞+~20 应修时） | **72** | 底座/采集/涨停判定/幂等扎实，但回测口径与失效传播有硬伤 |
+| 9 条阻塞修复后 | **85** | 口径自洽，可安全落地 |
+| 本次应修一并定稿后（当前） | **93** | 设计层穿透闭环 |
+| 剩余 7 分 | — | 落地期才能关掉的不确定性：三源单位实测、交易日历 2026 覆盖、除权检测精度、盘中接口时刻语义、预警伪信号调参（均已挂探针项，非设计缺陷） |
