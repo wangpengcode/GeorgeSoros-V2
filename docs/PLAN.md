@@ -268,6 +268,7 @@ CREATE TABLE sentiment_cycle (
     lists_manual_json JSONB,                     -- 名单人工增删留痕 [{side,action:ADD/REMOVE,code,name,reason,at}]
     leader_json     JSONB,                       -- 龙头表现：近1-3日最高板前三名 晋级/断板/大面
     collapse_count  INT NOT NULL DEFAULT 0,      -- 崩塌池家数
+    collapse_list   JSONB,                       -- 崩塌池个股名单 [{code,name,limit_down_streak,industry}]（§17.5 C1 补，与大肉/大面名单同构）
     rebound_count   INT NOT NULL DEFAULT 0,      -- 崩塌组今日止跌反核数（涨停或 >=+5%）
     big_cycle_sug   SMALLINT,                    -- 大周期建议值 1-6（规则映射，人工可改）
     small_cycle_sug SMALLINT,                    -- 小周期建议值 1-6
@@ -1448,6 +1449,8 @@ signal_daily(           -- 个股×日，只存"必须全市场排序才得出"�
 
 **筹码分布自算（2026-10-03 穿透定稿，路径 A）**：`signal_daily` 追加 6 列 profit_ratio（获利盘%）、cost_dev（成本偏离%）、c90_low/high/conc、c70_low/high/conc——不存分布曲线本身（~50MB/年）。递推 `D_t = D_{t-1}×(1−tr) + tr×triangular(qfq_high, qfq_low, qfq_close)`，价格坐标全程 qfq、180 桶。穿透解决的两个口径坑：①不用 amount/volume 算形状峰（不复权坐标与 qfq 混杂），峰=qfq_close；②不落绝对平均成本（qfq 重对基会漂移），落 cost_dev=平均成本/现价−1（比率对复权平移免疫）；c90/c70 四个绝对 qfq 坐标列除权日会过期，由 AdjustCheckStep 全历史重算（§17.1 B6）。边界处理：一字板 ±0.5% 扁平兜底、换手率 clamp ≤1、停牌无 bar 筹码冻结、上市首日全量换手。计算：全市场全量重算 ≈32 亿次浮点运算（5400 股×~2000 日×~300 桶）JVM 秒~分钟级，桶状态驻留内存不持久化，增量每日 O(股×桶)。东财 stock_cyq_em 源码级探针（docs/research/chip-cyq-probe.md）：**它不是服务端接口，是 akshare 本地跑东财前端 JS 的 150 档三角分布+换手衰减递推，且只返回 90 个交易日**——与我们路径 A 同族模型，无权威性优势，加 mini_racer 依赖与 WAF 对抗（TLS 指纹拦截、30+ 次触发 IP 封禁）→ 不进主链；对拍重定位=同 fqt=qfq 口径下校准峰位/衰减参数（预期同族差异 <2%），非真值校验。
 
+**K 线页展示端点（2026-10-03 §17.5 C4 补）**：`GET /api/v1/stocks/{code}/kline?from=&to=` —— stock_history（qfq OHLC+量额）∘ signal_daily 筹码 8 列一次聚合返回；MA/MACD/换手等衍生指标前端现算（样稿同款公式）；叠加全局日期联动 ?date=（§15.2）回放日截断。不用 V1 兼容端点 /history/daily 供前端（webhook 语义，口径不同）。
+
 **复盘对标（2026-10-02 拆解同花顺「热点复盘」长图，ozone summary_image 接口）**：图中信息 → 本方案落点——涨停/跌停/炸板家数、总溢价幅 → market_daily；分级晋级率（一进二/二进三…）→ yst_promotion（本次补入）；是否首板/连板数 → limit_up_streak 词表组；涨停时间早→晚 → intraday_archive.first_seal_time（§十四，含秒级）；板块分组与板块涨停家数 → sector_daily。
 
 **涨停原因归因（2026-10-02 定稿 ② LLM 生成，用户确认）**：SignalPrecomputeJob 末步加 AttributionStep——输入当日 limit_up_list + sector_daily + stock_info 板块归属（industry/concept_boards），单次批量 prompt（全涨停名单一次调用），输出 JSON schema 校验后落库：`limit_up_list[].reason`（个股题材标签串）+ `sector_daily.driver_text`（板块主线一句话）。要点：
@@ -1617,6 +1620,13 @@ PUT    /api/v1/strategies/{id}       修改（落 history 表）
 GET    /api/v1/strategies/{id}/yaml  导出
 POST   /api/v1/backtests             触发回测（dryRun=true 强制试跑）
 GET    /api/v1/backtests/{id}        状态+结果
+-- 自选股（2026-10-03 §17.5 C3 补，表+tab④ 界面已有，端点漏写）
+GET    /api/v1/watchlists                 分组列表（含成员数）
+POST   /api/v1/watchlists                 新建分组
+PUT    /api/v1/watchlists/{id}            改名
+DELETE /api/v1/watchlists/{id}            删组（仍有成员时 409）
+POST   /api/v1/watchlists/{id}/members    批量导入（服务端校验存在性/非 ST，逐行返回拒绝原因）
+DELETE /api/v1/watchlists/{id}/members/{code}
 ```
 
 **不做清单（边界）**：拖拽画布/可视化流程图编辑器（表单树足够，画布大工程低频使用）；直接编辑 YAML 文本；L3 代码策略在线编辑（只展示列表/结果，代码走 git + 三期通道）；在线改回测引擎物理规则（T+1/整手/一字板是 A 股物理规则，不是配置）。
@@ -1763,10 +1773,11 @@ IntradaySource 接口（Python 侧）
 - bid_ask 只查候选名单 ~50 只、30s 一轮（列表现算：池成员∪强势池预警∪龙头）
 - TokenBucket 复用 §11.1；AKShare 零防护裸请求（无 UA 无 timeout）→ Python 统一包一层 UA/timeout/重试
 - 退避：连续 3 次失败 → 降频 2 倍；连续 6 次 → 停轮 300s + 钉钉告警（防封禁升级）
+- 池开关：每轮读 intraday_pool_state，enabled=false 的池跳过该轮（不进 diff/不参与 15:10 归档），API 热切换下一轮生效（§14.5-6，§17.5 C2）
 - 交易时段判定：trading_calendar + 9:15-11:30 / 13:00-15:00 窗口，午休/非交易日不空转
 ```
 
-### 14.4 实时层表结构（新增四表：过程表 snap/event + 权威归档 archive + 渲染快照 replay）
+### 14.4 实时层表结构（新增五表：过程表 snap/event + 权威归档 archive + 渲染快照 replay + 池开关 state，2026-10-03）
 
 ```sql
 intraday_pool_snap(            -- 每轮池快照（追加，原始轮次保留 3 天供回溯调试）
@@ -1812,6 +1823,13 @@ intraday_replay(               -- 日维度整页渲染快照，一日一行（2
 -- 15:10 IntradayArchiveStep 归档时补齐 ladder/events/panels 并置 complete=true；
 -- 归档后自校验：page 反序列化 + schema 校验 + 同源对拍（ladder 条数=intraday_archive 当日行数、
 -- kpi 点数完整），失败钉钉告警——保证落库即渲染。量级 ~400KB/日 → 年 ~100MB，随 stock_history 同速增长可接受。
+
+intraday_pool_state(           -- 池运行时开关（2026-10-03 用户裁定 A：热启停落库，重启不丢；§17.5 C2）
+  pool        CHAR(6) PRIMARY KEY,         -- ZT / ZB / DT / STRONG / PREV
+  enabled     BOOLEAN NOT NULL DEFAULT TRUE,
+  reason      VARCHAR(200),                -- 手动停用原因（如限频封禁规避）
+  updated_at  TIMESTAMP DEFAULT NOW()
+);
 ```
 
 **长历史自建（30 天窗口对策）**：每日 15:10 IntradayArchiveStep 用 `date=当日` 重新拉 5 个池接口做**权威归档**（池接口收盘后仍可查，比盘中最后一轮更稳）——自上线日起逐日积累封板时间/炸板/封单历史；**上线前的历史拉不到**（诚实边界，报告标注数据起点）。
@@ -1823,6 +1841,7 @@ intraday_replay(               -- 日维度整页渲染快照，一日一行（2
 3. **收盘归档 → 词表升级**：intraday_archive 落库后，§12.7.1 limit_ecology 信号源新增可用条件 first_seal_time（早封/晚封板）、zhaban_count、seal_amount——**回测口径自动升级**，数据起点=V2 上线日
 4. **历史复盘回放**（2026-10-02 定稿，用户需求）：intraday.html 正式版加日期选择器——选历史日期即切回放模式，数据源 = `intraday_replay` **单表单查询**（page JSONB 与实时 /summary 同一 DTO，渲染逻辑完全复用，落库前已过渲染自校验）；样稿里的演示时钟即回放引擎原型（时钟换成日期驱动）。当日盘后也可重放当日全貌
 5. **策略开仓预警**（2026-10-02 定稿）：alert_enabled 策略盘中求值，命中即 ALERT 事件 + Kelly 建议仓位推送（§14.9）
+6. **池运行时开关**（2026-10-03 用户裁定 A，§17.5 C2）：`PUT /api/v1/intraday/pools/{pool}/enabled`（body `{enabled, reason?}`，pool∈5 池）→ 写 intraday_pool_state，下一轮立即生效；`GET /intraday/summary` 的池状态面板回读该表（健康灯/最近成功/限频状态/开关——样稿「数据池状态」面板实机化）。日线三源（baostock/akshare/mootdx）切换**不做**人工界面：Router 自动 failover 是容错机制，手动切源破坏口径一致，语义与池开关（运营动作）不同
 
 ### 14.6 交易时段与调度
 
@@ -1934,3 +1953,16 @@ daily_note(
 | 9 条阻塞修复后 | **85** | 口径自洽，可安全落地 |
 | 本次应修一并定稿后（当前） | **93** | 设计层穿透闭环 |
 | 剩余 7 分 | — | 落地期才能关掉的不确定性：三源单位实测、交易日历 2026 覆盖、除权检测精度、盘中接口时刻语义、预警伪信号调参（均已挂探针项，非设计缺陷） |
+
+### 17.5 样稿接口穿透补全（2026-10-03，用户裁定）
+
+五页样稿逐面板穿透对照 API 清单，4 处缺口定稿（与正文冲突以本节为准）：
+
+| # | 缺口 | 裁定 | 落点 |
+|---|---|---|---|
+| C1 | 崩塌池名单无落点（只有 collapse_count/rebound_count 两个数字，样稿要显示池内个股） | 补列 | sentiment_cycle 加 `collapse_list JSONB`（[{code,name,limit_down_streak,industry}]，与大肉/大面名单同构）；SentimentCycleJob 顺带算，零新采集（§4.9 DDL 已落） |
+| C2 | 盘中池「启用/停用」开关无接口（样稿可点，正文只有配置文件级启停） | **A：运行时热开关**（用户裁定） | 新表 intraday_pool_state + `PUT /api/v1/intraday/pools/{pool}/enabled`（§14.3/14.4/14.5 已落）；日线三源切换维持 Router 自动 failover 不做人工界面（池开关=运营动作，源切换=容错机制，语义不同） |
+| C3 | 自选股 CRUD 端点漏写（表+tab④ 界面已有） | 补清单 | §12.9 追加 watchlists 6 端点（批量导入逐行返回拒绝原因，服务端校验存在性/非 ST） |
+| C4 | K 线页无展示端点（/history/daily 是 V1 兼容 webhook，前端不该吃） | 补端点 | `GET /api/v1/stocks/{code}/kline`（§12.4.1 已落：OHLC ∘ 筹码 8 列聚合，衍生指标前端算） |
+
+§17.3 待办 ①② 已完成（commit d8e3290：盘中池状态面板 + 样稿增补 6 项）。

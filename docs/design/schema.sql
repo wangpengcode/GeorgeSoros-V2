@@ -127,6 +127,7 @@ CREATE TABLE sentiment_cycle (
     lists_manual_json JSONB,                    -- 名单人工增删留痕 [{side,action,code,name,reason,at}]
     leader_json      JSONB,                     -- 龙头前三名 晋级/断板/大面
     collapse_count   INT NOT NULL DEFAULT 0,    -- 崩塌池家数
+    collapse_list    JSONB,                     -- 崩塌池名单 [{code,name,limit_down_streak,industry}]（§17.5 C1，与大肉/大面名单同构）
     rebound_count    INT NOT NULL DEFAULT 0,    -- 崩塌组今日止跌反核数
     big_cycle_sug    SMALLINT,                  -- 大周期建议值 1-6（规则映射）
     small_cycle_sug  SMALLINT,
@@ -295,7 +296,7 @@ CREATE TABLE watchlist_member (
 );
 
 -- =============================================================================
--- 五、盘中实时层（三期，4 张）—— 独立故障域，绝不写 stock_history，不入 §13.4 握手链
+-- 五、盘中实时层（三期，5 张）—— 独立故障域，绝不写 stock_history，不入 §13.4 握手链
 -- =============================================================================
 
 CREATE TABLE intraday_pool_snap (
@@ -304,6 +305,13 @@ CREATE TABLE intraday_pool_snap (
     pool    CHAR(6) NOT NULL CHECK (pool IN ('ZT','ZB','DT','STRONG','PREV')),
     payload JSONB NOT NULL                     -- 接口原样行（未来字段升级不丢）
 );  -- 原始轮次保留 3 天供回溯调试，定期清理
+
+CREATE TABLE intraday_pool_state (            -- 池运行时开关（§17.5 C2 用户裁定 A：热启停落库，重启不丢）
+    pool       CHAR(6) PRIMARY KEY CHECK (pool IN ('ZT','ZB','DT','STRONG','PREV')),
+    enabled    BOOLEAN NOT NULL DEFAULT TRUE,
+    reason     VARCHAR(200),                  -- 手动停用原因（如限频封禁规避）
+    updated_at TIMESTAMP DEFAULT NOW()
+);
 
 CREATE TABLE intraday_event (
     id        BIGSERIAL PRIMARY KEY,
