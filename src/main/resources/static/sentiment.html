@@ -1,0 +1,612 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>情绪周期表</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="超短情绪周期可视化：大/小周期热度带、大肉大面对比图、一天一列明细表，评级可点击编辑（实时读取 sentiment_cycle / dragon_cycle 表）">
+<style>
+  /* 设计基调：交易终端深色单主题；红涨绿跌（A股惯例）。零外部依赖：系统字体 + 内置 SVG 图表。
+     Layout: KPI → 周期热度带 → SVG 主图 → 一天一列明细表（横向滚动，首列固定，评级可点击编辑） */
+  :root {
+    --bg: #0e1218;
+    --panel: #161c25;
+    --panel-2: #1c2431;
+    --line: #26303f;
+    --fg: #dde4ee;
+    --muted: #8593a8;
+    --faint: #5a6678;
+    --up: #e5484d;
+    --down: #2fbf71;
+    --gold: #e2b13c;
+    --up-soft: rgba(229,72,77,.16);
+    --down-soft: rgba(47,191,113,.16);
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 400 14px/1.6 -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    padding: 20px 16px 40px;
+    padding-inline: max(16px, env(safe-area-inset-left));
+  }
+  .wrap { max-width: 1200px; margin: 0 auto; }
+  h1 { font-size: 20px; font-weight: 700; margin: 0 0 4px; letter-spacing: .02em; }
+  .sub { color: var(--muted); font-size: 12.5px; margin: 0 0 18px; }
+  .sub b { color: var(--gold); font-weight: 500; }
+  .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 14px; }
+  .kpi { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px; }
+  .kpi .lab { color: var(--muted); font-size: 11.5px; letter-spacing: .08em; }
+  .kpi .val { font: 600 22px/1.3 "SF Mono", Menlo, Consolas, monospace; margin-top: 2px; font-variant-numeric: tabular-nums; }
+  .kpi .val small { font-size: 12px; color: var(--muted); font-weight: 400; }
+  .up { color: var(--up); } .down { color: var(--down); }
+  .chip { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 13px; font-weight: 700; line-height: 1.7; }
+  .bandbox { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px 10px; margin-bottom: 14px; }
+  .bandbox h3 { margin: 0 0 8px; font-size: 12px; color: var(--muted); font-weight: 500; letter-spacing: .08em; }
+  .band { display: flex; gap: 2px; height: 14px; }
+  .band i { flex: 1; border-radius: 2px; min-width: 0; }
+  .bandlab { display: flex; justify-content: space-between; color: var(--muted); font-size: 10.5px; margin-top: 5px; font-family: "SF Mono", Menlo, monospace; }
+  .chartbox { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; }
+  .chartbox h3 { margin: 0 0 8px; font-size: 12px; color: var(--muted); font-weight: 500; letter-spacing: .08em; }
+  .chartlegend { display: flex; flex-wrap: wrap; gap: 14px; color: var(--muted); font-size: 11.5px; margin-bottom: 6px; }
+  .chartlegend i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; margin-right: 5px; vertical-align: -1px; }
+  #chartsvg { width: 100%; height: auto; display: block; }
+  .tablebox { margin-top: 14px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; }
+  .tablebox h3 { margin: 0 0 10px; font-size: 12px; color: var(--muted); font-weight: 500; letter-spacing: .08em; }
+  .hint { background: var(--panel); border: 1px dashed var(--gold); border-radius: 8px; padding: 8px 12px; color: var(--muted); font-size: 12.5px; margin-bottom: 12px; }
+  .hint b { color: var(--gold); font-weight: 500; }
+  .scroller { overflow-x: auto; border: 1px solid var(--line); border-radius: 6px; }
+  table { border-collapse: collapse; font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 12px; font-variant-numeric: tabular-nums; }
+  th, td { padding: 6px 9px; text-align: center; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 500; background: var(--panel-2); position: sticky; top: 0; }
+  td:first-child, th:first-child { position: sticky; left: 0; z-index: 2; background: var(--panel-2); font-family: -apple-system, "PingFang SC", sans-serif; text-align: left; font-weight: 500; min-width: 84px; }
+  th:first-child { z-index: 3; }
+  tbody tr:last-child td { border-bottom: none; }
+  td.latest { outline: 1.5px solid var(--gold); outline-offset: -1.5px; }
+  .editable { cursor: pointer; }
+  td.editable:hover, .editable:hover { background: var(--panel-2); }
+  .rowedit { color: var(--gold); font-size: 10px; margin-left: 4px; }
+  .manual { box-shadow: inset 0 -2px 0 var(--gold); }
+  .manual::after { content: "✎"; color: var(--gold); font-size: 10px; margin-left: 3px; vertical-align: 2px; }
+  #editor { position: fixed; z-index: 9; display: none; background: var(--panel-2); border: 1px solid var(--gold); border-radius: 8px; padding: 10px 12px; box-shadow: 0 6px 24px rgba(0,0,0,.5); }
+  #editor .et { font-size: 11.5px; color: var(--muted); margin-bottom: 8px; }
+  #editor .opts { display: flex; gap: 6px; flex-wrap: wrap; }
+  #editor button { background: var(--panel); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 4px 10px; cursor: pointer; font: 500 12.5px "SF Mono", Menlo, monospace; }
+  #editor button:hover { border-color: var(--gold); color: var(--gold); }
+  #editor button.reset { border-color: var(--muted); color: var(--muted); font-family: inherit; }
+  .legend { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 10px; color: var(--muted); font-size: 11.5px; }
+  .legend span { display: inline-flex; align-items: center; gap: 5px; }
+  .legend i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+  .lists { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 10px; margin-bottom: 14px; }
+  .lcard { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; min-width: 0; }
+  .lcard.meat { border-top: 2px solid var(--up); }
+  .lcard.face { border-top: 2px solid var(--down); }
+  .lhead { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+  .lhead .t { font-weight: 700; font-size: 13px; }
+  .lhead .n { color: var(--muted); font-size: 12px; font-family: "SF Mono", Menlo, monospace; }
+  .lhead .sp { flex: 1; }
+  .lhead button { background: var(--panel-2); color: var(--muted); border: 1px solid var(--line); border-radius: 6px; font-size: 11.5px; padding: 2px 8px; cursor: pointer; }
+  .lhead button:hover { color: var(--gold); border-color: var(--gold); }
+  .lrow { display: flex; align-items: center; gap: 8px; padding: 4px 2px; border-bottom: 1px solid var(--line); font-size: 12.5px; }
+  .lrow:last-child { border-bottom: none; }
+  .lname { font-weight: 500; min-width: 4em; }
+  .lcode, .lind { color: var(--muted); font-size: 11px; font-family: "SF Mono", Menlo, monospace; }
+  .lpct { font-family: "SF Mono", Menlo, monospace; font-variant-numeric: tabular-nums; margin-left: auto; }
+  .lrm { background: none; border: none; color: var(--faint); cursor: pointer; font-size: 12px; padding: 0 2px; }
+  .lrm:hover { color: var(--up); }
+  .lnote { color: var(--faint); font-size: 11px; margin-top: 6px; }
+  .fup { margin-top: 10px; padding-top: 8px; border-top: 1px dashed var(--line); display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: 11.5px; color: var(--muted); }
+  .fchip { padding: 1px 8px; border-radius: 999px; font-size: 11px; }
+  .fchip.pos { background: var(--up-soft); color: var(--up); }
+  .fchip.neg { background: var(--down-soft); color: var(--down); }
+  .fchip.mid { background: var(--panel-2); color: var(--muted); }
+  .fchip.susp { background: var(--panel-2); color: var(--faint); }
+  .addform { display: flex; gap: 6px; }
+  .addform input { background: var(--panel); border: 1px solid var(--line); color: var(--fg); border-radius: 6px; padding: 4px 8px; font-size: 12.5px; width: 100px; }
+  .relwrap { position: relative; }
+  .sug { position: absolute; top: calc(100% + 4px); left: 0; z-index: 10; min-width: 200px; background: var(--panel-2); border: 1px solid var(--gold); border-radius: 6px; max-height: 220px; overflow-y: auto; box-shadow: 0 6px 24px rgba(0,0,0,.5); }
+  .sug:empty { display: none; }
+  .sug .si { display: flex; gap: 8px; align-items: baseline; padding: 5px 10px; cursor: pointer; font-size: 12.5px; }
+  .sug .si:hover, .sug .si.on { background: var(--panel); }
+  .sug .si .c { color: var(--muted); font-family: "SF Mono", Menlo, monospace; font-size: 11px; }
+  .sug .si .p { color: var(--faint); font-size: 10.5px; margin-left: auto; }
+  @media (max-width: 500px) { .kpi .val { font-size: 19px; } }
+</style>
+<style id="gs-navcss">
+.gs-nav{position:fixed;left:0;top:0;bottom:0;width:176px;background:#10151d;border-right:1px solid #263140;display:flex;flex-direction:column;z-index:50}
+.gs-brand{padding:16px 14px 12px;border-bottom:1px solid #263140}
+.gs-brand b{color:#e2b13c;font-size:14px;letter-spacing:.5px}
+.gs-brand span{display:block;color:#7d8b9e;font-size:10.5px;margin-top:2px}
+.gs-nav a{display:flex;flex-direction:column;gap:1px;padding:11px 14px;color:#aeb9c9;text-decoration:none;border-left:3px solid transparent;font-size:13px}
+.gs-nav a b{font-weight:600;color:inherit}
+.gs-nav a i{font-style:normal;color:#525f70;font-size:10.5px}
+.gs-nav a:hover{background:#161c25;color:#e8edf4}
+.gs-nav a.on{background:#161c25;border-left-color:#e2b13c;color:#e8edf4}
+.gs-nav a.on i{color:#7d8b9e}
+.gs-foot{margin-top:auto;padding:12px 14px;color:#525f70;font-size:10px;border-top:1px solid #263140;line-height:1.6}
+body{padding-left:176px!important}
+@media(max-width:900px){
+  body{padding-left:0!important;padding-top:58px!important}
+  .gs-nav{left:0;right:0;top:0;bottom:auto;width:auto;flex-direction:row;align-items:stretch;overflow-x:auto}
+  .gs-brand{border-bottom:none;border-right:1px solid #263140;display:flex;flex-direction:column;justify-content:center;white-space:nowrap;padding:8px 12px}
+  .gs-brand span{display:none}
+  .gs-nav a{border-left:none;border-bottom:3px solid transparent;padding:10px 12px;white-space:nowrap}
+  .gs-nav a b{font-size:12.5px}
+  .gs-nav a i{display:none}
+  .gs-nav a.on{border-bottom-color:#e2b13c}
+  .gs-foot{display:none}
+}
+</style>
+<style id="gs-dlcss">
+.gs-dlbar{display:none;align-items:center;gap:10px;background:linear-gradient(90deg,rgba(226,177,60,.16),rgba(226,177,60,.04));border-bottom:1px solid rgba(226,177,60,.45);color:#e2b13c;font-size:12.5px;padding:7px 18px}
+.gs-dlbar.on{display:flex}
+.gs-dlbar b{font-variant-numeric:tabular-nums}
+.gs-dlbar small{color:#7d8b9e}
+.gs-dlbar a{color:#5b9dd9;cursor:pointer;text-decoration:underline;white-space:nowrap}
+</style>
+</head>
+<body>
+<nav class="gs-nav">
+  <div class="gs-brand"><b>GeorgeSoros V2</b><span>情绪周期表</span></div>
+  <a href="sentiment.html" class="on"><b>情绪周期表</b><i>全市场温度 · 背景层</i></a>
+  <a href="strategy-console.html"><b>策略控制台</b><i>策略 · 回测 · 自选股</i></a>
+  <a href="intraday.html"><b>盘中监控</b><i>实时盘面 · 开仓预警</i></a>
+  <a href="kline.html"><b>K线复盘</b><i>个股下钻 · 指标</i></a>
+  <a href="notes.html"><b>笔记本</b><i>按天汇总 · 跨页记录</i></a>
+  <div class="gs-foot">同一 qfq 数据底座<br>情绪 → 决策 → 执行 → 复盘</div>
+</nav>
+<div id="gs-dlbar" class="gs-dlbar">⏪ 复盘模式 · <b></b> · 全站联动
+  <small>（日期选自情绪周期表，情绪/盘中/K线/笔记停在同一天；URL ?date= 共享）</small>
+  <a onclick="GS_DL.back()">回到今日</a>
+</div>
+
+<div class="wrap">
+  <h1>情绪周期表</h1>
+  <p class="sub">超短情绪监控 · <b>实时读取 sentiment_cycle / dragon_cycle 表</b> · 点任意日期列 → 全站复盘模式 · 大/小周期/状态可点击编辑（PUT confirm 落库）</p>
+
+  <div class="kpis" id="kpis"></div>
+
+  <div class="bandbox">
+    <h3>大周期热度带（1 冰点 → 6 高潮）</h3>
+    <div class="band" id="bigband"></div>
+    <div class="bandlab"><span>最早</span><span>最新</span></div>
+  </div>
+
+  <div class="chartbox">
+    <h3>大肉 / 大面 与 连板高度</h3>
+    <div class="chartlegend">
+      <span><i style="background:var(--up)"></i>大肉数（上柱）</span>
+      <span><i style="background:var(--down)"></i>大面数（下柱）</span>
+      <span><i style="background:var(--gold)"></i>连板总数（金线，右轴）</span>
+      <span><i style="background:var(--faint)"></i>最高板（灰虚线，右轴）</span>
+    </div>
+    <svg id="chartsvg" viewBox="0 0 1200 380" role="img" aria-label="大肉大面与连板高度图"></svg>
+  </div>
+
+  <div class="lists" id="lists"></div>
+
+  <div class="tablebox" id="gs-collapsebox">
+    <h3>崩塌池 / 止跌反核（collapse_count · rebound_count；口径：limit_down_streak≥2 或近5日累计跌幅≥30% 入池，池内今日 ≥+5% 或涨停 = 反核）</h3>
+    <div style="display:flex;gap:26px;flex-wrap:wrap;align-items:center;font-size:13px;padding:2px 0" id="collapsebox"></div>
+  </div>
+
+  <div class="tablebox" id="gs-termsbox">
+    <h3>术语汇总（GET /sentiment-cycle/{date}/terms，SentimentClassifier 现算）</h3>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;padding:2px 0" id="termsbox"></div>
+  </div>
+
+  <div class="tablebox" id="gs-dragonbox">
+    <h3>龙头生命周期 · dragon_cycle 状态机（§4.9：大/小周期由龙头定义；停牌延续周期；断板 3 交易日反包窗口）</h3>
+    <div id="gs-dragonrow" style="display:flex;gap:22px;flex-wrap:wrap;align-items:center;font-size:12.5px;padding:2px 0 4px"></div>
+  </div>
+
+  <div class="tablebox">
+    <h3>一天一列明细</h3>
+    <div class="hint">✎ 可编辑：点击表中 <b>大周期 / 小周期 / 超短周期状态</b> 三行任意一天的格子（或顶部 KPI 徽章）即可修改——弹窗里选择新值，改后显示金色 ✎。实机即 PUT confirm 接口落库。</div>
+    <div class="scroller">
+      <table id="tbl"></table>
+    </div>
+    <div class="legend">
+      <span><i style="background:var(--up)"></i>大肉 ≥+5%</span>
+      <span><i style="background:var(--down)"></i>大面 ≤-5%</span>
+      <span><i style="background:var(--gold)"></i>当前列 / 人工确认</span>
+      <span>周期色：1 冰点 → 6 高潮</span>
+    </div>
+  </div>
+</div>
+
+<div id="editor"></div>
+
+<script>
+/* ================= 数据层：实时读取真实 API（§4.9/§11.1） ================= */
+var CYCLE_COLORS = ['#3d7bd9','#3da4c9','#57b26a','#d9b13d','#e07b39','#e5484d'];
+var STATUS = {1:'冰点', 2:'退潮', 3:'混沌', 4:'发酵', 5:'主升', 6:'高潮'};
+var API_BASE = '/api/v1';
+
+var base = [];      /* SentimentCycleResponse[] 区间序列 */
+var dragons = [];   /* DragonCycleItem[] 龙头周期 */
+var rangeFrom = null, rangeTo = null;
+
+function pad(n){ return (n < 10 ? '0' : '') + n; }
+function parseDate(s){ var p = String(s).split('-'); return new Date(+p[0], +p[1]-1, +p[2]); }
+function fmt(dt){ return dt.getFullYear() + '-' + pad(dt.getMonth()+1) + '-' + pad(dt.getDate()); }
+function wdCN(dt){ return '日一二三四五六'[dt.getDay()]; }
+function esc(s){ return String(s == null ? '' : s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+
+function todayStr(){ return fmt(new Date()); }
+
+/* 视图行：人工确认值优先于建议值（§4.9 step6） */
+function view() {
+  return base.map(function(r){
+    return {
+      date: parseDate(r.trade_date),
+      key: r.trade_date,
+      big: r.big_cycle != null ? r.big_cycle : (r.big_cycle_sug != null ? r.big_cycle_sug : 3),
+      small: r.small_cycle != null ? r.small_cycle : (r.small_cycle_sug != null ? r.small_cycle_sug : 3),
+      status: r.status_text || '—',
+      meat: r.big_meat_count, face: r.big_face_count,
+      lianban: r.lianban_count, maxStreak: r.max_streak || 0,
+      dragon: r.dragon_json && r.dragon_json.length ? r.dragon_json[0].name : '—',
+      manual: (r.big_cycle != null || r.small_cycle != null || r.status_text != null),
+      sugBig: r.big_cycle_sug, sugSmall: r.small_cycle_sug,
+      raw: r
+    };
+  });
+}
+
+/* ================= 加载真实数据 ================= */
+function loadData() {
+  var q = new URLSearchParams(location.search);
+  rangeFrom = q.get('from') || '2021-10-01';
+  rangeTo = q.get('to') || todayStr();
+  return Promise.all([
+    fetch(API_BASE + '/sentiment-cycle/range?from=' + encodeURIComponent(rangeFrom) + '&to=' + encodeURIComponent(rangeTo))
+      .then(function(r){ return r.json(); }).then(function(j){ base = j.items || []; }),
+    fetch(API_BASE + '/dragon-cycle?limit=200')
+      .then(function(r){ return r.json(); }).then(function(j){ dragons = j.items || []; })
+  ]).then(function(){
+    if (!base.length) {
+      document.getElementById('kpis').innerHTML = '<div class="kpi"><div class="lab">数据</div><div class="val"><small>区间内暂无 sentiment_cycle 行，请先运行 SentimentCycleJob / sentiment-replay 回放</small></div></div>';
+      return;
+    }
+    renderAll();
+  }).catch(function(e){
+    document.getElementById('kpis').innerHTML = '<div class="kpi"><div class="lab">加载失败</div><div class="val"><small>' + esc(e.message) + '</small></div></div>';
+  });
+}
+
+/* ================= SVG 主图（零依赖） ================= */
+function renderChart(data) {
+  var W = 1200, H = 380, L = 46, R = 46, T = 30, B = 28;
+  var pw = W - L - R, ph = H - T - B;
+  var mid = T + ph / 2;
+  var maxBar = 70, rMax = 16;
+  var n = data.length, bw = pw / n;
+  function barH(v){ return v / maxBar * (ph / 2); }
+  function lx(i){ return L + i * bw + bw / 2; }
+  function ry(v){ return T + ph - v / rMax * ph; }
+  var s = '';
+  [60, 30, 0, -30, -60].forEach(function(v) {
+    var y = mid - barH(v);
+    s += '<line x1="' + L + '" y1="' + y + '" x2="' + (W - R) + '" y2="' + y + '" stroke="#1c2431" stroke-width="1"/>';
+    s += '<text x="' + (L - 6) + '" y="' + (y + 3) + '" fill="#8593a8" font-size="10" text-anchor="end" font-family="Menlo,monospace">' + v + '</text>';
+  });
+  [0, 4, 8, 12, 16].forEach(function(v) {
+    s += '<text x="' + (W - R + 6) + '" y="' + (ry(v) + 3) + '" fill="#8593a8" font-size="10" font-family="Menlo,monospace">' + v + '</text>';
+  });
+  data.forEach(function(r, i) {
+    var x = L + i * bw + bw * 0.21, w = Math.max(1, bw * 0.58);
+    s += '<g><title>' + fmt(r.date) + ' 周' + wdCN(r.date) + '\n大肉 ' + r.meat + ' / 大面 ' + r.face + '\n连板 ' + r.lianban + ' 家 · 最高 ' + r.maxStreak + ' 板\n' + r.dragon + '（' + r.status + '）</title>';
+    s += '<rect x="' + x + '" y="' + (mid - barH(r.meat)) + '" width="' + w + '" height="' + barH(r.meat) + '" fill="#e5484d" opacity=".85" rx="1"/>';
+    s += '<rect x="' + x + '" y="' + mid + '" width="' + w + '" height="' + barH(r.face) + '" fill="#2fbf71" opacity=".85" rx="1"/>';
+    s += '</g>';
+  });
+  var pts1 = data.map(function(r, i){ return lx(i) + ',' + ry(r.lianban); }).join(' ');
+  var pts2 = data.map(function(r, i){ return lx(i) + ',' + ry(r.maxStreak); }).join(' ');
+  s += '<polyline points="' + pts2 + '" fill="none" stroke="#8593a8" stroke-width="1" stroke-dasharray="4 3" opacity=".8"/>';
+  s += '<polyline points="' + pts1 + '" fill="none" stroke="#e2b13c" stroke-width="1.6"/>';
+  var step = Math.ceil(n / 12);
+  data.forEach(function(r, i) {
+    if (i % step !== 0) return;
+    s += '<text x="' + lx(i) + '" y="' + (H - 8) + '" fill="#8593a8" font-size="10" text-anchor="middle" font-family="Menlo,monospace">' + fmt(r.date).slice(5) + '</text>';
+  });
+  s += '<line x1="' + L + '" y1="' + mid + '" x2="' + (W - R) + '" y2="' + mid + '" stroke="#26303f" stroke-width="1"/>';
+  document.getElementById('chartsvg').innerHTML = s;
+}
+
+/* ================= 大肉/大面名单面板 + 昨日名单今日兑现（followup_json） ================= */
+function fchipClass(res) {
+  return res === '延续' || res === '反核止跌' ? 'pos'
+       : res === '转大面' || res === '继续大面' ? 'neg'
+       : res === '停牌' ? 'susp' : 'mid';
+}
+function renderLists(data) {
+  var lastI = data.length - 1;
+  var latest = base[lastI];
+  var html = '';
+  ['meat', 'face'].forEach(function(side) {
+    var isMeat = side === 'meat';
+    var items = isMeat ? (latest.big_meat_list || []) : (latest.big_face_list || []);
+    var count = isMeat ? latest.big_meat_count : latest.big_face_count;
+    html += '<div class="lcard ' + side + '">'
+      + '<div class="lhead"><span class="t" style="color:var(--' + (isMeat ? 'up' : 'down') + ')">今日' + (isMeat ? '大肉' : '大面') + '名单</span>'
+      + '<span class="n">' + latest.trade_date.slice(5) + ' · ' + count + ' 只</span>'
+      + '<span class="sp"></span>'
+      + '<button class="ladd" data-side="' + side + '">+ 添加个股</button></div>';
+    if (!items || !items.length) {
+      html += '<div class="lnote">今日无' + (isMeat ? '大肉' : '大面') + '个股</div>';
+    } else {
+      html += items.map(function(it) {
+        return '<div class="lrow"><span class="lname">' + esc(it.name) + '</span><span class="lcode">' + esc(it.code) + '</span>'
+          + '<span class="lind">' + esc(Array.isArray(it.industry) ? it.industry[0] : (it.industry || '')) + '</span>'
+          + '<span style="color:var(--muted);font-size:11px">' + it.limit_up_streak + '板</span>'
+          + '<span class="lpct ' + (isMeat ? 'up' : 'down') + '">' + (it.change_pct > 0 ? '+' : '') + it.change_pct.toFixed(1) + '%</span>'
+          + '<button class="lrm" data-side="' + side + '" data-code="' + esc(it.code) + '" title="从名单移除">✕</button></div>';
+      }).join('');
+    }
+    /* 昨日名单今日兑现（followup_json） */
+    if (lastI > 0) {
+      var yest = base[lastI - 1];
+      var fups = (isMeat ? yest.followup_json : yest.followup_json || []);
+      var yestItems = (isMeat ? yest.big_meat_list || [] : yest.big_face_list || []);
+      if (yestItems.length) {
+        html += '<div class="fup"><span>昨日(' + yest.trade_date.slice(5) + ')名单今日兑现：</span>'
+          + yestItems.map(function(f) {
+              var res = '停牌';
+              if (fups && fups.length) {
+                var hit = fups.filter(function(x){ return x.code === f.code; })[0];
+                if (hit) res = hit.result;
+              }
+              return '<span class="fchip ' + fchipClass(res) + '" title="' + (isMeat ? 'meat' : 'face') + '名单 · ' + esc(f.name) + '">' + esc(f.name) + ' ' + esc(res) + '</span>';
+            }).join('') + '</div>';
+      }
+    }
+    html += '</div>';
+  });
+  document.getElementById('lists').innerHTML = html;
+
+  /* 名单编辑操作（实机：PUT /sentiment-cycle/{date}/lists，服务端校验非 ST + 留痕） */
+  document.querySelectorAll('.lrm').forEach(function(btn) {
+    btn.onclick = function(ev) {
+      ev.stopPropagation();
+      callLists(latest.trade_date, btn.dataset.side, 'REMOVE', btn.dataset.code, null);
+    };
+  });
+  document.querySelectorAll('.ladd').forEach(function(btn) {
+    btn.onclick = function(ev) {
+      ev.stopPropagation();
+      openAddStockEditor(btn.dataset.side, latest.trade_date);
+    };
+  });
+}
+
+/* PUT /sentiment-cycle/{date}/lists（ADD/REMOVE），成功后重取区间数据 */
+function callLists(tradeDate, side, action, code, name) {
+  return fetch(API_BASE + '/sentiment-cycle/' + tradeDate + '/lists', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ side: side, action: action, code: code, name: name || null, reason: '页面人工编辑' })
+  }).then(function(r){ if (!r.ok) throw new Error('lists 失败 ' + r.status); return r.json(); })
+    .then(loadData);
+}
+
+/* 添加个股浮层（支持模糊搜索：GET /api/v1/stock-search?q=&limit=） */
+function openAddStockEditor(side, tradeDate) {
+  var editor = document.getElementById('editor');
+  editor.innerHTML = '<div class="et">添加到今日' + (side === 'meat' ? '大肉' : '大面') + '名单（手动，实机 PUT /lists 落库留痕）</div>'
+    + '<div class="addform"><span class="relwrap"><input id="addname" placeholder="代码/名称/拼音如 pt" autocomplete="off">'
+    + '<div id="sug" class="sug"></div></span>'
+    + '<button id="addok">确定</button></div>';
+  editor.style.display = 'block';
+  var rect = document.querySelector('.lhead button.ladd').getBoundingClientRect();
+  editor.style.top = (rect.bottom + 6) + 'px';
+  editor.style.left = Math.max(8, Math.min(rect.left, window.innerWidth - 360)) + 'px';
+  var addname = document.getElementById('addname'), sug = document.getElementById('sug');
+  var picked = null;
+  addname.focus();
+  addname.addEventListener('input', function() {
+    picked = null;
+    var q = addname.value.trim();
+    if (!q) { sug.innerHTML = ''; return; }
+    fetch(API_BASE + '/stock-search?q=' + encodeURIComponent(q) + '&limit=8')
+      .then(function(r){ return r.json(); })
+      .then(function(j) {
+        var hits = (j.stocks || j.items || j || []).filter(function(s){ return s && s.code; });
+        sug.innerHTML = hits.map(function(s) {
+          return '<div class="si" data-code="' + esc(s.code) + '" data-name="' + esc(s.name || '') + '"><b>' + esc(s.name || '') + '</b>'
+            + '<span class="c">' + esc(s.code) + '</span></div>';
+        }).join('');
+        sug.querySelectorAll('.si').forEach(function(el) {
+          el.onmousedown = function(ev2) {
+            ev2.preventDefault(); ev2.stopPropagation();
+            picked = { code: el.dataset.code, name: el.dataset.name };
+            addname.value = picked.name;
+            sug.innerHTML = '';
+          };
+        });
+      }).catch(function(){ sug.innerHTML = ''; });
+  });
+  document.getElementById('addok').onclick = function(ev2) {
+    ev2.stopPropagation();
+    var name = addname.value.trim();
+    if (!name) return;
+    var code = picked && picked.name === name ? picked.code : String(name.match(/\d{6}/) ? name.match(/\d{6}/)[0] : '');
+    if (!code) { return; }
+    callLists(tradeDate, side, 'ADD', code, picked ? picked.name : name);
+    editor.style.display = 'none';
+  };
+}
+
+/* ================= 崩塌池/术语/龙头面板 ================= */
+function renderExtras() {
+  var latest = base[base.length - 1];
+  var coll = document.getElementById('collapsebox');
+  coll.innerHTML = '<span>崩塌池 <b style="color:#e5484d;font-size:16px">' + latest.collapse_count + '</b> 家</span>'
+    + '<span>今日止跌反核 <b style="color:#2fbf71;font-size:16px">' + latest.rebound_count + '</b> 家</span>'
+    + '<span style="color:#7d8b9e;font-size:12px">池内：'
+    + (latest.collapse_list || []).slice(0, 6).map(function(c){ return esc(c.name) + '(D' + c.limit_down_streak + ')'; }).join(' · ')
+    + (latest.collapse_list && latest.collapse_list.length > 6 ? ' …' : '') + '</span>';
+
+  var tb = document.getElementById('termsbox');
+  fetch(API_BASE + '/sentiment-cycle/' + latest.trade_date + '/terms')
+    .then(function(r){ return r.json(); })
+    .then(function(t){
+      var chips = [];
+      chips.push('<span style="padding:3px 10px;border-radius:12px;border:1px solid #232d3d;background:#1a2230;color:#e2b13c">阶段 ' + esc(t.stage) + '</span>');
+      chips.push('<span title="大周期' + t.big_cycle + '" style="cursor:help;font-size:12px;padding:3px 10px;border-radius:12px;border:1px solid #232d3d;background:#1a2230;color:#aeb9c9">大周期 ' + t.big_cycle + '</span>');
+      chips.push('<span title="小周期' + t.small_cycle + '" style="cursor:help;font-size:12px;padding:3px 10px;border-radius:12px;border:1px solid #232d3d;background:#1a2230;color:#aeb9c9">小周期 ' + t.small_cycle + '</span>');
+      chips.push('<span title="龙头状态' + (t.dragon_status||'—') + '" style="cursor:help;font-size:12px;padding:3px 10px;border-radius:12px;border:1px solid #232d3d;background:#1a2230;color:#aeb9c9">龙头 ' + (t.dragon_name||'—') + ' ' + (t.dragon_status||'') + '</span>');
+      (t.actions || []).slice(0, 14).forEach(function(a) {
+        chips.push('<span title="' + esc(a.evidence) + '" style="cursor:help;font-size:12px;padding:3px 10px;border-radius:12px;border:1px solid #232d3d;background:#1a2230;color:#aeb9c9">' + esc(a.label) + '·' + esc(a.name) + '</span>');
+      });
+      tb.innerHTML = chips.join('');
+    }).catch(function(){ tb.innerHTML = '<span style="color:#525f70;font-size:12px">terms 加载失败</span>'; });
+
+  var dr = document.getElementById('gs-dragonrow');
+  if (!dragons.length) { dr.innerHTML = '<span style="color:#525f70;font-size:12px">暂无龙头周期（dragon_cycle 空）</span>'; return; }
+  dr.innerHTML = dragons.slice(0, 8).map(function(d) {
+    var typeTag = d.cycle_type ? '<span style="padding:2px 8px;border-radius:4px;background:rgba(87,178,106,.15);color:#57b26a;font-size:11px">' + esc(d.cycle_type) + '</span>' : '<span style="padding:2px 8px;border-radius:4px;background:rgba(226,177,60,.12);color:var(--gold);font-size:11px">进行中</span>';
+    return '<span style="border:1px solid #232d3d;background:#1a2230;border-radius:8px;padding:6px 12px;display:inline-flex;gap:8px;align-items:center;flex-wrap:wrap">'
+      + '<span style="color:#dbe4ef;font-weight:600;font-size:13px">' + esc(d.code) + '</span>'
+      + typeTag
+      + '<span style="color:var(--muted)">最高 <b style="color:#dbe4ef">' + d.max_streak + '</b> 板</span>'
+      + '<span style="color:var(--muted)">' + d.start_date + (d.end_date ? ' → ' + d.end_date : ' 起') + '</span>'
+      + (d.rebreak_count ? '<span style="color:var(--muted)">反包 <b style="color:#dbe4ef">' + d.rebreak_count + '</b></span>' : '')
+      + (d.suspended_days ? '<span style="color:var(--muted)">停牌 <b style="color:#dbe4ef">' + d.suspended_days + '</b> 天</span>' : '')
+      + '<span style="color:var(--faint)">' + esc(d.status || '') + '</span>'
+      + '</span>';
+  }).join('');
+}
+
+/* ================= 渲染总入口 ================= */
+function renderAll() {
+  var data = view();
+  var latest = data[data.length - 1];
+  var lastI = data.length - 1;
+
+  var kpis = [
+    ['大周期 / 小周期', '<span class="editable" data-i="' + lastI + '" data-k="big" title="点击编辑"><span class="chip" style="background:' + CYCLE_COLORS[latest.big-1] + ';color:#0e1218">' + latest.big + '</span></span> <span class="editable" data-i="' + lastI + '" data-k="small" title="点击编辑"><span class="chip" style="background:' + CYCLE_COLORS[latest.small-1] + ';color:#0e1218">' + latest.small + '</span></span>'],
+    ['超短周期状态', '<span class="editable" data-i="' + lastI + '" data-k="status" title="点击编辑"><span class="chip" style="background:var(--panel-2);border:1px solid var(--gold);color:var(--gold)">' + esc(latest.status) + '</span></span>'],
+    ['当日最高板', latest.maxStreak + '<small> 板 · ' + esc(latest.dragon) + '</small>'],
+    ['大肉总数', '<span class="up">' + latest.meat + '</span>'],
+    ['大面总数', '<span class="down">' + latest.face + '</span>'],
+    ['连板总数', latest.lianban + '<small> 家</small>']
+  ];
+  document.getElementById('kpis').innerHTML = kpis.map(function(k) {
+    return '<div class="kpi"><div class="lab">' + k[0] + '</div><div class="val">' + k[1] + '</div></div>';
+  }).join('');
+
+  document.getElementById('bigband').innerHTML = data.map(function(r) {
+    return '<i style="background:' + CYCLE_COLORS[r.big-1] + '" title="' + fmt(r.date) + ' · 大周期 ' + r.big + (r.manual ? '（人工确认）' : '') + '"></i>';
+  }).join('');
+
+  renderChart(data);
+  renderLists(data);
+  renderExtras();
+
+  function cell(r, key) {
+    var manual = (key === 'big' || key === 'small' || key === 'status') && r.manual;
+    if (key === 'big' || key === 'small')
+      return '<span class="chip' + (manual ? ' manual' : '') + '" style="background:' + CYCLE_COLORS[r[key]-1] + ';color:#0e1218;font-size:11px;padding:1px 8px">' + r[key] + '</span>';
+    if (key === 'meat') return '<span class="up">' + r.meat + '</span>';
+    if (key === 'face') return '<span class="down">' + r.face + '</span>';
+    if (key === 'dragon') return '<span>' + esc(r.dragon) + '<small style="color:var(--muted)"> ' + r.maxStreak + '板</small></span>';
+    if (key === 'date') return fmt(r.date).slice(5);
+    if (key === 'wd') return '周' + wdCN(r.date);
+    if (key === 'status') return '<span class="' + (manual ? 'manual' : '') + '">' + esc(r.status) + '</span>';
+    return r[key];
+  }
+  var ROWS = [['date','日期'],['wd','周几'],['big','大周期'],['small','小周期'],['meat','大肉总数'],['face','大面总数'],['lianban','连板总数'],['maxStreak','最高板'],['dragon','高度龙'],['status','超短周期状态']];
+  var EDITABLE = { big: 1, small: 1, status: 1 };
+  var html = '<thead><tr><th></th>' + data.map(function(r, i) {
+    return '<th' + (i === lastI ? ' class="latest"' : '') + '>' + fmt(r.date).slice(5) + '</th>';
+  }).join('') + '</tr></thead><tbody>';
+  ROWS.forEach(function(row) {
+    html += '<tr><td>' + row[1] + (EDITABLE[row[0]] ? '<span class="rowedit" title="此行可点击编辑">✎</span>' : '') + '</td>' + data.map(function(r, i) {
+      var cls = (i === lastI ? 'latest ' : '') + (EDITABLE[row[0]] ? 'editable' : '');
+      return '<td' + (cls ? ' class="' + cls.trim() + '"' : '') + ' data-i="' + i + '" data-k="' + row[0] + '"' + (EDITABLE[row[0]] ? ' title="点击编辑"' : '') + '>' + cell(r, row[0]) + '</td>';
+    }).join('') + '</tr>';
+  });
+  document.getElementById('tbl').innerHTML = html + '</tbody>';
+}
+
+/* ================= 行内编辑器（实机对应 PUT /api/v1/sentiment-cycle/{date}/confirm） ================= */
+var editor = document.getElementById('editor');
+function closeEditor() { editor.style.display = 'none'; }
+function openEditor(el) {
+  var i = +el.dataset.i, k = el.dataset.k, r = view()[i], dateKey = base[i].trade_date;
+  var label = { big: '大周期', small: '小周期', status: '超短周期状态' }[k];
+  var opts = k === 'status'
+    ? ['冰点','退潮','混沌','发酵','主升','高潮'].map(function(n){ return [n, n]; })
+    : [1,2,3,4,5,6].map(function(n){ return [n, n]; });
+  var current = k === 'status' ? r.status : r[k];
+  editor.innerHTML =
+    '<div class="et">' + dateKey + ' 周' + wdCN(r.date) + ' · ' + label +
+    '（当前 ' + (k === 'status' ? esc(current) : current) + '）</div>' +
+    '<div class="opts">' + opts.map(function(o) {
+      return '<button data-v="' + o[0] + '" class="' + (String(current) === String(o[0]) ? 'reset' : '') + '">' + o[1] + '</button>';
+    }).join('') +
+    '</div>';
+  editor.style.display = 'block';
+  var rect = el.getBoundingClientRect();
+  editor.style.top = (rect.bottom + 6) + 'px';
+  editor.style.left = Math.max(8, Math.min(rect.left, window.innerWidth - 300)) + 'px';
+  editor.querySelectorAll('button').forEach(function(btn) {
+    btn.onclick = function(ev2) {
+      ev2.stopPropagation();
+      var v = btn.dataset.v;
+      var body = {};
+      if (k === 'big') body.big_cycle = +v;
+      if (k === 'small') body.small_cycle = +v;
+      if (k === 'status') body.status_text = v;
+      fetch(API_BASE + '/sentiment-cycle/' + dateKey + '/confirm', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      }).then(function(r){ if (!r.ok) throw new Error('confirm 失败 ' + r.status); return r.json(); })
+        .then(loadData);
+      closeEditor();
+    };
+  });
+}
+document.addEventListener('click', function(ev) {
+  var t = ev.target.closest('.editable');
+  if (t && t.dataset.k) { openEditor(t); return; }
+  if (editor && !editor.contains(ev.target)) closeEditor();
+});
+
+loadData();
+</script>
+
+<script id="gs-dljs">
+/* 日期联动源点：点情绪周期表任意日期列 → 全站进入该日复盘模式（§17.3/§4.9） */
+(function(){
+"use strict";
+var q=new URLSearchParams(location.search),d=q.get("date"),TODAY=new Date();
+TODAY=TODAY.getFullYear()+"-"+((TODAY.getMonth()+1)<10?"0":"")+(TODAY.getMonth()+1)+"-"+(TODAY.getDate()<10?"0":"")+TODAY.getDate();
+window.GS_DL={date:(d&&d!==TODAY)?d:null,
+  set:function(x){var u=new URL(location.href);
+    if(x&&x!==TODAY){u.searchParams.set("date",x);}else{u.searchParams.delete("date");}
+    location.href=u.toString();},
+  back:function(){this.set(null);}};
+if(GS_DL.date){
+  var b=document.getElementById("gs-dlbar");
+  b.classList.add("on");
+  b.querySelector("b").textContent=GS_DL.date;
+}
+})();
+</script>
+<script id="gs-navdl">
+/* §17.3 日期透传：侧边栏跳转携带当前复盘日期 ?date=（已带 date 的链接不重复追加） */
+(function(){
+"use strict";
+if(!window.GS_DL||!GS_DL.date)return;
+document.querySelectorAll(".gs-nav a[href]").forEach(function(a){
+  var h=a.getAttribute("href");
+  if(h.indexOf("date=")>-1)return;
+  a.setAttribute("href",h+(h.indexOf("?")>-1?"&":"?")+"date="+encodeURIComponent(GS_DL.date));
+});
+})();
+</script>
+</body>
+</html>

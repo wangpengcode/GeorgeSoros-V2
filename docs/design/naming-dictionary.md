@@ -136,6 +136,7 @@
 | `big_cycle` | 人工确认值（null=未确认，展示取建议值） | sentiment_cycle |
 | `small_cycle` | 小周期人工确认值（null=未确认，展示取建议值） | sentiment_cycle |
 | `status_text` | 冰点/混沌/主升/退潮…（建议标签人工终定） | sentiment_cycle |
+| `data_coverage` | 数据覆盖（FULL=全量正常 / PARTIAL=采集失败率>10%，§13.4） | sentiment_cycle |
 | `start_date` | 起始日（dragon_cycle=上位日；backtest_result=回测起始） | dragon_cycle、backtest_result |
 | `end_date` | 结束日（dragon_cycle=阵亡/定性日 null=进行中；backtest_result=回测结束） | dragon_cycle、backtest_result |
 | `rebreak_count` | 反包次数 | dragon_cycle |
@@ -203,3 +204,21 @@
 | `complete` | 15:10 归档补齐后置 true | intraday_replay |
 | `page` | 页面（intraday_replay=整页渲染 JSONB；daily_note=页面枚举） | intraday_replay、daily_note |
 | `content` | 笔记内容（纯人工日志，不进策略条件） | daily_note |
+
+## 六、响应 JSON 键区段（非列名，受本册约束，先增册再用名）
+
+> 对外响应 JSON 键（非 schema 列）同样受命名字典约束：同一语义=同一键名。与 §3 特例（max_trade_date/degraded）并列，集中留痕。
+
+| 键名 | 含义 | 所属端点/DTO |
+|---|---|---|
+| `stocks` | 股票列表数组（非列名；/stock-list 与 /stock-search 系列响应数组，语义同 Python §11.1 契约） | GET /stock-list（Python）、/stock-search 消费兼容 |
+| `items` | 区间/列表响应数组（升序；情绪曲线与龙头时间轴数据源） | GET /sentiment-cycle/range、GET /dragon-cycle |
+| `actions` | 个股动作标签清单数组 | GET /sentiment-cycle/{date}/terms、GET /stocks/{code}/actions |
+| `label` | 个股动作标签值（反包\|晋级\|断板\|反核止跌\|继续大面\|大肉\|大面\|停牌） | /terms 与 /stocks/{code}/actions 的 actions[] 元素 |
+| `evidence` | 判定口径说明（证据文本） | /terms 与 /stocks/{code}/actions 的 actions[] 元素 |
+| `stage` | 阶段标签（冰点~高潮，status_text 建议标签） | GET /sentiment-cycle/{date}/terms |
+| `dragon_name` | 当前龙头名称（null=无） | GET /sentiment-cycle/{date}/terms |
+| `dragon_status` | 龙头状态 RISING/BROKEN/SUSPENDED/DEAD（null=无进行中龙头） | GET /sentiment-cycle/{date}/terms |
+| `code` | 证券代码（响应键复用列名语义） | /stock-search、/stocks/{code}/actions |
+| `name` | 名称（响应键复用列名语义） | /stock-search、/terms actions[] |
+| `industry` | 行业 JSON 数组（主行业=第一个，展示用；响应键复用列名语义） | /stock-search、limit_up_list 系列 |

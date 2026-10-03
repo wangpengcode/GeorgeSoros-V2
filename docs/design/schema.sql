@@ -134,9 +134,11 @@ CREATE TABLE sentiment_cycle (
     big_cycle        SMALLINT,                  -- 人工确认值（null=未确认，展示取建议值）
     small_cycle      SMALLINT,            -- 小周期人工确认值（null=未确认，展示取建议值）
     status_text      VARCHAR(50),               -- 冰点/混沌/主升/退潮…（建议标签人工终定）
+    data_coverage    VARCHAR(10) NOT NULL DEFAULT 'FULL', -- 数据覆盖（FULL=全量正常 / PARTIAL=采集失败率>10%，§13.4）
     created_at       TIMESTAMP DEFAULT NOW(), -- 行创建时间
     CHECK (big_cycle_sug   BETWEEN 1 AND 6),
-    CHECK (small_cycle_sug BETWEEN 1 AND 6)
+    CHECK (small_cycle_sug BETWEEN 1 AND 6),
+    CHECK (data_coverage IN ('FULL','PARTIAL'))
 );
 
 CREATE TABLE dragon_cycle (

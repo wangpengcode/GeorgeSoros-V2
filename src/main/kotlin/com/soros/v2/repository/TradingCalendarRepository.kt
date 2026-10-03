@@ -23,4 +23,7 @@ interface TradingCalendarRepository : JpaRepository<TradingCalendar, LocalDate> 
 
     /** 该日之前最近一个交易日（倒序取首个，上一个交易日） */
     fun findFirstByTradeDateBeforeOrderByTradeDateDesc(tradeDate: LocalDate): TradingCalendar?
+
+    /** 区间内交易日（升序；§13.5 回放逐日序列 / §13.4 状态机观察期计数） */
+    fun findByTradeDateBetweenOrderByTradeDateAsc(from: LocalDate, to: LocalDate): List<TradingCalendar>
 }

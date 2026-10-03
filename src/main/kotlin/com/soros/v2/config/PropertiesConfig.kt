@@ -11,5 +11,6 @@ import org.springframework.context.annotation.Configuration
     DataCollectionProperties::class,
     PythonClientProperties::class,
     DingTalkProperties::class,
+    SentimentProperties::class,
 )
 class PropertiesConfig

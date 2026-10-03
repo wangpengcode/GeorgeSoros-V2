@@ -21,6 +21,12 @@ interface StockInfoRepository : JpaRepository<StockInfo, Int> {
     /** pg_trgm 模糊搜索入口（search_key 小写 name+全拼+拼音首字母） */
     fun findBySearchKeyContainingIgnoreCase(searchKey: String): List<StockInfo>
 
+    /** 代码前缀匹配（/stock-search：code 前缀 OR name 小写包含） */
+    fun findByCodeStartingWith(code: String): List<StockInfo>
+
+    /** 名称小写包含匹配（/stock-search） */
+    fun findByNameContainingIgnoreCase(name: String): List<StockInfo>
+
     /** 批量按代码查（§4.8 涨停梯队装配 industry/concept_boards；CrossValidate 样本校验） */
     fun findByCodeIn(codes: Collection<String>): List<StockInfo>
 

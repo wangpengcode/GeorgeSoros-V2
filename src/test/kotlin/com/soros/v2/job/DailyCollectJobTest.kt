@@ -24,6 +24,7 @@ import com.soros.v2.service.dto.FundamentalsStockDto
 import com.soros.v2.service.dto.SaveBatchResult
 import com.soros.v2.service.dto.StockBarsResult
 import com.soros.v2.service.dto.StockListDto
+import com.soros.v2.service.dto.StockSearchItem
 import com.soros.v2.util.CollectMetrics
 import java.math.BigDecimal
 import java.time.LocalDate
@@ -123,6 +124,7 @@ class DailyCollectJobTest {
         override suspend fun backfillIpoDates(): Int = 0
         override suspend fun refreshBoardSnapshot(boardType: BoardType): Int = 0
         override fun findByCode(code: String): StockInfo? = refreshResult.firstOrNull { it.code == code }
+        override fun search(query: String, limit: Int): List<StockSearchItem> = emptyList()
         override fun saveBenchmarkIndices(): Int = 0
     }
 

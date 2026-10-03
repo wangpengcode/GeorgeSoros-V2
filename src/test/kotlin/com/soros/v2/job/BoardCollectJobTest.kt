@@ -12,6 +12,7 @@ import com.soros.v2.service.dto.DailyBarsBatchResponse
 import com.soros.v2.service.dto.FundamentalsRequest
 import com.soros.v2.service.dto.FundamentalsStockDto
 import com.soros.v2.service.dto.StockListDto
+import com.soros.v2.service.dto.StockSearchItem
 import java.time.LocalDate
 import kotlinx.coroutines.Dispatchers
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -50,6 +51,7 @@ class BoardCollectJobTest {
             return 1
         }
         override fun findByCode(code: String): StockInfo? = null
+        override fun search(query: String, limit: Int): List<StockSearchItem> = emptyList()
         override fun saveBenchmarkIndices(): Int = 0
     }
 

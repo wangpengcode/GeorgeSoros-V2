@@ -2,6 +2,7 @@ package com.soros.v2.service
 
 import com.soros.v2.domain.BoardType
 import com.soros.v2.entity.StockInfo
+import com.soros.v2.service.dto.StockSearchItem
 
 /**
  * §4.4/§2.2 股票基础信息服务（列表拉取入库/刷新，供 DailyCollectJob 与涨停/IPO 守卫消费）。
@@ -32,6 +33,14 @@ interface StockInfoService {
 
     /** 按证券代码查基础信息（IPO 守卫 / board 校验用） */
     fun findByCode(code: String): StockInfo?
+
+    /**
+     * GET /api/v1/stock-search（§11.1）：股票模糊搜索（名单添加、梯队查询等输入场景共用）。
+     *
+     * 一期口径：q trim 非空，匹配 code 前缀 OR name 小写包含；排除 is_st=true / delisted=true；
+     * limit 上限 10（调用方默认 10，前端 8）。响应 [{code,name,industry}]（键过命名字典 §17.6）。
+     */
+    fun search(query: String, limit: Int): List<StockSearchItem>
 
     /** 5 个基准指数基础信息入库/刷新（stock_index，code 带前缀值口径特例 sh000001） */
     fun saveBenchmarkIndices(): Int

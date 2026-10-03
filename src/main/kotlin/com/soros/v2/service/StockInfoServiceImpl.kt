@@ -9,6 +9,7 @@ import com.soros.v2.repository.StockInfoRepository
 import com.soros.v2.service.dto.BoardMembersRequest
 import com.soros.v2.service.dto.BoardMembersSnapshot
 import com.soros.v2.service.dto.StockListDto
+import com.soros.v2.service.dto.StockSearchItem
 import com.soros.v2.util.BenchmarkIndices
 import java.time.LocalDate
 import org.slf4j.LoggerFactory
@@ -119,6 +120,18 @@ class StockInfoServiceImpl(
     override fun findByCode(code: String): StockInfo? =
         stockInfoRepository.findByCode(code)
 
+    override fun search(query: String, limit: Int): List<StockSearchItem> {
+        val q = query.trim()
+        require(q.isNotEmpty()) { "搜索词不能为空" }
+        val lower = q.lowercase()
+        val hits = (stockInfoRepository.findByCodeStartingWith(q) +
+            stockInfoRepository.findByNameContainingIgnoreCase(lower))
+            .distinctBy { it.code }
+            .filter { !it.isSt && !it.delisted } // ST/退市隔离铁律：识别并排除
+            .take(limit.coerceIn(1, SEARCH_LIMIT))
+        return hits.map { StockSearchItem(it.code, it.name ?: "", it.industry) }
+    }
+
     override fun saveBenchmarkIndices(): Int {
         for (index in BenchmarkIndices.INDICES) {
             val existing = stockIndexRepository.findByCode(index.code)
@@ -161,5 +174,8 @@ class StockInfoServiceImpl(
     private companion object {
         /** 可采集市场板（§4.4：MAIN 主板/GEM 创业板/STAR 科创板；北交所/B 股不采集） */
         val COLLECTIBLE_BOARDS = setOf(Board.MAIN, Board.GEM, Board.STAR)
+
+        /** /stock-search 结果上限（§11.1：limit 10） */
+        const val SEARCH_LIMIT = 10
     }
 }
