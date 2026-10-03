@@ -224,6 +224,7 @@ CREATE TABLE trading_calendar (
     trade_date  DATE PRIMARY KEY
 );
 -- Python GET /api/v1/trading-calendar → AKShare tool_trade_date_hist_sina 全量
+-- **种子基线：docs/seed/trade_calendar.csv（1990-12-19 ~ 2026-12-31 共 8797 交易日，M0 探针 2026-10-03 验证质量后留存）**，M1 建表后 COPY 导入，后续靠 Job 增量续期
 -- TradingCalendarService 启动载入内存；覆盖不足"明年年底"时自动重拉续期
 -- 查不到日期回退周一~周五判定 + data_quality_log
 ```
@@ -364,7 +365,7 @@ CREATE INDEX idx_dragon_cycle_status ON dragon_cycle (status);
 - `amplitude`（振幅%）：**已决策删除（2026-10-02）**——可由 最高/最低/昨收 随时派生，不设列不养契约。
 - `prev_close`（除权后昨收）：**传输字段，不落库**，仅供 §4.6 漂移检测；三源口径一致（mootdx 除外，见 §4.6）。
 - `stock_info.code` 裸数字；**`stock_index.code` 特例带前缀**（sh000001）——字典显式标注，防有人"顺手统一"。
-- `st_volume`/`total_amount` 单位换算（×100 等）为契约约定，**Step 3 探针实测三源原始单位后校准**，探针结果回写本表。
+- `st_volume`/`total_amount` 单位换算（×100 等）为契约约定，**M0 探针已实测（2026-10-03，docs/research/probe-units-v2.md）**：BaoStock volume 原生=股（amount/volume≈收盘价）、amount=元、preclose 有值、tradestatus/isST 字段确认存在；AKShare 成交量=手（×100 换算正确）、成交额=元、qfq 与不复权列名完全一致。mootdx 未测（本机无可用节点，备源低优先，M3 接入时实测校准）。
 - Kotlin 属性名与 Python JSON key 不同（如 turnoverRate ↔ turnover）是**有意为之**（@Column 显式映射 + DTO 独立命名），禁止"顺手统一"两侧命名——统一动作必须过字典。
 
 ---
@@ -701,9 +702,10 @@ object LimitUpDetector {
 ```
 检测规则（在 StockHistoryService.saveBatch 内实现）：
 1. 每根 bar 携带数据源的 prev_close（昨收）：
-   - BaoStock: query_history_k_data_plus 字段列表加 preclose
-   - AKShare:  stock_zh_a_hist 自带 昨收 列
-   - mootdx:   自带 last_close
+   - BaoStock: query_history_k_data_plus 字段列表加 preclose（M0 探针实测有值 ✓，2026-10-03）
+   - AKShare:  stock_zh_a_hist **无昨收列**（M0 探针实测列名仅 日期/股票代码/OHLC/成交量/成交额/振幅/涨跌幅/涨跌额/换手率）→ 传 null
+   - mootdx:   自带 last_close（M0 未实测，M3 接入时验证）
+   - prev_close=null 的 bar 跳过涨跌幅对拍部分，链式校验 ③（库内昨日 close 基准）不受影响独立有效——failover 到 AKShare 期间检测能力降级但不断链；BaoStock 恢复后下一 bar 自动带回
 2. 逐 bar 校验：|prev_close − 前一根 bar 的 close| ≤ max(0.01, prev_close × 0.5%)
    - 批内相邻 bar 直接互相校验
    - 批首 bar 与库内该股最后一根 close 校验（findByCodeAndDate 查前一个交易日）
@@ -721,7 +723,7 @@ object LimitUpDetector {
 **穿透校验过的边界**：
 - 停牌期 qfq 序列不变，复牌日 preclose 仍等于库内最后 close，不会误报；
 - 涨跌停、大波动日 preclose 恒等于昨收，不受涨跌幅影响，不会误报；
-- 三源 preclose 口径一致（均为除权后昨收），failover 切源不引发误报。
+- BaoStock/mootdx preclose 口径一致（均为除权后昨收），failover 切源不引发误报；AKShare 无该列（M0 探针实测）传 null 降级，见上。
 
 ### 4.7 当日数据准确性保障（五道防线）
 
@@ -1294,7 +1296,7 @@ SELECT MAX(st_date) FROM stock_history WHERE code = '600000';
 **接口源探查结论（2026-10-02 Agent 源码级核实，存档 /tmp/soros-v2-design/akshare-endpoints.md）**：
 - **股票列表主备双源**：主 `stock_info_a_code_name`（列名英文 code/name）内部靠解析深交所 Excel，有真实故障案例（akshare Issue #5947）→ 备源东财 `stock_zh_a_spot_em`；主源失败自动切备源；
 - **北交所过滤**：列表默认含北交所，按代码前缀排除——旧号段 83/87/43 + **2025-10-09 起新号段 920**（board 推导与 ST 过滤同处处理）；
-- **交易日历**：`tool_trade_date_hist_sina` 仅 trade_date 一列；实时抓新浪加密文件，**2025/2026 覆盖必须探针实测**（文档标注止于 2024-12-31，可能未同步）；无未来日历 SLA → 本地法定节假日表兜底（查不到回退周一~五已设计）；
+- **交易日历**：`tool_trade_date_hist_sina` 仅 trade_date 一列；实时抓新浪加密文件；**覆盖已探针实测 PASS（2026-10-03）：2026 全年 242 交易日覆盖至 12-31、节假日剔除正确、无重复；种子已留存 docs/seed/trade_calendar.csv（1990~2026）**；2027+ 无未来日历 SLA → 每年 12 月自动重拉续期 + 本地法定节假日表兜底（查不到回退周一~五已设计）；
 - 财务披露滞后为法定节奏（一季报 4 月末/半年报 8 月末/三季报 10 月末/年报次年 4 月末前），FundamentalsCollectJob 在披露季循环补拉。
 
 错误信封：顶层 {status:"error", error:{code,message}}；单股失败进 failed[]。
@@ -1749,8 +1751,8 @@ Kotlin 不做"换个数据源重试"（避免双重点燃）；Kotlin 侧仅对 
 
 | 数据 | 接口 | 关键结论 | 用途 |
 |------|------|---------|------|
-| 涨停/炸板/跌停/强势/昨日涨停池（**5 池接口定稿**，§17.1 B8；次新池 sub_new 不进主链） | `stock_zt_pool_em` 等 | **六项关键字段全齐**：首次/最后封板时间、炸板次数、封板资金、连板数、涨停统计；date 参数可查历史但**仅保留 ~30 天**（且部分池传老日期静默返回空）；单请求全量无翻页 | 梯队榜/事件 diff/收盘归档（超短核心） |
-| 全市场实时快照 | `stock_zh_a_spot_em` | 23 列，有最新价/涨跌幅/涨速，**无盘口无涨跌停价**；内部分页 55-60 页、30-90s、批内时点不同步 → 只能低频 | 涨跌家数、大面预警（90s+抖动） |
+| 涨停/炸板/跌停/强势/昨日涨停池（**5 池接口定稿**，§17.1 B8；次新池 sub_new 不进主链） | ZT=`stock_zt_pool_em`，ZB=`stock_zt_pool_zbgc_em`，DT=`stock_zt_pool_dtgc_em`，STRONG=`stock_zt_pool_strong_em`，PREV=`stock_zt_pool_previous_em`（函数名 M0 探针实测，2026-10-03） | **六项关键字段全齐**：首次/最后封板时间、炸板次数、封板资金、连板数、涨停统计；**M0 探针四池全通**（2026-09-30：ZT 52/ZB 12/DT 9/STRONG 199/PREV 57 行，列名齐）；date 可查历史但**实测保留 <30 天**（09-30 有行、09-03 起 0 行，且传老日期静默返回空）；单请求全量无翻页 | 梯队榜/事件 diff/收盘归档（超短核心） |
+| 全市场实时快照 | `stock_zh_a_spot_em` | 23 列，有最新价/涨跌幅/涨速，**无盘口无涨跌停价**；内部分页 55-60 页、30-90s、批内时点不同步 → 只能低频；**M0 探针实测无板块行混入**（fs 过滤下 total=5562，V1 的 59271 系旧参数无过滤，§14.7 销项） | 涨跌家数、大面预警（90s+抖动） |
 | 单只盘口五档 | `stock_bid_ask_em` | 含五档+涨跌停价，单只请求 | 只查候选名单（梯队+预警 ~50 只） |
 | 盘前竞价分时 | `stock_zh_a_hist_pre_min_em` | 当日分时**含集合竞价** | 9:25 竞价 gap 探测（竞价情绪） |
 | 分钟线 | `stock_zh_a_hist_min_em` | 1 分钟仅近 5 交易日且不复权（源码硬编码） | 盘中分时仅看当日；长历史免费路径=每日增量自建（暂不做） |
@@ -1852,9 +1854,11 @@ IntradayCollectJob（Python 侧轮询进程 or Kotlin 调度 + Python 接口）
   15:10        IntradayArchiveStep 权威归档 + 当日事件摘要推钉钉
 ```
 
-### 14.7 落地前必测清单（探针遗留，Step 实施首日跑）
+### 14.7 落地前必测清单（M0 探针已销项 5/7，2026-10-03，docs/research/probe-intraday-v2.md）
 
-spot 的 total=59271 混入板块行疑点 / 盘中 bid_ask 五档有值性 / 5 分钟线实际深度 / 强势/炸板/跌停池 30 天保留边界逐一实测 / mootdx 节点连通性（如选备源）
+**已实测销项**：① spot 板块行疑点**排除**（fs 过滤下 total=5562 无混入，V1 的 59271 系旧参数无过滤）② bid_ask 五档**盘后无值**（f31-f50 缺省，仅涨停/跌停价有值——预期内，五档仅盘中实时可得；腾讯源盘后有缓存值，备查）③ 5 池健康度全通 + date 回看**实测保留 <30 天**（09-30 有行、09-03 起静默返空）④ 池接口函数名修正（ZB=zbgc/DT=dtgc，探针报告附全名）⑤ 市值反推验证通过（§17.1 B1）。
+
+**遗留 2 项（M6 盘中实施首日跑）**：5 分钟线实际深度（push2his 历史域从本机网络整域弃答，判定网络出口特例；腾讯 m5 接口实测可达可作备源）/ mootdx 节点连通性（如选备源）。
 
 ### 14.8 排期
 
@@ -1918,7 +1922,7 @@ daily_note(
 
 | # | 问题 | 裁定 | 落点 |
 |---|---|---|---|
-| B1 | stock_attr「流通市值区间」无数据落点 | 补数据源 | stock_info 加 float_shares / total_shares（单位=股）；DailyCollectJob 每日从东财快照流通市值/总市值 ÷ 收盘价反推回写，BaoStock profit 季度对拍校准；**市值不落列**，条件求值时=股本×当日收盘价现算 |
+| B1 | stock_attr「流通市值区间」无数据落点 | 补数据源 | stock_info 加 float_shares / total_shares（单位=股）；DailyCollectJob 每日从东财快照流通市值/总市值 ÷ 收盘价反推回写，BaoStock profit 季度对拍校准；**市值不落列**，条件求值时=股本×当日收盘价现算。**M0 探针验证通过（2026-10-03）**：反推 vs `qt/stock/get` 直读 f84/f85 误差 0.001%（浮点级），方案成立零新增请求 |
 | B2 | 条件求值 null 语义全篇未定 | 算不出的跳过 + 问题表记录 | 全局纪律（置于 §12.7.1 首条）：任一条件输入为 null → 该股该日该条件=不命中，跳过并写 data_quality_log(issue_type='CONDITION_SKIP', detail=条件名+原因)。**不新建表——data_quality_log 就是问题表**，加这个 issue_type 即可 |
 | B3 | 回测区间可早于信号数据起点 | 从最早一条数据开始用；收益要真实 | 回测入口 start_date 自动夹到 max(请求起点, signal_daily 最早日)，结果页标注「实际起点=X（数据所限）」；停牌日冻结估值不计区间收益（正文 §12 已有，此处重申为铁律） |
 | B4 | 周期条件读建议值还是人工值未定 | 都按一个本子算 | **唯一口径：条件只读 big_cycle_sug / small_cycle_sug（建议值）**；人工确认值（big_cycle/small_cycle）仅展示，永不进任何条件 |
