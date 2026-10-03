@@ -190,13 +190,13 @@ CREATE TABLE sector_daily (
 CREATE TABLE signal_daily (
     code            VARCHAR(20) NOT NULL, -- 证券代码（股票=裸数字 600000；指数=带前缀 sh000001，仅 stock_index/index_history）
     trade_date            DATE NOT NULL, -- 交易日
-    streak_rank        SMALLINT,                -- 当日梯队排名（全市场排序才得出）
+    ladder_rank        SMALLINT,                -- 当日梯队排名（全市场排序才得出）
     is_zhaban          BOOLEAN,                 -- 炸板（日线近似，统一口径落库）
-    sector_streak_rank SMALLINT,                -- 板块内板数排名
+    sector_ladder_rank SMALLINT,                -- 板块内板数排名
     -- 筹码分布 6+ 列（路径 A 自算递推；不存分布曲线本身）
     profit_ratio       NUMERIC(6,2),            -- 获利盘%
     cost_dev           NUMERIC(8,4),            -- 成本偏离% = 平均成本/现价−1（比率，qfq 重对基免疫）
-    c90_low            NUMERIC(12,4),           -- 90% 成本区间（qfq 坐标）
+    c90_low            NUMERIC(12,4),           -- 90% 成本区间下沿（qfq 坐标）
     c90_high           NUMERIC(12,4),     -- 90% 成本区间上沿（元）
     c90_conc           NUMERIC(6,2),            -- 90% 集中度（东财口径 (p90−p10)/(p90+p10)×100）
     c70_low            NUMERIC(12,4),     -- 70% 成本区间下沿（元）
@@ -211,7 +211,7 @@ CREATE TABLE signal_daily (
 
 CREATE TABLE strategy_config (
     id            SERIAL PRIMARY KEY,   -- 行主键
-    name          VARCHAR(100) NOT NULL UNIQUE, -- 名称
+    name          VARCHAR(100) NOT NULL UNIQUE, -- 策略名（唯一）
     yaml          TEXT NOT NULL,                -- 落库即权威格式；backtest_result.params 的唯一来源
     version       INT NOT NULL DEFAULT 1,       -- 保存即 version+1
     status        VARCHAR(10) NOT NULL DEFAULT 'DRAFT' -- 配置状态（DRAFT/ACTIVE/FROZEN）
@@ -252,7 +252,7 @@ CREATE TABLE trade_ledger (
     strategy_name   VARCHAR(100) NOT NULL, -- 策略名
     code    VARCHAR(20) NOT NULL,       -- 证券代码（股票=裸数字 600000；指数=带前缀 sh000001，仅 stock_index/index_history）
     open_date  DATE NOT NULL,             -- 开仓日
-    close_date DATE,                            -- null=持仓中
+    close_date DATE,                            -- 平仓日（null=持仓中）
     pnl        NUMERIC(16,2),             -- 盈亏额（元）
     pnl_ratio  NUMERIC(10,4),             -- 盈亏率（%）
     source     VARCHAR(10) NOT NULL CHECK (source IN ('BACKTEST','PAPER','LIVE')), -- 来源/触发源
@@ -281,7 +281,7 @@ CREATE TABLE account_position (
 -- 唯一边界=结果页标注 universe 来源）
 CREATE TABLE watchlist_group (
     id         SERIAL PRIMARY KEY,      -- 行主键
-    name       VARCHAR(50) NOT NULL UNIQUE,     -- PCB / 存储芯片 / 创新药…
+    name       VARCHAR(50) NOT NULL UNIQUE,     -- 分组名（如 PCB/存储芯片/创新药）
     note       TEXT,                      -- 分组说明
     created_at TIMESTAMP DEFAULT NOW()  -- 行创建时间
 );
