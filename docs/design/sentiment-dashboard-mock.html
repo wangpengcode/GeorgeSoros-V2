@@ -129,6 +129,116 @@
   .sug .si .p { color: var(--faint); font-size: 10.5px; margin-left: auto; }
   @media (max-width: 500px) { .kpi .val { font-size: 19px; } }
 </style>
+<style id="gs-navcss">
+.gs-nav{position:fixed;left:0;top:0;bottom:0;width:176px;background:#10151d;border-right:1px solid #263140;display:flex;flex-direction:column;z-index:50}
+.gs-brand{padding:16px 14px 12px;border-bottom:1px solid #263140}
+.gs-brand b{color:#e2b13c;font-size:14px;letter-spacing:.5px}
+.gs-brand span{display:block;color:#7d8b9e;font-size:10.5px;margin-top:2px}
+.gs-nav a{display:flex;flex-direction:column;gap:1px;padding:11px 14px;color:#aeb9c9;text-decoration:none;border-left:3px solid transparent;font-size:13px}
+.gs-nav a b{font-weight:600;color:inherit}
+.gs-nav a i{font-style:normal;color:#525f70;font-size:10.5px}
+.gs-nav a:hover{background:#161c25;color:#e8edf4}
+.gs-nav a.on{background:#161c25;border-left-color:#e2b13c;color:#e8edf4}
+.gs-nav a.on i{color:#7d8b9e}
+.gs-foot{margin-top:auto;padding:12px 14px;color:#525f70;font-size:10px;border-top:1px solid #263140;line-height:1.6}
+body{padding-left:176px!important}
+@media(max-width:900px){
+  body{padding-left:0!important;padding-top:58px!important}
+  .gs-nav{left:0;right:0;top:0;bottom:auto;width:auto;flex-direction:row;align-items:stretch;overflow-x:auto}
+  .gs-brand{border-bottom:none;border-right:1px solid #263140;display:flex;flex-direction:column;justify-content:center;white-space:nowrap;padding:8px 12px}
+  .gs-brand span{display:none}
+  .gs-nav a{border-left:none;border-bottom:3px solid transparent;padding:10px 12px;white-space:nowrap}
+  .gs-nav a b{font-size:12.5px}
+  .gs-nav a i{display:none}
+  .gs-nav a.on{border-bottom-color:#e2b13c}
+  .gs-foot{display:none}
+}
+</style>
+<nav class="gs-nav">
+  <div class="gs-brand"><b>GeorgeSoros V2</b><span>设计样稿导航</span></div>
+  <a href="sentiment-dashboard-mock.html" class="on"><b>情绪周期表</b><i>全市场温度 · 背景层</i></a>
+  <a href="strategy-console-mock.html"><b>策略控制台</b><i>策略 · 回测 · 自选股</i></a>
+  <a href="intraday-monitor-mock.html"><b>盘中监控</b><i>实时盘面 · 开仓预警</i></a>
+  <a href="kline-mock.html"><b>K线复盘</b><i>个股下钻 · 指标</i></a>
+  <a href="notes-mock.html"><b>笔记本</b><i>按天汇总 · 跨页记录</i></a>
+  <div class="gs-foot">同一 qfq 数据底座<br>情绪 → 决策 → 执行 → 复盘</div>
+</nav>
+<style id="gs-notecss">
+.gs-nfab{position:fixed;right:18px;bottom:18px;z-index:60;width:46px;height:46px;border-radius:50%;background:#1a2230;border:1px solid #e2b13c;color:#e2b13c;cursor:pointer;box-shadow:0 4px 14px rgba(0,0,0,.45);display:flex;flex-direction:column;align-items:center;justify-content:center;font-size:13px;line-height:1.1}
+.gs-nfab small{font-size:9.5px;letter-spacing:1px}
+.gs-nfab:hover{background:#222b3c}
+.gs-nmask{position:fixed;inset:0;z-index:69;background:rgba(0,0,0,.35);display:none}
+.gs-nmask.open{display:block}
+.gs-npanel{position:fixed;right:0;top:0;bottom:0;width:340px;max-width:92vw;background:#141a23;border-left:1px solid #263140;z-index:70;transform:translateX(105%);transition:transform .22s;display:flex;flex-direction:column;box-shadow:-8px 0 24px rgba(0,0,0,.4);font:13px/1.6 -apple-system,"PingFang SC",sans-serif;color:#dbe4ef}
+.gs-npanel.open{transform:none}
+.gs-nhead{padding:13px 16px;border-bottom:1px solid #263140;display:flex;justify-content:space-between;align-items:baseline}
+.gs-nhead b{color:#e2b13c;font-size:13.5px}
+.gs-nhead span{color:#525f70;font-size:11px}
+.gs-nclose{background:none;border:none;color:#7d8b9e;font-size:16px;cursor:pointer;padding:0 2px}
+.gs-nclose:hover{color:#e2b13c}
+.gs-nlist{flex:1;overflow-y:auto;padding:12px 14px}
+.gs-nitem{border:1px solid #232d3d;background:#1a2230;border-radius:6px;padding:8px 10px;margin-bottom:8px}
+.gs-nitem .m{font-size:10.5px;color:#525f70;margin-bottom:2px;display:flex;gap:8px}
+.gs-nitem .m .code{color:#b48ce8;font-variant-numeric:tabular-nums}
+.gs-nitem .t{font-size:12.5px;white-space:pre-wrap}
+.gs-nfoot{border-top:1px solid #263140;padding:12px 14px}
+.gs-nchip{font-size:11px;color:#7d8b9e;margin-bottom:6px}
+.gs-nchip b{color:#b48ce8;font-weight:600}
+.gs-nfoot textarea{width:100%;background:#10151d;border:1px solid #232d3d;border-radius:6px;color:#dbe4ef;font:12.5px/1.5 inherit;padding:8px 10px;resize:vertical;min-height:56px}
+.gs-nfoot textarea:focus{outline:none;border-color:#e2b13c}
+.gs-nfoot .row{display:flex;justify-content:space-between;align-items:center;margin-top:8px}
+.gs-nadd{background:#1a2230;border:1px solid #232d3d;color:#dbe4ef;padding:5px 14px;border-radius:6px;font-size:12px;cursor:pointer}
+.gs-nadd:hover{border-color:#e2b13c;color:#e2b13c}
+.gs-nhint{font-size:10.5px;color:#525f70}
+@media(max-width:900px){.gs-npanel{width:100vw;max-width:100vw}}
+</style>
+<div id="gs-nfab" class="gs-nfab">✎<small>笔记</small></div>
+<div id="gs-nmask" class="gs-nmask"></div>
+<aside id="gs-npanel" class="gs-npanel">
+  <div class="gs-nhead"><b>笔记 · 情绪周期表</b><span>今天 · 按天留档</span><button class="gs-nclose" id="gs-nclose">×</button></div>
+  <div class="gs-nlist" id="gs-nlist"></div>
+  <div class="gs-nfoot">
+    <div class="gs-nchip" id="gs-nchip">市场级笔记（不挂个股）</div>
+    <textarea id="gs-nta" placeholder="随手记：盘面感受 / 个股观察 / 纪律提醒……（真实版按天落 daily_note 表）"></textarea>
+    <div class="row"><span class="gs-nhint">同日同页同股一条，编辑覆盖</span><button class="gs-nadd" id="gs-nadd">＋ 记下</button></div>
+  </div>
+</aside>
+<script id="gs-notejs">
+(function(){
+"use strict";
+var CFG={page:"SENTIMENT",code:null};
+var DEMO=[["11:30",null,"上午维持主升结构，炸板率抬升到 18%，午后防分歧；持股不动，不开新仓。"]];
+var list=document.getElementById("gs-nlist"),panel=document.getElementById("gs-npanel"),
+    mask=document.getElementById("gs-nmask"),ta=document.getElementById("gs-nta"),
+    chip=document.getElementById("gs-nchip");
+function esc(s){return s.replace(/&/g,"&amp;").replace(/</g,"&lt;")}
+function render(){
+  var h="";
+  DEMO.forEach(function(n,i){
+    h+='<div class="gs-nitem"><div class="m"><span>'+n[0]+'</span>'
+      +(n[1]?'<span class="code">'+n[1]+'</span>':'')+'</div><div class="t">'+esc(n[2])+'</div></div>';
+  });
+  list.innerHTML=h||'<div style="color:#525f70;font-size:12px;text-align:center;padding:20px 0">本页今天还没有笔记</div>';
+}
+function syncChip(){
+  if(CFG.page==="KLINE"){chip.innerHTML="挂靠个股：<b>"+(CFG.code||"—")+"</b>（跟随当前 K 线）";}
+}
+document.getElementById("gs-nfab").addEventListener("click",function(){
+  panel.classList.add("open");mask.classList.add("open");ta.focus();
+});
+function close(){panel.classList.remove("open");mask.classList.remove("open");}
+mask.addEventListener("click",close);
+document.getElementById("gs-nclose").addEventListener("click",close);
+document.getElementById("gs-nadd").addEventListener("click",function(){
+  var v=ta.value.trim();if(!v)return;
+  DEMO.unshift(["刚刚",CFG.page==="KLINE"?CFG.code:null,v]);ta.value="";render();
+});
+document.addEventListener("keydown",function(e){if(e.key==="Escape")close();});
+/* K线页：注入方会在其主脚本后更新 CFG.code —— 暴露钩子 */
+window.GS_NOTE_SYNC=function(code){CFG.code=code;syncChip();};
+syncChip();render();
+})();
+</script>
 
 <div class="wrap">
   <h1>情绪周期表</h1>

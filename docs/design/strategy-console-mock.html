@@ -118,6 +118,117 @@
 </style>
 </head>
 <body>
+<style id="gs-navcss">
+.gs-nav{position:fixed;left:0;top:0;bottom:0;width:176px;background:#10151d;border-right:1px solid #263140;display:flex;flex-direction:column;z-index:50}
+.gs-brand{padding:16px 14px 12px;border-bottom:1px solid #263140}
+.gs-brand b{color:#e2b13c;font-size:14px;letter-spacing:.5px}
+.gs-brand span{display:block;color:#7d8b9e;font-size:10.5px;margin-top:2px}
+.gs-nav a{display:flex;flex-direction:column;gap:1px;padding:11px 14px;color:#aeb9c9;text-decoration:none;border-left:3px solid transparent;font-size:13px}
+.gs-nav a b{font-weight:600;color:inherit}
+.gs-nav a i{font-style:normal;color:#525f70;font-size:10.5px}
+.gs-nav a:hover{background:#161c25;color:#e8edf4}
+.gs-nav a.on{background:#161c25;border-left-color:#e2b13c;color:#e8edf4}
+.gs-nav a.on i{color:#7d8b9e}
+.gs-foot{margin-top:auto;padding:12px 14px;color:#525f70;font-size:10px;border-top:1px solid #263140;line-height:1.6}
+body{padding-left:176px!important}
+@media(max-width:900px){
+  body{padding-left:0!important;padding-top:58px!important}
+  .gs-nav{left:0;right:0;top:0;bottom:auto;width:auto;flex-direction:row;align-items:stretch;overflow-x:auto}
+  .gs-brand{border-bottom:none;border-right:1px solid #263140;display:flex;flex-direction:column;justify-content:center;white-space:nowrap;padding:8px 12px}
+  .gs-brand span{display:none}
+  .gs-nav a{border-left:none;border-bottom:3px solid transparent;padding:10px 12px;white-space:nowrap}
+  .gs-nav a b{font-size:12.5px}
+  .gs-nav a i{display:none}
+  .gs-nav a.on{border-bottom-color:#e2b13c}
+  .gs-foot{display:none}
+}
+</style>
+<nav class="gs-nav">
+  <div class="gs-brand"><b>GeorgeSoros V2</b><span>设计样稿导航</span></div>
+  <a href="sentiment-dashboard-mock.html"><b>情绪周期表</b><i>全市场温度 · 背景层</i></a>
+  <a href="strategy-console-mock.html" class="on"><b>策略控制台</b><i>策略 · 回测 · 自选股</i></a>
+  <a href="intraday-monitor-mock.html"><b>盘中监控</b><i>实时盘面 · 开仓预警</i></a>
+  <a href="kline-mock.html"><b>K线复盘</b><i>个股下钻 · 指标</i></a>
+  <a href="notes-mock.html"><b>笔记本</b><i>按天汇总 · 跨页记录</i></a>
+  <div class="gs-foot">同一 qfq 数据底座<br>情绪 → 决策 → 执行 → 复盘</div>
+</nav>
+<style id="gs-notecss">
+.gs-nfab{position:fixed;right:18px;bottom:60px;z-index:60;width:46px;height:46px;border-radius:50%;background:#1a2230;border:1px solid #e2b13c;color:#e2b13c;cursor:pointer;box-shadow:0 4px 14px rgba(0,0,0,.45);display:flex;flex-direction:column;align-items:center;justify-content:center;font-size:13px;line-height:1.1}
+.gs-nfab small{font-size:9.5px;letter-spacing:1px}
+.gs-nfab:hover{background:#222b3c}
+.gs-nmask{position:fixed;inset:0;z-index:69;background:rgba(0,0,0,.35);display:none}
+.gs-nmask.open{display:block}
+.gs-npanel{position:fixed;right:0;top:0;bottom:0;width:340px;max-width:92vw;background:#141a23;border-left:1px solid #263140;z-index:70;transform:translateX(105%);transition:transform .22s;display:flex;flex-direction:column;box-shadow:-8px 0 24px rgba(0,0,0,.4);font:13px/1.6 -apple-system,"PingFang SC",sans-serif;color:#dbe4ef}
+.gs-npanel.open{transform:none}
+.gs-nhead{padding:13px 16px;border-bottom:1px solid #263140;display:flex;justify-content:space-between;align-items:baseline}
+.gs-nhead b{color:#e2b13c;font-size:13.5px}
+.gs-nhead span{color:#525f70;font-size:11px}
+.gs-nclose{background:none;border:none;color:#7d8b9e;font-size:16px;cursor:pointer;padding:0 2px}
+.gs-nclose:hover{color:#e2b13c}
+.gs-nlist{flex:1;overflow-y:auto;padding:12px 14px}
+.gs-nitem{border:1px solid #232d3d;background:#1a2230;border-radius:6px;padding:8px 10px;margin-bottom:8px}
+.gs-nitem .m{font-size:10.5px;color:#525f70;margin-bottom:2px;display:flex;gap:8px}
+.gs-nitem .m .code{color:#b48ce8;font-variant-numeric:tabular-nums}
+.gs-nitem .t{font-size:12.5px;white-space:pre-wrap}
+.gs-nfoot{border-top:1px solid #263140;padding:12px 14px}
+.gs-nchip{font-size:11px;color:#7d8b9e;margin-bottom:6px}
+.gs-nchip b{color:#b48ce8;font-weight:600}
+.gs-nfoot textarea{width:100%;background:#10151d;border:1px solid #232d3d;border-radius:6px;color:#dbe4ef;font:12.5px/1.5 inherit;padding:8px 10px;resize:vertical;min-height:56px}
+.gs-nfoot textarea:focus{outline:none;border-color:#e2b13c}
+.gs-nfoot .row{display:flex;justify-content:space-between;align-items:center;margin-top:8px}
+.gs-nadd{background:#1a2230;border:1px solid #232d3d;color:#dbe4ef;padding:5px 14px;border-radius:6px;font-size:12px;cursor:pointer}
+.gs-nadd:hover{border-color:#e2b13c;color:#e2b13c}
+.gs-nhint{font-size:10.5px;color:#525f70}
+@media(max-width:900px){.gs-npanel{width:100vw;max-width:100vw}}
+</style>
+<div id="gs-nfab" class="gs-nfab">✎<small>笔记</small></div>
+<div id="gs-nmask" class="gs-nmask"></div>
+<aside id="gs-npanel" class="gs-npanel">
+  <div class="gs-nhead"><b>笔记 · 策略控制台</b><span>今天 · 按天留档</span><button class="gs-nclose" id="gs-nclose">×</button></div>
+  <div class="gs-nlist" id="gs-nlist"></div>
+  <div class="gs-nfoot">
+    <div class="gs-nchip" id="gs-nchip">市场级笔记（不挂个股）</div>
+    <textarea id="gs-nta" placeholder="随手记：盘面感受 / 个股观察 / 纪律提醒……（真实版按天落 daily_note 表）"></textarea>
+    <div class="row"><span class="gs-nhint">同日同页同股一条，编辑覆盖</span><button class="gs-nadd" id="gs-nadd">＋ 记下</button></div>
+  </div>
+</aside>
+<script id="gs-notejs">
+(function(){
+"use strict";
+var CFG={page:"STRATEGY",code:null};
+var DEMO=[["14:52",null,"PCB 突破策略年化 27%、回撤 9.8%；Kelly 16% 偏激进，实盘按一半执行，已启用盘中预警。"]];
+var list=document.getElementById("gs-nlist"),panel=document.getElementById("gs-npanel"),
+    mask=document.getElementById("gs-nmask"),ta=document.getElementById("gs-nta"),
+    chip=document.getElementById("gs-nchip");
+function esc(s){return s.replace(/&/g,"&amp;").replace(/</g,"&lt;")}
+function render(){
+  var h="";
+  DEMO.forEach(function(n,i){
+    h+='<div class="gs-nitem"><div class="m"><span>'+n[0]+'</span>'
+      +(n[1]?'<span class="code">'+n[1]+'</span>':'')+'</div><div class="t">'+esc(n[2])+'</div></div>';
+  });
+  list.innerHTML=h||'<div style="color:#525f70;font-size:12px;text-align:center;padding:20px 0">本页今天还没有笔记</div>';
+}
+function syncChip(){
+  if(CFG.page==="KLINE"){chip.innerHTML="挂靠个股：<b>"+(CFG.code||"—")+"</b>（跟随当前 K 线）";}
+}
+document.getElementById("gs-nfab").addEventListener("click",function(){
+  panel.classList.add("open");mask.classList.add("open");ta.focus();
+});
+function close(){panel.classList.remove("open");mask.classList.remove("open");}
+mask.addEventListener("click",close);
+document.getElementById("gs-nclose").addEventListener("click",close);
+document.getElementById("gs-nadd").addEventListener("click",function(){
+  var v=ta.value.trim();if(!v)return;
+  DEMO.unshift(["刚刚",CFG.page==="KLINE"?CFG.code:null,v]);ta.value="";render();
+});
+document.addEventListener("keydown",function(e){if(e.key==="Escape")close();});
+/* K线页：注入方会在其主脚本后更新 CFG.code —— 暴露钩子 */
+window.GS_NOTE_SYNC=function(code){CFG.code=code;syncChip();};
+syncChip();render();
+})();
+</script>
+
 <div class="wrap">
   <h1>策略控制台</h1>
   <div class="sub">GeorgeSoros-V2 · 设计样稿（纯前端模拟，零外部依赖） · 结构化表单生成 YAML · 不支持直接编辑 YAML 文本 · L3 代码策略不在此页</div>
@@ -126,6 +237,7 @@
     <button class="tab on" data-t="t1">① 策略</button>
     <button class="tab" data-t="t2">② 回测</button>
     <button class="tab" data-t="t3">③ 结果对比</button>
+    <button class="tab" data-t="t4">④ 自选股</button>
   </div>
 
   <!-- ============ TAB 1 策略 ============ -->
@@ -197,6 +309,21 @@
 </div>
 <div id="toast"></div>
 
+  <!-- ============ TAB 4 自选股 ============ -->
+  <section id="t4" class="panel" hidden>
+    <div class="legend" style="margin-bottom:12px">分组即回测/策略 universe（YAML：<b>universe.watchlist: [PCB]</b>）· 盘中预警候选池自动并入 · universe 语义=当前名单，结果页标注来源</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px" id="wlchips"></div>
+    <div id="wltable"></div>
+    <div class="panel" style="margin-top:16px;background:var(--panel2)">
+      <h3 style="font-size:12px;font-weight:600;color:var(--muted);letter-spacing:1px;margin-bottom:8px">批量导入（每行一个：代码或 代码,备注）</h3>
+      <textarea id="wlimport" style="width:100%;min-height:64px;background:#10151d;border:1px solid var(--line);border-radius:6px;color:var(--fg);font:12.5px/1.5 inherit;padding:8px 10px;resize:vertical" placeholder="600000 示例股份&#10;002475 立讯精密"></textarea>
+      <div style="display:flex;gap:8px;align-items:center;margin-top:8px">
+        <button class="btn" id="wlbtn">校验并导入</button>
+        <span id="wlmsg" style="font-size:12px;color:var(--muted)"></span>
+      </div>
+      <div style="font-size:11px;color:var(--faint);margin-top:6px">导入校验：代码须存在（stock_basic）· ST/*ST 自动剔除（系统铁律）· 已在组内自动跳过（UNIQUE 防重）</div>
+    </div>
+  </section>
 <script>
 'use strict';
 /* ================= 工具 ================= */
@@ -608,7 +735,7 @@ document.getElementById('rbody').addEventListener('click',e=>{
 /* ================= Tab 切换 ================= */
 function showTab(t){
   document.querySelectorAll('.tab').forEach(b=>b.classList.toggle('on',b.dataset.t===t));
-  ['t1','t2','t3'].forEach(x=>document.getElementById(x).hidden=(x!==t));
+  ['t1','t2','t3','t4'].forEach(x=>document.getElementById(x).hidden=(x!==t));
 }
 document.querySelectorAll('.tab').forEach(b=>b.addEventListener('click',()=>showTab(b.dataset.t)));
 
@@ -617,3 +744,31 @@ renderList();renderEditor();renderPicklist();renderResults();
 </script>
 </body>
 </html>
+<script>
+/* ===== TAB4 自选股（模拟数据：真实版落 watchlist_group / watchlist_member 两表）===== */
+var WLG={"PCB": [["002475", "立讯精密", "2026-08-12", "放量过前高，筹码洗净"], ["300308", "中际旭创", "2026-08-12", "CPO 主线，回调看 60 日线"], ["603036", "如通股份", "2026-09-02", "PCB 设备，业绩拐点"], ["002463", "沪电股份", "2026-07-20", "AI 服务器板，主升"]], "存储芯片": [["000021", "深科技", "2026-09-10", "存储封测，涨价周期"], ["301308", "江波龙", "2026-09-10", "模组龙头，弹性大"], ["688012", "中微公司", "2026-09-28", "设备平台型，回调买点观察"]], "消费电子": [["002241", "歌尔股份", "2026-08-30", "AI 眼镜代工"], ["603986", "兆易创新", "2026-09-15", "利基存储+MCU"]], "创新药": [["688235", "百济神州", "2026-09-20", "BD 出海主线"], ["300347", "泰格医药", "2026-09-20", "CRO 修复"]]};
+var wlCur="PCB";
+function wlRender(){
+  var chips='<span class="tag" style="cursor:pointer;padding:4px 12px;'+(wlCur==="__all__"?"border-color:var(--gold);color:var(--gold)":"")+'" data-g="__all__">全部 ('+Object.keys(WLG).reduce(function(a,k){return a+WLG[k].length},0)+')</span>';
+  Object.keys(WLG).forEach(function(g){
+    chips+='<span class="tag" style="cursor:pointer;padding:4px 12px;'+(wlCur===g?"border-color:var(--gold);color:var(--gold)":"")+'" data-g="'+g+'">'+g+' ('+WLG[g].length+')</span>';
+  });
+  chips+='<span class="tag" style="cursor:pointer;padding:4px 12px;color:var(--faint)">＋ 新建分组</span>';
+  document.getElementById("wlchips").innerHTML=chips;
+  var rows="";
+  Object.keys(WLG).forEach(function(g){
+    if(wlCur!=="__all__"&&wlCur!==g)return;
+    if(wlCur==="__all__")rows+='<tr><td colspan="6" style="color:var(--gold);font-size:12px;padding-top:12px">▤ '+g+'</td></tr>';
+    WLG[g].forEach(function(r){
+      rows+='<tr><td class="num">'+r[0]+'</td><td style="text-align:left">'+r[1]+'</td><td class="num">'+r[2]+'</td><td style="text-align:left">'+r[3]+'</td><td style="text-align:left">—</td><td><span style="color:var(--faint);cursor:pointer">移除</span></td></tr>';
+    });
+  });
+  document.getElementById("wltable").innerHTML='<table><thead><tr><th>代码</th><th style="text-align:left">名称</th><th>加入日</th><th style="text-align:left">备注</th><th style="text-align:left">K线笔记</th><th></th></tr></thead><tbody>'+rows+'</tbody></table>';
+  document.querySelectorAll("#wlchips .tag").forEach(function(c){c.addEventListener("click",function(){if(WLG[c.dataset.g]||c.dataset.g==="__all__"){wlCur=c.dataset.g;wlRender();}});});
+}
+document.getElementById("wlbtn").addEventListener("click",function(){
+  var lines=document.getElementById("wlimport").value.split(/\n/).filter(function(x){return x.trim()});
+  document.getElementById("wlmsg").textContent="校验 "+lines.length+" 行：通过 "+Math.max(0,lines.length-1)+" · 不存在剔除 1 · ST 剔除 0（模拟）";
+});
+wlRender();
+</script>

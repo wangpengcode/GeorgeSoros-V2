@@ -1,0 +1,156 @@
+<style>
+:root{--bg:#0e1218;--panel:#141a23;--panel2:#1a2230;--line:#232d3d;--fg:#dbe4ef;--muted:#7d8b9e;--faint:#525f70;--gold:#e2b13c;--up:#e5484d;--down:#2fbf71;--blue:#5b9dd9;--purple:#b48ce8}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--fg);font:14px/1.65 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif;padding:24px 28px 60px}
+.wrap{max-width:980px;margin:0 auto}
+h1{font-size:17px;font-weight:600;letter-spacing:.5px}
+.sub{color:var(--faint);font-size:12px;margin-top:3px}
+.panel{border:1px solid var(--line);background:var(--panel);border-radius:8px;padding:16px 18px;margin-top:16px}
+/* 过滤条 */
+.filters{display:flex;gap:8px;margin-top:16px;flex-wrap:wrap;align-items:center}
+.fchip{border:1px solid var(--line);background:var(--panel2);color:var(--muted);font-size:12px;padding:4px 12px;border-radius:14px;cursor:pointer;user-select:none}
+.fchip:hover{color:var(--fg)}
+.fchip.on{border-color:var(--gold);color:var(--gold)}
+.fcount{color:var(--faint);font-size:11.5px;margin-left:auto}
+/* 日节 */
+.dayhead{display:flex;align-items:baseline;gap:12px;margin:26px 0 8px;padding-bottom:6px;border-bottom:1px solid var(--line)}
+.dayhead b{font-size:14.5px;color:var(--gold);font-variant-numeric:tabular-nums}
+.dayhead .wk{color:var(--muted);font-size:12px}
+.dayhead .ctx{color:var(--faint);font-size:11.5px;margin-left:auto;text-align:right}
+.note{border:1px solid var(--line);background:var(--panel2);border-radius:6px;padding:9px 12px;margin-bottom:8px;position:relative}
+.note:hover{border-color:#33415a}
+.note .meta{display:flex;gap:8px;align-items:center;font-size:11px;color:var(--faint);margin-bottom:3px}
+.badge{font-size:10.5px;padding:0 7px;border-radius:4px;background:#222b3c;color:var(--muted);line-height:1.7}
+.badge.p-SENTIMENT{color:var(--blue)}
+.badge.p-STRATEGY{color:var(--gold)}
+.badge.p-INTRADAY{color:var(--up)}
+.badge.p-KLINE{color:var(--purple)}
+.badge.p-GENERAL{color:#8fae8f}
+.badge.code{background:#10151d;border:1px solid var(--line);font-variant-numeric:tabular-nums}
+.note .tx{font-size:13px;white-space:pre-wrap}
+.note .ed{position:absolute;right:10px;top:8px;font-size:11px;color:var(--faint);opacity:0;cursor:pointer}
+.note:hover .ed{opacity:1}
+.note .ed:hover{color:var(--gold)}
+/* 补记 */
+.composer{display:flex;gap:8px;margin-top:10px}
+.composer textarea{flex:1;background:#10151d;border:1px solid var(--line);border-radius:6px;color:var(--fg);font:13px/1.5 inherit;padding:8px 10px;resize:vertical;min-height:40px}
+.composer textarea:focus{outline:none;border-color:var(--gold)}
+.btn{background:var(--panel2);border:1px solid var(--line);color:var(--fg);padding:6px 14px;border-radius:6px;font-size:12.5px;cursor:pointer;white-space:nowrap}
+.btn:hover{border-color:var(--gold);color:var(--gold)}
+.empty{color:var(--faint);font-size:12px;text-align:center;padding:14px 0}
+/* 侧边栏 */
+.gs-nav{position:fixed;left:0;top:0;bottom:0;width:176px;background:#10151d;border-right:1px solid #263140;display:flex;flex-direction:column;z-index:50}
+.gs-brand{padding:16px 14px 12px;border-bottom:1px solid #263140}
+.gs-brand b{color:#e2b13c;font-size:14px;letter-spacing:.5px}
+.gs-brand span{display:block;color:#7d8b9e;font-size:10.5px;margin-top:2px}
+.gs-nav a{display:flex;flex-direction:column;gap:1px;padding:11px 14px;color:#aeb9c9;text-decoration:none;border-left:3px solid transparent;font-size:13px}
+.gs-nav a b{font-weight:600;color:inherit}
+.gs-nav a i{font-style:normal;color:#525f70;font-size:10.5px}
+.gs-nav a:hover{background:#161c25;color:#e8edf4}
+.gs-nav a.on{background:#161c25;border-left-color:#e2b13c;color:#e8edf4}
+.gs-nav a.on i{color:#7d8b9e}
+.gs-foot{margin-top:auto;padding:12px 14px;color:#525f70;font-size:10px;border-top:1px solid #263140;line-height:1.6}
+body{padding-left:176px!important}
+@media(max-width:900px){
+  body{padding-left:0!important;padding-top:58px!important}
+  .gs-nav{left:0;right:0;top:0;bottom:auto;width:auto;flex-direction:row;align-items:stretch;overflow-x:auto}
+  .gs-brand{border-bottom:none;border-right:1px solid #263140;display:flex;flex-direction:column;justify-content:center;white-space:nowrap;padding:8px 12px}
+  .gs-brand span{display:none}
+  .gs-nav a{border-left:none;border-bottom:3px solid transparent;padding:10px 12px;white-space:nowrap}
+  .gs-nav a b{font-size:12.5px}
+  .gs-nav a i{display:none}
+  .gs-nav a.on{border-bottom-color:#e2b13c}
+  .gs-foot{display:none}
+}
+</style>
+<title>笔记本 · GeorgeSoros V2</title>
+<nav class="gs-nav">
+  <div class="gs-brand"><b>GeorgeSoros V2</b><span>设计样稿导航</span></div>
+  <a href="sentiment-dashboard-mock.html"><b>情绪周期表</b><i>全市场温度 · 背景层</i></a>
+  <a href="strategy-console-mock.html"><b>策略控制台</b><i>策略 · 回测 · 自选股</i></a>
+  <a href="intraday-monitor-mock.html"><b>盘中监控</b><i>实时盘面 · 开仓预警</i></a>
+  <a href="kline-mock.html"><b>K线复盘</b><i>个股下钻 · 指标</i></a>
+  <a href="notes-mock.html" class="on"><b>笔记本</b><i>按天汇总 · 跨页记录</i></a>
+  <div class="gs-foot">同一 qfq 数据底座<br>情绪 → 决策 → 执行 → 复盘</div>
+</nav>
+<div class="wrap">
+  <h1>笔记本</h1>
+  <div class="sub">按天汇总各页面笔记 · 人工复盘日志（不进策略条件） · 各页右下角 ✎ 按钮随手记</div>
+
+  <div class="filters" id="filters">
+    <span class="fchip on" data-f="ALL">全部来源</span>
+    <span class="fchip" data-f="SENTIMENT">情绪周期表</span>
+    <span class="fchip" data-f="STRATEGY">策略控制台</span>
+    <span class="fchip" data-f="INTRADAY">盘中监控</span>
+    <span class="fchip" data-f="KLINE">K线复盘</span>
+    <span class="fchip" data-f="GENERAL">笔记本</span>
+    <span class="fcount" id="fcount"></span>
+  </div>
+  <div id="days"></div>
+</div>
+<script>
+"use strict";
+/* ===== 模拟数据（真实版来自 daily_note 表：st_date / page / st_code / content）===== */
+const PGLB={SENTIMENT:"情绪周期表",STRATEGY:"策略控制台",INTRADAY:"盘中监控",KLINE:"K线复盘",GENERAL:"笔记本"};
+/* 每日只读上下文（真实版自动带出：情绪阶段/涨停家数来自 market_daily） */
+const DAYCTX={
+ "2026-10-02":"情绪阶段：主升段 D3 · 涨停 87 家 · 炸板率 18% ↑",
+ "2026-10-01":"情绪阶段：主升段 D2 · 涨停 94 家 · 一进二晋级率 31%",
+ "2026-09-30":"情绪阶段：冰点转暖 · 涨停 46 家 · 连板高度 3",
+ "2026-09-29":"情绪阶段：退潮 D2 · 涨停 29 家 · 大面 5 家"
+};
+let notes=[
+ {d:"2026-10-02",t:"14:52",page:"STRATEGY",code:null,text:"PCB 突破策略本轮回测年化 27%、最大回撤 9.8%；Kelly 建议仓位 16% 偏激进，实盘先按一半执行。已点「启用盘中预警」。"},
+ {d:"2026-10-02",t:"15:05",page:"KLINE",code:"600000",text:"示例股份 90% 筹码集中度回落到 8.4，谷底抬升明显；获利盘 62%，回调先看 5 日线支撑。"},
+ {d:"2026-10-02",t:"11:30",page:"SENTIMENT",code:null,text:"上午维持主升结构，但炸板率抬升到 18%，午后防分歧；持股不动，不开新仓。"},
+ {d:"2026-10-02",t:"10:12",page:"INTRADAY",code:"600000",text:"盘中预警触发：突破 20 日高 + 量比 2.3。命中条件与回测口径一致（收盘确认）。"},
+ {d:"2026-10-02",t:"09:41",page:"INTRADAY",code:null,text:"竞价强于昨日，量比>2 共 14 只，开盘半小时盘面维持红色。"},
+ {d:"2026-10-01",t:"15:10",page:"KLINE",code:"002475",text:"立讯精密：放量过前高，筹码 70% 集中度 12.1，套牢盘基本洗净。加入 PCB 自选组观察。"},
+ {d:"2026-10-01",t:"14:20",page:"INTRADAY",code:null,text:"大面预警 1 家（昨 3 板），封单快速萎缩，退潮股坚决不碰。"},
+ {d:"2026-10-01",t:"13:05",page:"GENERAL",code:null,text:"想法：自选股分组可以再拆「次新」出来，波动特性与主板票差异大，回测混在一起会拉高失真。"},
+ {d:"2026-10-01",t:"10:02",page:"SENTIMENT",code:null,text:"一进二晋级率 31% 回落但仍 >25% 荣枯线，情绪主线未破坏。"},
+ {d:"2026-09-30",t:"15:20",page:"STRATEGY",code:null,text:"存储芯片动量策略 9 月样本太少（23 笔），Kelly f* 置信区间过宽，暂不启用预警。"},
+ {d:"2026-09-30",t:"14:44",page:"INTRADAY",code:"300308",text:"中际旭创尾盘异动，14:45 日线口径已可求值，MACD 金叉 + 筹码获利盘 71%。"},
+ {d:"2026-09-29",t:"15:30",page:"GENERAL",code:null,text:"退潮期纪律：当日大面 ≥3 家次日只看不做。写进策略前置条件（情绪层开关）。"}
+];
+let curFilter="ALL";
+const today="2026-10-02"; // 样稿把「今天」钉在最后一个交易日，方便补记演示
+
+function esc(s){return s.replace(/&/g,"&amp;").replace(/</g,"&lt;")}
+function render(){
+  const days=[...new Set(notes.map(n=>n.d))].sort().reverse();
+  const box=document.getElementById("days");let h="",shown=0;
+  for(const d of days){
+    const list=notes.filter(n=>n.d===d&&(curFilter==="ALL"||n.page===curFilter))
+                    .sort((a,b)=>b.t.localeCompare(a.t));
+    if(d===today&&curFilter==="ALL")h+=composerHTML(d);
+    if(!list.length)continue;shown+=list.length;
+    h+='<div class="dayhead"><b>'+d+'</b><span class="wk">'+WK[d]+'</span><span class="ctx">'+DAYCTX[d]+'</span></div>';
+    for(const n of list){
+      h+='<div class="note"><div class="meta"><span class="badge p-'+n.page+'">'+PGLB[n.page]+'</span>'
+        +(n.code?'<span class="badge code">'+n.code+'</span>':'')
+        +'<span>'+n.t+'</span></div><div class="tx">'+esc(n.text)+'</div><span class="ed">编辑</span></div>';
+    }
+  }
+  if(!shown)h+='<div class="empty" style="margin-top:24px">该来源暂无笔记</div>';
+  box.innerHTML=h;
+  document.getElementById("fcount").textContent="共 "+shown+" 条 · 按 "+(curFilter==="ALL"?"全部来源":PGLB[curFilter])+" 过滤";
+  document.querySelectorAll(".composer .btn").forEach(b=>b.addEventListener("click",addNote));
+}
+const WK={"2026-10-02":"周四","2026-10-01":"周三","2026-09-30":"周二","2026-09-29":"周一"};
+function composerHTML(d){
+  return '<div class="panel"><div style="font-size:12px;color:var(--muted);margin-bottom:6px">补记 · '+d+'（来源：笔记本 GENERAL，不挂页面）</div>'
+    +'<div class="composer"><textarea placeholder="随手记一条想法 / 纪律 / 待办……"></textarea><button class="btn">＋ 记下</button></div></div>';
+}
+function addNote(e){
+  const ta=e.target.closest(".composer").querySelector("textarea");
+  if(!ta.value.trim())return;
+  notes.push({d:today,t:"16:00",page:"GENERAL",code:null,text:ta.value.trim()});
+  ta.value="";render();
+}
+document.querySelectorAll(".fchip").forEach(c=>c.addEventListener("click",()=>{
+  document.querySelectorAll(".fchip").forEach(x=>x.classList.remove("on"));
+  c.classList.add("on");curFilter=c.dataset.f;render();
+}));
+render();
+</script>

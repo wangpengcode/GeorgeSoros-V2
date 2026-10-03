@@ -57,6 +57,116 @@ svg{display:block;width:100%;height:auto}
 </style>
 </head>
 <body>
+<style id="gs-navcss">
+.gs-nav{position:fixed;left:0;top:0;bottom:0;width:176px;background:#10151d;border-right:1px solid #263140;display:flex;flex-direction:column;z-index:50}
+.gs-brand{padding:16px 14px 12px;border-bottom:1px solid #263140}
+.gs-brand b{color:#e2b13c;font-size:14px;letter-spacing:.5px}
+.gs-brand span{display:block;color:#7d8b9e;font-size:10.5px;margin-top:2px}
+.gs-nav a{display:flex;flex-direction:column;gap:1px;padding:11px 14px;color:#aeb9c9;text-decoration:none;border-left:3px solid transparent;font-size:13px}
+.gs-nav a b{font-weight:600;color:inherit}
+.gs-nav a i{font-style:normal;color:#525f70;font-size:10.5px}
+.gs-nav a:hover{background:#161c25;color:#e8edf4}
+.gs-nav a.on{background:#161c25;border-left-color:#e2b13c;color:#e8edf4}
+.gs-nav a.on i{color:#7d8b9e}
+.gs-foot{margin-top:auto;padding:12px 14px;color:#525f70;font-size:10px;border-top:1px solid #263140;line-height:1.6}
+body{padding-left:176px!important}
+@media(max-width:900px){
+  body{padding-left:0!important;padding-top:58px!important}
+  .gs-nav{left:0;right:0;top:0;bottom:auto;width:auto;flex-direction:row;align-items:stretch;overflow-x:auto}
+  .gs-brand{border-bottom:none;border-right:1px solid #263140;display:flex;flex-direction:column;justify-content:center;white-space:nowrap;padding:8px 12px}
+  .gs-brand span{display:none}
+  .gs-nav a{border-left:none;border-bottom:3px solid transparent;padding:10px 12px;white-space:nowrap}
+  .gs-nav a b{font-size:12.5px}
+  .gs-nav a i{display:none}
+  .gs-nav a.on{border-bottom-color:#e2b13c}
+  .gs-foot{display:none}
+}
+</style>
+<nav class="gs-nav">
+  <div class="gs-brand"><b>GeorgeSoros V2</b><span>设计样稿导航</span></div>
+  <a href="sentiment-dashboard-mock.html"><b>情绪周期表</b><i>全市场温度 · 背景层</i></a>
+  <a href="strategy-console-mock.html"><b>策略控制台</b><i>策略 · 回测 · 自选股</i></a>
+  <a href="intraday-monitor-mock.html"><b>盘中监控</b><i>实时盘面 · 开仓预警</i></a>
+  <a href="kline-mock.html" class="on"><b>K线复盘</b><i>个股下钻 · 指标</i></a>
+  <a href="notes-mock.html"><b>笔记本</b><i>按天汇总 · 跨页记录</i></a>
+  <div class="gs-foot">同一 qfq 数据底座<br>情绪 → 决策 → 执行 → 复盘</div>
+</nav>
+<style id="gs-notecss">
+.gs-nfab{position:fixed;right:18px;bottom:18px;z-index:60;width:46px;height:46px;border-radius:50%;background:#1a2230;border:1px solid #e2b13c;color:#e2b13c;cursor:pointer;box-shadow:0 4px 14px rgba(0,0,0,.45);display:flex;flex-direction:column;align-items:center;justify-content:center;font-size:13px;line-height:1.1}
+.gs-nfab small{font-size:9.5px;letter-spacing:1px}
+.gs-nfab:hover{background:#222b3c}
+.gs-nmask{position:fixed;inset:0;z-index:69;background:rgba(0,0,0,.35);display:none}
+.gs-nmask.open{display:block}
+.gs-npanel{position:fixed;right:0;top:0;bottom:0;width:340px;max-width:92vw;background:#141a23;border-left:1px solid #263140;z-index:70;transform:translateX(105%);transition:transform .22s;display:flex;flex-direction:column;box-shadow:-8px 0 24px rgba(0,0,0,.4);font:13px/1.6 -apple-system,"PingFang SC",sans-serif;color:#dbe4ef}
+.gs-npanel.open{transform:none}
+.gs-nhead{padding:13px 16px;border-bottom:1px solid #263140;display:flex;justify-content:space-between;align-items:baseline}
+.gs-nhead b{color:#e2b13c;font-size:13.5px}
+.gs-nhead span{color:#525f70;font-size:11px}
+.gs-nclose{background:none;border:none;color:#7d8b9e;font-size:16px;cursor:pointer;padding:0 2px}
+.gs-nclose:hover{color:#e2b13c}
+.gs-nlist{flex:1;overflow-y:auto;padding:12px 14px}
+.gs-nitem{border:1px solid #232d3d;background:#1a2230;border-radius:6px;padding:8px 10px;margin-bottom:8px}
+.gs-nitem .m{font-size:10.5px;color:#525f70;margin-bottom:2px;display:flex;gap:8px}
+.gs-nitem .m .code{color:#b48ce8;font-variant-numeric:tabular-nums}
+.gs-nitem .t{font-size:12.5px;white-space:pre-wrap}
+.gs-nfoot{border-top:1px solid #263140;padding:12px 14px}
+.gs-nchip{font-size:11px;color:#7d8b9e;margin-bottom:6px}
+.gs-nchip b{color:#b48ce8;font-weight:600}
+.gs-nfoot textarea{width:100%;background:#10151d;border:1px solid #232d3d;border-radius:6px;color:#dbe4ef;font:12.5px/1.5 inherit;padding:8px 10px;resize:vertical;min-height:56px}
+.gs-nfoot textarea:focus{outline:none;border-color:#e2b13c}
+.gs-nfoot .row{display:flex;justify-content:space-between;align-items:center;margin-top:8px}
+.gs-nadd{background:#1a2230;border:1px solid #232d3d;color:#dbe4ef;padding:5px 14px;border-radius:6px;font-size:12px;cursor:pointer}
+.gs-nadd:hover{border-color:#e2b13c;color:#e2b13c}
+.gs-nhint{font-size:10.5px;color:#525f70}
+@media(max-width:900px){.gs-npanel{width:100vw;max-width:100vw}}
+</style>
+<div id="gs-nfab" class="gs-nfab">✎<small>笔记</small></div>
+<div id="gs-nmask" class="gs-nmask"></div>
+<aside id="gs-npanel" class="gs-npanel">
+  <div class="gs-nhead"><b>笔记 · K线复盘</b><span>今天 · 按天留档</span><button class="gs-nclose" id="gs-nclose">×</button></div>
+  <div class="gs-nlist" id="gs-nlist"></div>
+  <div class="gs-nfoot">
+    <div class="gs-nchip" id="gs-nchip">市场级笔记（不挂个股）</div>
+    <textarea id="gs-nta" placeholder="随手记：盘面感受 / 个股观察 / 纪律提醒……（真实版按天落 daily_note 表）"></textarea>
+    <div class="row"><span class="gs-nhint">同日同页同股一条，编辑覆盖</span><button class="gs-nadd" id="gs-nadd">＋ 记下</button></div>
+  </div>
+</aside>
+<script id="gs-notejs">
+(function(){
+"use strict";
+var CFG={page:"KLINE",code:"600000"};
+var DEMO=[["15:05","600000","90% 集中度 8.4 谷底抬升，获利盘 62%，回调看 5 日线支撑。"]];
+var list=document.getElementById("gs-nlist"),panel=document.getElementById("gs-npanel"),
+    mask=document.getElementById("gs-nmask"),ta=document.getElementById("gs-nta"),
+    chip=document.getElementById("gs-nchip");
+function esc(s){return s.replace(/&/g,"&amp;").replace(/</g,"&lt;")}
+function render(){
+  var h="";
+  DEMO.forEach(function(n,i){
+    h+='<div class="gs-nitem"><div class="m"><span>'+n[0]+'</span>'
+      +(n[1]?'<span class="code">'+n[1]+'</span>':'')+'</div><div class="t">'+esc(n[2])+'</div></div>';
+  });
+  list.innerHTML=h||'<div style="color:#525f70;font-size:12px;text-align:center;padding:20px 0">本页今天还没有笔记</div>';
+}
+function syncChip(){
+  if(CFG.page==="KLINE"){chip.innerHTML="挂靠个股：<b>"+(CFG.code||"—")+"</b>（跟随当前 K 线）";}
+}
+document.getElementById("gs-nfab").addEventListener("click",function(){
+  panel.classList.add("open");mask.classList.add("open");ta.focus();
+});
+function close(){panel.classList.remove("open");mask.classList.remove("open");}
+mask.addEventListener("click",close);
+document.getElementById("gs-nclose").addEventListener("click",close);
+document.getElementById("gs-nadd").addEventListener("click",function(){
+  var v=ta.value.trim();if(!v)return;
+  DEMO.unshift(["刚刚",CFG.page==="KLINE"?CFG.code:null,v]);ta.value="";render();
+});
+document.addEventListener("keydown",function(e){if(e.key==="Escape")close();});
+/* K线页：注入方会在其主脚本后更新 CFG.code —— 暴露钩子 */
+window.GS_NOTE_SYNC=function(code){CFG.code=code;syncChip();};
+syncChip();render();
+})();
+</script>
 
 <div class="head">
   <div>
@@ -90,8 +200,12 @@ svg{display:block;width:100%;height:auto}
       <svg id="svgK" viewBox="0 0 1000 340"></svg>
     </div>
     <div class="panel" style="margin-top:10px">
-      <h3>成交量</h3>
+      <h3>成交量（量比线=前5日均量）　量比 <span id="vLiangbi" class="gold">--</span></h3>
       <svg id="svgV" viewBox="0 0 1000 90"></svg>
+    </div>
+    <div class="panel" style="margin-top:10px">
+      <h3>换手率 %　当前 <span id="vTurn" class="gold">--</span>　<span id="vTurnAvg" class="muted" style="font-weight:400">--</span></h3>
+      <svg id="svgT" viewBox="0 0 1000 80"></svg>
     </div>
     <div class="panel" style="margin-top:10px">
       <h3>MACD（EMA12 / EMA26 / DEA9）</h3>
@@ -100,7 +214,7 @@ svg{display:block;width:100%;height:auto}
   </div>
 
   <div class="panel">
-    <h3>筹码分布 <span style="color:var(--faint)">（截至回放日递推）</span></h3>
+    <h3>筹码分布 <span id="chipDay" style="color:var(--faint)">（截至回放日递推）</span></h3>
     <svg id="svgC" viewBox="0 0 240 340"></svg>
     <div class="chip-metrics">
       <span class="k">获利比例</span><span class="v up" id="mProfit">--</span>
@@ -164,6 +278,12 @@ const MA5=SMA(closes,5),MA10=SMA(closes,10),MA20=SMA(closes,20),MA60=SMA(closes,
 const dif=EMA(closes,12).map((v,i)=>v-EMA(closes,26)[i]);
 const dea=EMA(dif,9);
 const hist=dif.map((v,i)=>(v-dea[i])*2);
+const vols=bars.map(b=>b.vol);
+const volMA5=SMA(vols,5);                                  // 5 日均量（作量比基准线展示）
+const liangbi=vols.map((v,i)=>{                            // 量比=当日量/前5日均量（不含当日，词表 volume 组同口径）
+  if(i<5)return null;let s=0;for(let k=i-5;k<i;k++)s+=vols[k];return v/(s/5)});
+const turns=bars.map(b=>b.turnover);
+const turnMA10=SMA(turns,10);
 
 /* ---------- 筹码递推（路径 A） ---------- */
 const PB=200;
@@ -176,8 +296,9 @@ function shape(b){const lo=Math.min(b.low,b.close*.995),hi=Math.max(b.high,b.clo
     if(p>=lo&&p<=hi){x=p<=b.close?(p-lo)/Math.max(1e-9,b.close-lo):(hi-p)/Math.max(1e-9,hi-b.close)}
     w[i]=x;s+=x}
   if(s>0)for(let i=0;i<PB;i++)w[i]/=s;return w}
+const shapes=bars.map(shape);                 // 形状缓存（悬停联动时避免逐日重算）
 function chipAt(day){let dist=new Float64Array(PB);
-  for(let t=0;t<=day;t++){const tr=Math.min(bars[t].turnover/100,1);const sh=shape(bars[t]);
+  for(let t=0;t<=day;t++){const tr=Math.min(bars[t].turnover/100,1);const sh=shapes[t];
     for(let i=0;i<PB;i++)dist[i]=dist[i]*(1-tr)+tr*sh[i]}
   return dist}
 function chipStats(dist,close){let total=0,wsum=0,profit=0,cum=0;
@@ -228,7 +349,32 @@ function drawV(day){const svg=clear(document.getElementById("svgV"));
   for(let i=0;i<=day;i++){const b=bars[i],h=b.vol/vmax*72;
     el("rect",{x:xC(i)-xStep*.32,y:84-h,width:xStep*.64,height:h,
       fill:b.close>=b.open?"var(--up)":"var(--down)",opacity:.75},svg)}
+  let pts="";
+  for(let i=0;i<=day;i++)if(volMA5[i]!=null)pts+=`${xC(i)},${84-volMA5[i]/vmax*72} `;
+  el("polyline",{points:pts,fill:"none",stroke:"var(--gold)","stroke-width":1,"stroke-dasharray":"3 2"},svg);
+  const lb=liangbi[day];
+  const vlb=document.getElementById("vLiangbi");
+  if(lb==null){vlb.textContent="--"}
+  else{vlb.textContent=lb.toFixed(2)+(lb>=2?"（显著放量）":lb>=1.5?"（放量）":"");
+    vlb.style.color=lb>=2?"var(--up)":lb>=1.5?"var(--gold)":"var(--muted)"}
   dateAxis(svg,89)}
+
+function drawT(day){const svg=clear(document.getElementById("svgT"));
+  const tmax=Math.max(...turns.slice(0,day+1))*1.15||1;
+  for(let g=0;g<=2;g++){const t=tmax*g/2,y=64-(t/tmax)*52;
+    el("line",{x1:0,y1:y,x2:W-padR+8,y2:y,stroke:"var(--line)","stroke-width":.6},svg);
+    el("text",{x:W-padR+12,y:y+3.5,fill:"var(--faint)","font-size":10},svg).textContent=t.toFixed(1)+"%"}
+  let pts="";
+  for(let i=0;i<=day;i++)pts+=`${xC(i)},${64-(turns[i]/tmax)*52} `;
+  el("polygon",{points:`${xC(0)},64 ${pts} ${xC(day)},64`,fill:"var(--blue)",opacity:.15},svg);
+  el("polyline",{points:pts,fill:"none",stroke:"var(--blue)","stroke-width":1.2},svg);
+  let p2="";
+  for(let i=0;i<=day;i++)if(turnMA10[i]!=null)p2+=`${xC(i)},${64-(turnMA10[i]/tmax)*52} `;
+  if(p2)el("polyline",{points:p2,fill:"none",stroke:"var(--purple)","stroke-width":1,"stroke-dasharray":"3 2"},svg);
+  el("text",{x:4,y:12,fill:"var(--faint)","font-size":10},svg).textContent="—— 换手率　- - 10日均换手";
+  document.getElementById("vTurn").textContent=turns[day].toFixed(1)+"%";
+  document.getElementById("vTurnAvg").textContent=turnMA10[day]==null?"":"10日均 "+turnMA10[day].toFixed(1)+"%";
+  dateAxis(svg,75)}
 
 function drawM(day){const svg=clear(document.getElementById("svgM"));
   const vis=dif.slice(0,day+1).concat(dea.slice(0,day+1),hist.slice(0,day+1));
@@ -278,9 +424,12 @@ function info(day){const b=bars[day];
     <span>涨幅 <b class="${b.chg>=0?'up':'down'}">${b.chg>=0?"+":""}${f(b.chg)}%</b></span>
     <span>量 <b>${(b.vol/1e6).toFixed(2)}百万股</b></span>
     <span>换手 <b>${f(b.turnover,1)}%</b></span>
+    <span>量比 <b class="${liangbi[day]!=null&&liangbi[day]>=2?'up':''}">${liangbi[day]==null?'--':liangbi[day].toFixed(2)}</b></span>
     <span>MACD <b class="${hist[day]>=0?'up':'down'}">${f(hist[day],3)}</b></span>`}
 
 function render(day){
+  viewDay=day;curHover=null;setCross(null);
+  document.getElementById("chipDay").textContent="（截至回放日递推）";
   document.getElementById("qPrice").textContent=bars[day].close.toFixed(2);
   const chg=bars[day].chg,qc=document.getElementById("qChg");
   qc.textContent=(chg>=0?"+":"")+chg.toFixed(2)+"%";
@@ -291,10 +440,34 @@ function render(day){
   document.getElementById("vMA20").textContent=MA20[day].toFixed(2);
   document.getElementById("vMA60").textContent=MA60[day]==null?"--":MA60[day].toFixed(2);
   document.getElementById("dayLabel").textContent=dates[day]+"（"+(day+1)+"/"+DAYS+"）";
-  drawK(day);drawV(day);drawM(day);drawChip(day);info(day)}
+  drawK(day);drawV(day);drawT(day);drawM(day);drawChip(day);info(day)}
 
 const slider=document.getElementById("daySlider");
 slider.addEventListener("input",()=>render(+slider.value));
+
+/* ---------- 悬停十字线：K线/量/换手/MACD 四图联动，筹码峰与信息条跟随悬停日 ---------- */
+let viewDay=149,curHover=null;
+const chartSvgs=["svgK","svgV","svgT","svgM"].map(id=>document.getElementById(id));
+const VH={svgK:340,svgV:90,svgT:80,svgM:120};
+const crossLines={};
+function setCross(day){
+  for(const s of chartSvgs){
+    let ln=crossLines[s.id];
+    if(day==null){if(ln){ln.remove();delete crossLines[s.id]}continue}
+    if(!ln){ln=el("line",{stroke:"var(--fg)","stroke-width":.6,"stroke-dasharray":"2 3",
+      opacity:.5,"pointer-events":"none"},s);crossLines[s.id]=ln}
+    ln.setAttribute("x1",xC(day));ln.setAttribute("x2",xC(day));
+    ln.setAttribute("y1",0);ln.setAttribute("y2",VH[s.id])}}
+function dayFromEvent(e){const r=e.currentTarget.getBoundingClientRect();
+  const x=(e.clientX-r.left)/r.width*W;
+  return Math.max(0,Math.min(viewDay,Math.round((x-xStep/2)/xStep)))}
+function onMove(e){const d=dayFromEvent(e);if(d===curHover)return;curHover=d;
+  setCross(d);drawChip(d);info(d);
+  document.getElementById("chipDay").textContent="（悬停 "+dates[d]+" 递推）"}
+function onLeave(){curHover=null;setCross(null);drawChip(viewDay);info(viewDay);
+  document.getElementById("chipDay").textContent="（截至回放日递推）"}
+for(const s of chartSvgs){s.addEventListener("mousemove",onMove);s.addEventListener("mouseleave",onLeave)}
+
 render(149);
 </script>
 </body>

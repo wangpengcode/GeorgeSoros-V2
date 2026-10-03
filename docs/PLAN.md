@@ -1590,7 +1590,17 @@ strategy_config(id, name UNIQUE, yaml TEXT, version, status DRAFT/ACTIVE/RETIRED
                 alert_enabled BOOLEAN DEFAULT FALSE,   -- 盘中开仓预警开关（结果对比页开启，§14.9）
                 created_by, created_at, note)
 strategy_config_history(id, config_id, yaml, version, edited_at)  -- 每次保存留痕，可回滚可 diff
+
+watchlist_group(id SERIAL PK, name VARCHAR(50) UNIQUE, note TEXT, created_at)
+watchlist_member(group_id FK→watchlist_group, st_code, note, added_at,
+                 UNIQUE(group_id, st_code))          -- 自选股分组：用户按基本面 curated 的观察宇宙（PCB/存储芯片/创新药…）
 ```
+
+**自选股分组 = 回测/策略 universe（2026-10-03 用户需求，已裁定）**：
+- **universe 语义 = 当前名单**：只回答「这只票现在是否在某组」，不建变更留痕表（watchlist_history 已砍）。理由：策略跨度由用户定义（典型 3 个月），名单近期变更对短跨度回测无影响；自选池是用户亲手选的基本面票，用当前名单跑近期回测即是本意。唯一边界：结果页标注 universe 来源（全市场 / 自选组名），让"这是在当前自选组上跑的"始终可见——只做标注，不做 as-of
+- **策略 YAML 增 universe 段**：`universe: {watchlist: [PCB, 存储芯片]}`（多组并集；缺省 = 全市场）——回测 BarContext 加载时按 universe 过滤，策略求值与仓位链零改动；词表 stock_attr 组同步补条件 `in_watchlist equals 组名`（想把分组当买条件而非范围时用）
+- **盘中预警联动（§14.9）**：StrategyAlertEvaluator 候选池扩为 涨停池 ∪ 候选池 ∪ alert_enabled 策略的 universe 成员——自选股不涨停也可能触发策略预警（90s 快照全市场覆盖，无额外采集）
+- **控制台加 tab ④ 自选股**：分组管理（建组/改名/备注）+ 组内成员增删 + 批量导入（粘贴代码列表，校验存在性、ST 天然拒绝）；样稿同步
 
 - 回测时从 DB 取 yaml 快照整份序列化进 `backtest_result.params`——三件套复现机制不变；提供「导出 YAML」按钮，想进 git 的人工放置。
 
@@ -1848,3 +1858,27 @@ spot 的 total=59271 混入板块行疑点 / 盘中 bid_ask 五档有值性 / 5 
 - **非自动交易**：V2 不对接券商（§12.8 纪律不变），预警=建议+人工执行。
 - **性能**：策略个位数~几十 × 候选 ~250 只 × 已编译条件树，每轮毫秒级；挂在 IntradayCollectJob 轮询后，独立故障域（不进 §13.4 握手链），Evaluator 挂掉只影响预警不影响采集。
 - **新增排期 Step 8（1-1.5 天）**：Evaluator+条件映射（0.5 天）→ 钉钉+面板+replay.alerts（0.5 天）→ 伪信号实测调参（14:45 求值开关，0.5 天）。
+
+## 十五、笔记系统（2026-10-03，用户需求：按天记录、跨页汇总）
+
+**定位**：人工复盘日志——盘中随手记想法/盘面感受/个股观察，按**天**组织，跨页面记录、单页汇总。纯人工内容，不进策略条件词表（后续可选 LLM 日总结，与归因同款手法，二期再议）。
+
+```sql
+daily_note(
+  id        BIGSERIAL PRIMARY KEY,
+  st_date   DATE NOT NULL,              -- 笔记归属交易日（按天维度组织的唯一键）
+  page      VARCHAR(20) NOT NULL CHECK (page IN ('SENTIMENT','STRATEGY','INTRADAY','KLINE','GENERAL')),
+                                        -- 来源页：情绪周期表/策略控制台/盘中监控/K线复盘/笔记本直接记
+  st_code   VARCHAR(20),                -- 个股笔记挂靠（K线页记某票，NULL=市场级笔记）
+  content   TEXT NOT NULL,
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP,
+  UNIQUE (st_date, page, st_code)       -- 同日同页同股一条，编辑覆盖（updated_at 留痕）
+)
+```
+
+- **各页入口**：四个页面右下角悬浮「笔记」按钮 → 侧滑面板：上方列出当天该页已有笔记（可编辑），下方输入框新增；K线页新增时自动带上当前查看的个股（st_code 挂靠），面板内可切换"仅本股/全市场"
+- **笔记本页**（notes 样稿 docs/design/notes-mock.html，侧边栏第 5 项）：按天倒序一节一天，节内按来源页分组展示（页签徽标），当天可跨页补记（page=GENERAL）；支持按来源页/个股过滤
+- **联动（轻量）**：盘中监控的实时事件流、大面预警提供「引用到笔记」（预填事件摘要，人工补充判断）；情绪周期表的当日评级/周期阶段可在笔记本节头自动带出（只读上下文，不代写）
+- **API**：`GET /api/v1/notes?date=&page=&code=`、`POST /api/v1/notes`（upsert by UNIQUE 键）、`DELETE /api/v1/notes/{id}`
+- **排期**：Step 9（0.5-1 天，可与 Step 8 并行）：表+API（0.5 天）→ 四页悬浮面板+笔记本页（0.5 天）
