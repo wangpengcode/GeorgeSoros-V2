@@ -23,3 +23,9 @@ application-local.yml
 
 # 防御：环境变量文件（当前密钥只走环境变量，不用 .env）
 .env*
+
+# Python 微服务（soros-data-service）
+soros-data-service/.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
