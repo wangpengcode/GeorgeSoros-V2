@@ -39,6 +39,16 @@ AKSHARE_AMOUNT_MULTIPLIER = 1       # 元
 MOOTDX_AMOUNT_MULTIPLIER = 1        # 元
 
 # ──────────────────────────────────────────────────────────────────────────────
+# 指数日K单位换算（探针 2026-10-03，见 docs/research 无专门文档，实测数据源结构）
+#   - sina stock_zh_index_daily：全历史，列 date/open/high/low/close/volume，volume 视为股（1）
+#   - tencent ifzq.gtimg.cn fqkline：range 可控，day 数组 [date,open,close,high,low,volume]，
+#     volume = sina/100（探针 2026-09-30 sina=41456024700 / tencent=414560247）→ 手 ×100 对齐股
+#   - 指数无"成交额"单值 → amount=0；无换手率 → turnover=0（PLAN §5.6 契约键仍 11 个）
+# ──────────────────────────────────────────────────────────────────────────────
+SINA_INDEX_VOLUME_MULTIPLIER = 1
+TENCENT_INDEX_VOLUME_MULTIPLIER = 100
+
+# ──────────────────────────────────────────────────────────────────────────────
 # 代码格式转换（PLAN §5.2）：对外统一裸数字，内部适配各数据源格式
 # ──────────────────────────────────────────────────────────────────────────────
 SH_PREFIXES = ("6", "9")  # 沪市：6xx 主板/科创板、9xx B股（B 股不采集，但前缀判断沿用）
@@ -62,6 +72,38 @@ def to_mootdx_market(code: str) -> int:
 
 
 # AKShare / mootdx 输入直接用裸数字（恒等转换），无需额外函数。
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 证券代码值口径判定（PLAN §2.4 显式特例）
+# 股票 = 裸数字 600000；指数 = 带前缀 sh000001（仅 stock_index/index_history 两表）
+# 对外 API（daily-bars/batch codes）两种形态混收，见 models.py 校验器。
+# ──────────────────────────────────────────────────────────────────────────────
+INDEX_PREFIXES = ("sh", "sz")
+
+
+def is_stock_code(code: str) -> bool:
+    """裸数字 6 位股票代码（600000）。"""
+    return len(code) == 6 and code.isdigit()
+
+
+def is_index_code(code: str) -> bool:
+    """带前缀指数代码（sh000001 / sz399001），显式特例。"""
+    return (
+        len(code) == 8
+        and code.startswith(INDEX_PREFIXES)
+        and code[2:].isdigit()
+        and len(code[2:]) == 6
+    )
+
+
+def is_valid_tradeable_code(code: str) -> bool:
+    """daily-bars/batch 可采代码：股票裸数字 或 指数带前缀。"""
+    return is_stock_code(code) or is_index_code(code)
+
+
+def to_index_em_symbol(code: str) -> str:
+    """带前缀指数 sh000001 → 东财 index_zh_a_hist 符号（去前缀 000001）。"""
+    return code[2:]
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 北交所过滤（PLAN §11.1 接口源探查结论）

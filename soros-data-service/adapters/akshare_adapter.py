@@ -1,4 +1,4 @@
-"""AKShare Adapter（PLAN §5.4 V2 版 + §11.1 接口源探查结论 + 探针实测）。
+"""AKShare Adapter（PLAN §5.4 V2 版 + §11.1 接口源探查结论 + 探针实测 + Step 4 指数日K）。
 
 实现要点：
 - 输入/输出裸数字，直接用（PLAN §5.2）
@@ -10,19 +10,35 @@
 - is_st = st_em ∪ stop_em 合并（任务指令；命名字典 is_st 语义"仅用于识别并排除"）
 - 北交所过滤：83/87/43/920（§11.1）
 - 交易日历 tool_trade_date_hist_sina（探针实测 PASS，一次全量）
+
+指数日K（PLAN Step 4，探针 2026-10-03 选源结论，≤5 次请求实测）：
+- **候选一（主源）：sina stock_zh_index_daily(symbol=sh000001)** —— 实测 PASS，
+  返回全历史（8736 行至 2026-09-30），列 date/open/high/low/close/volume；无 amount → 填 0，
+  无 change_percent/prev_close → 用 prev_close 现算（上一交易日 close）
+- **兜底：腾讯 ifzq.gtimg.cn fqkline/get** —— 实测 PASS，day 数组 [date,open,close,high,low,volume]，
+  范围可控（需前置窗口算 prev_close），volume=sina/100（手）→ ×100 对齐股口径
+- **最后：东财 index_zh_a_hist** —— 本机实测 FAILED（push2 主域 ConnectionError，与协调者预警一致），
+  保留为可移植性最后手段（其他网络可达 push2 时可用）
+- 指数无"成交额"单值 → amount=0；无换手率 → turnover=0（PLAN §5.6 契约键仍 11 个）
+- adjust 参数对指数不适用（指数点位已含成分调整），一律返回原始指数K，忽略 adjust
 """
 
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta
 from typing import List
 
 import akshare as ak
+import requests
 
 from adapters.base import BaseAdapter, SourceError
 from constants import (
     AKSHARE_VOLUME_MULTIPLIER,
     AKSHARE_AMOUNT_MULTIPLIER,
+    SINA_INDEX_VOLUME_MULTIPLIER,
+    TENCENT_INDEX_VOLUME_MULTIPLIER,
+    to_index_em_symbol,
     is_north_exchange,
     derive_market,
     derive_board,
@@ -52,6 +68,7 @@ class AkshareAdapter(BaseAdapter):
         self._supports_stock_list = True
         self._supports_is_st = True          # st_em / stop_em
         self._supports_delisted = False      # 退市状态由 baostock 提供
+        self._supports_index = True          # 指数日K（sina→腾讯→东财 链）
 
     # ---- 日 K 线（PLAN §5.4）----
     def _sync_fetch_daily_bars(self, code: str, start: str, end: str, adjust: str) -> List[dict]:
@@ -150,3 +167,150 @@ class AkshareAdapter(BaseAdapter):
         if df is None or df.empty or "trade_date" not in df.columns:
             raise SourceError("akshare 交易日历为空或列名未知")
         return [str(d)[:10] for d in df["trade_date"].tolist()]
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # 指数日K（PLAN Step 4，探针选源结论见类 KDoc）
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def _sync_fetch_index_daily(self, code: str, start: str, end: str, adjust: str) -> List[dict]:
+        """指数日K：候选一 新浪 → 兜底 腾讯 fqkline → 最后 东财（本机不可达，保留可移植性）。
+
+        任一子源成功即返回；全部失败抛 SourceError（计入 akshare 熔断，防恒 "ok" 假象）。
+        """
+        errors = []
+
+        # 候选一：新浪 stock_zh_index_daily（探针实测 PASS，全历史，含 2026-09）
+        try:
+            df = ak.stock_zh_index_daily(symbol=code)
+            if df is not None and not df.empty:
+                bars = self._sina_index_to_bars(df, code, start, end)
+                if bars:
+                    return bars
+                errors.append("新浪: 区间内无数据")
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"新浪: {exc}")
+            logger.warning("指数源[新浪]失败: %s", exc)
+
+        # 兜底：腾讯 ifzq.gtimg.cn fqkline（探针实测 PASS，范围可控，前置窗口算 prev_close）
+        try:
+            bars = self._tencent_index_to_bars(code, start, end)
+            if bars:
+                return bars
+            errors.append("腾讯: 区间内无数据")
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"腾讯: {exc}")
+            logger.warning("指数源[腾讯]失败: %s", exc)
+
+        # 最后：东财 index_zh_a_hist（本机 push2 主域断连 ConnectionError，探针确认不可达；
+        # 保留为可移植性最后手段——其他网络可达 push2 时可用）
+        try:
+            df = ak.index_zh_a_hist(
+                symbol=to_index_em_symbol(code),
+                period="daily",
+                start_date=start.replace("-", ""),
+                end_date=end.replace("-", ""),
+            )
+            if df is not None and not df.empty:
+                bars = self._em_index_to_bars(df, code, start, end)
+                if bars:
+                    return bars
+                errors.append("东财: 区间内无数据")
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"东财: {exc}")
+            logger.warning("指数源[东财]失败: %s", exc)
+
+        raise SourceError(
+            "指数日K所有子源失败: " + "; ".join(errors) if errors else "指数日K无数据"
+        )
+
+    def _build_index_bars(self, code, dates, opens, highs, lows, closes, volumes, start, end):
+        """统一构建指数 bar（11 字段契约）：change_percent 用 prev_close 现算，amount=0、turnover=0。
+
+        prev_close = 上一交易日 close（含区间前一行，用于首 bar 涨跌幅）；输出按日期升序。
+        """
+        rows = sorted(zip(dates, opens, highs, lows, closes, volumes), key=lambda r: r[0])
+        bars = []
+        prev_close = None
+        for d, o, h, l, c, v in rows:
+            if not (start <= d <= end):
+                prev_close = c
+                continue
+            change_pct = round(((c - prev_close) / prev_close * 100), 4) if prev_close else 0.0
+            bars.append({
+                "date": d,
+                "code": code,                                   # 指数 code 带前缀（sh000001 特例）
+                "open": o,
+                "high": h,
+                "low": l,
+                "close": c,
+                "volume": v,                                    # 股（sina 原生；tencent ×100 对齐）
+                "amount": 0.0,                                  # 指数无成交额单值
+                "change_percent": change_pct,                   # prev_close 现算（不复权）
+                "turnover": 0.0,                                # 指数无换手率
+                "prev_close": prev_close,                       # 传输字段，不落库
+            })
+            prev_close = c
+        return bars
+
+    def _sina_index_to_bars(self, df, code, start, end):
+        """新浪 stock_zh_index_daily → 11 字段 bars（列 date/open/high/low/close/volume）。"""
+        prev_window = (datetime.strptime(start, "%Y-%m-%d") - timedelta(days=30)).strftime("%Y-%m-%d")
+        dates = [str(d)[:10] for d in df["date"]]
+        mask = [prev_window <= d <= end for d in dates]
+        return self._build_index_bars(
+            code,
+            [d for d, m in zip(dates, mask) if m],
+            [float(v) for v, m in zip(df["open"], mask) if m],
+            [float(v) for v, m in zip(df["high"], mask) if m],
+            [float(v) for v, m in zip(df["low"], mask) if m],
+            [float(v) for v, m in zip(df["close"], mask) if m],
+            [float(v) * SINA_INDEX_VOLUME_MULTIPLIER for v, m in zip(df["volume"], mask) if m],
+            start, end,
+        )
+
+    def _tencent_index_to_bars(self, code, start, end):
+        """腾讯 ifzq.gtimg.cn fqkline/get → 11 字段 bars。
+
+        day 数组元素序 [date, open, close, high, low, volume]（探针实测）。
+        请求前置 90 天窗口以提供区间首 bar 的 prev_close；volume 手×100 对齐新浪股口径。
+        """
+        start_dt = datetime.strptime(start, "%Y-%m-%d") - timedelta(days=90)
+        start_param = start_dt.strftime("%Y-%m-%d")
+        url = (
+            "https://ifzq.gtimg.cn/appstock/app/fqkline/get"
+            f"?param={code},day,{start_param},{end},640,qfq"
+        )
+        resp = requests.get(
+            url,
+            headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"},
+            timeout=8,
+        )
+        resp.raise_for_status()
+        j = resp.json()
+        idx = (j.get("data") or {}).get(code) or {}
+        day = idx.get("day") or idx.get("qfqday") or idx.get("hfqday") or []
+        dates, opens, closes, highs, lows, vols = [], [], [], [], [], []
+        for row in day:
+            if not row or len(row) < 6:
+                continue
+            dates.append(str(row[0])[:10])
+            opens.append(float(row[1]))
+            closes.append(float(row[2]))
+            highs.append(float(row[3]))
+            lows.append(float(row[4]))
+            vols.append(float(row[5]) * TENCENT_INDEX_VOLUME_MULTIPLIER)
+        return self._build_index_bars(code, dates, opens, highs, lows, closes, vols, start, end)
+
+    def _em_index_to_bars(self, df, code, start, end):
+        """东财 index_zh_a_hist → 11 字段 bars（列 日期/开盘/收盘/最高/最低/成交量/成交额...）。"""
+        dates = [str(d)[:10] for d in df["日期"]]
+        return self._build_index_bars(
+            code,
+            dates,
+            [float(v) for v in df["开盘"]],
+            [float(v) for v in df["最高"]],
+            [float(v) for v in df["最低"]],
+            [float(v) for v in df["收盘"]],
+            [float(v) for v in df["成交量"]],   # 东财指数成交量单位未探针校准，M3 一并校准
+            start, end,
+        )

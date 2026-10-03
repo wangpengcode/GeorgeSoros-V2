@@ -34,24 +34,26 @@ class FakeRateLimiter:
 
 
 class StubAdapter(BaseAdapter):
-    """可控桩适配器：三源行为一致（bars/stock_list/delisted/calendar/health 注入式覆盖）。"""
+    """可控桩适配器：三源行为一致（bars/stock_list/delisted/calendar/index_bars/health 注入式覆盖）。"""
 
     def __init__(self, source_name, bars=None, stock_list=None, delisted=None,
-                 calendar=None, stock_basic_rows=None, health="ok"):
+                 calendar=None, stock_basic_rows=None, index_bars=None, health="ok"):
         super().__init__(FakeCircuitBreaker(health), FakeRateLimiter())
         self.source_name = source_name
-        # 能力标记与真实 adapter 对齐：stock-list/is_st/退市永不走 mootdx
+        # 能力标记与真实 adapter 对齐：stock-list/is_st/退市永不走 mootdx；指数仅 akshare
         self._supports_stock_list = source_name in (SOURCE_BAOSTOCK, SOURCE_AKSHARE)
         self._supports_delisted = source_name == SOURCE_BAOSTOCK
         self._supports_is_st = source_name == SOURCE_AKSHARE
+        self._supports_index = source_name == SOURCE_AKSHARE
         self._bars = bars
         self._stock_list = stock_list
         self._delisted = delisted
         self._calendar = calendar
         self._stock_basic_rows = stock_basic_rows
+        self._index_bars = index_bars
         self.call_counts = {
             "daily_bars": 0, "stock_list": 0, "delisted": 0,
-            "calendar": 0, "stock_basic": 0,
+            "calendar": 0, "stock_basic": 0, "index_daily": 0,
         }
 
     def _resolve(self, value, *args):
@@ -65,6 +67,11 @@ class StubAdapter(BaseAdapter):
     def _sync_fetch_daily_bars(self, code, start, end, adjust):
         self.call_counts["daily_bars"] += 1
         return self._resolve(self._bars, code, start, end, adjust)
+
+    # ---- 指数日 K（仅 akshare；mootdx 永不走）----
+    def _sync_fetch_index_daily(self, code, start, end, adjust):
+        self.call_counts["index_daily"] += 1
+        return self._resolve(self._index_bars, code, start, end, adjust)
 
     # ---- 股票列表 ----
     def _sync_fetch_stock_list(self):

@@ -13,6 +13,8 @@ from typing import Optional
 
 from pydantic import BaseModel, Field, field_validator
 
+from constants import is_valid_tradeable_code
+
 # ──────────────────────────────────────────────────────────────────────────────
 # /daily-bars/batch
 # ──────────────────────────────────────────────────────────────────────────────
@@ -28,7 +30,10 @@ def _validate_date(value: str) -> str:
 
 
 class DailyBarsBatchRequest(BaseModel):
-    codes: list[str] = Field(..., description="股票代码列表，裸数字 6 位")
+    codes: list[str] = Field(
+        ...,
+        description="证券代码列表：裸数字 6 位股票（600000）或带前缀指数（sh000001），可混收",
+    )
     start_date: str = Field(..., description="起始日期 YYYY-MM-DD")
     end_date: str = Field(..., description="结束日期 YYYY-MM-DD（含）")
     adjust: str = Field("qfq", description="复权方式：qfq / hfq / none")
@@ -41,8 +46,10 @@ class DailyBarsBatchRequest(BaseModel):
         cleaned = []
         for raw in v:
             code = str(raw).strip()
-            if len(code) != 6 or not code.isdigit():
-                raise ValueError(f"code 必须为裸数字 6 位，收到: {code!r}")
+            if not is_valid_tradeable_code(code):
+                raise ValueError(
+                    f"code 必须为裸数字 6 位股票（600000）或带前缀指数（sh000001），收到: {code!r}"
+                )
             cleaned.append(code)
         return cleaned
 
