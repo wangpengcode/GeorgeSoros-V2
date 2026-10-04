@@ -9,6 +9,7 @@ import jakarta.persistence.Table
 import jakarta.persistence.UniqueConstraint
 import org.hibernate.annotations.CreationTimestamp
 import java.math.BigDecimal
+import java.time.Instant
 import java.time.LocalDate
 import java.time.LocalDateTime
 
@@ -86,6 +87,18 @@ class StockHistory(
     /** 数据来源（failover 可见性） */
     @Column(name = "data_source")
     var dataSource: String = "UNKNOWN",
+
+    /** 是否已校准（CalibrationJob 低频对拍通过后置位；upsert read-modify-write 天然保留） */
+    @Column(name = "calibrated", nullable = false)
+    var calibrated: Boolean = false,
+
+    /** 校准使用的对照源（DataSourceType 枚举名，如 BAOSTOCK/AKSHARE_SINA/YAHOO） */
+    @Column(name = "calibrated_source")
+    var calibratedSource: String? = null,
+
+    /** 校准时间 */
+    @Column(name = "calibrated_at")
+    var calibratedAt: Instant? = null,
 
     /** 行创建时间 */
     @CreationTimestamp

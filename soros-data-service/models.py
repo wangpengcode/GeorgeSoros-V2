@@ -122,6 +122,7 @@ class HealthSources(BaseModel):
     baostock: str   # ok | degraded | down
     akshare: str
     mootdx: str
+    yahoo: Optional[str] = None  # 可选源：未注册为 None（整体状态聚合忽略 None）
 
 
 class HealthResponse(BaseModel):

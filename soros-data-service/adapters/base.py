@@ -19,6 +19,7 @@ from constants import (
     SOURCE_AKSHARE,
     SOURCE_BAOSTOCK,
     SOURCE_MOOTDX,
+    SOURCE_YAHOO,
     DATA_SOURCES,
     BOARD_ALL,
     MARKET_ALL,
@@ -182,6 +183,7 @@ class DataRouter:
 
     def __init__(self, adapters: Sequence[BaseAdapter]):
         self.adapters: Dict[str, BaseAdapter] = {a.source_name: a for a in adapters}
+        # 核心三源硬依赖；yahoo 可选源（缺席不报错——分压/校准增强，非正确性依赖）
         missing = [s for s in DATA_SOURCES if s not in self.adapters]
         if missing:
             raise ValueError(f"缺少数据源 adapter: {missing}")
@@ -196,11 +198,11 @@ class DataRouter:
         from config import settings
 
         order = list(settings.router_order)
-        valid = {SOURCE_BAOSTOCK, SOURCE_AKSHARE, SOURCE_MOOTDX}
-        order = [n for n in order if n in valid]
-        # 兜底：确保三源都在（防止配置缺漏）
-        for n in (SOURCE_BAOSTOCK, SOURCE_AKSHARE, SOURCE_MOOTDX):
-            if n not in order:
+        valid = {SOURCE_BAOSTOCK, SOURCE_AKSHARE, SOURCE_MOOTDX, SOURCE_YAHOO}
+        order = [n for n in order if n in valid and n in self.adapters]
+        # 兜底：确保核心三源都在（防止配置缺漏）；yahoo 仅在已注册时追加到序尾
+        for n in (SOURCE_BAOSTOCK, SOURCE_AKSHARE, SOURCE_MOOTDX, SOURCE_YAHOO):
+            if n not in order and n in self.adapters:
                 order.append(n)
         return order
 

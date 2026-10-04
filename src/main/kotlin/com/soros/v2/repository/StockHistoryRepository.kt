@@ -36,4 +36,22 @@ interface StockHistoryRepository : JpaRepository<StockHistory, Long> {
 
     /** 指定交易日全部涨停行（§4.8 涨停梯队 / 最高板：is_limit_up 前置判定列） */
     fun findByTradeDateAndIsLimitUpTrue(tradeDate: LocalDate): List<StockHistory>
+
+    /** 随机抽 N 只含未校准行的代码（CalibrationJob 低频分批候选池；calibrated=false 常驻） */
+    @Query(
+        value = """
+            SELECT DISTINCT code FROM stock_history
+            WHERE calibrated = false
+            ORDER BY random()
+            LIMIT :limit
+        """,
+        nativeQuery = true,
+    )
+    fun findRandomUncalibratedCodes(@Param("limit") limit: Int): List<String>
+
+    /** 该股最早未校准行（CalibrationJob 校准窗起点） */
+    fun findTopByCodeAndCalibratedFalseOrderByTradeDateAsc(code: String): StockHistory?
+
+    /** 该股最新未校准行（CalibrationJob 校准窗终点；null=全部已校准） */
+    fun findTopByCodeAndCalibratedFalseOrderByTradeDateDesc(code: String): StockHistory?
 }

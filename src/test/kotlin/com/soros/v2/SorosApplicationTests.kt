@@ -50,7 +50,7 @@ class SorosApplicationTests(
                 "AND tablename <> 'flyway_schema_history'",
             Int::class.java,
         ) ?: fail("queryForObject 返回 null，异常状态")
-        assertEquals(44, indexes, "索引总数 44（含主键/UNIQUE 自动索引；新增索引必须同步命名字典与 schema.sql）")
+        assertEquals(45, indexes, "索引总数 45（V5 校准局部索引 idx_stock_history_uncalibrated +1；含主键/UNIQUE 自动索引；新增索引必须同步命名字典与 schema.sql）")
 
         val trgm = jdbc.queryForObject(
             "SELECT count(*) FROM pg_extension WHERE extname='pg_trgm'",

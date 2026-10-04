@@ -18,8 +18,12 @@ from __future__ import annotations
 SOURCE_BAOSTOCK = "baostock"
 SOURCE_AKSHARE = "akshare"
 SOURCE_MOOTDX = "mootdx"
+SOURCE_YAHOO = "yahoo"
 SOURCE_UNKNOWN = "unknown"
+# 核心三源（Router/health 硬依赖）；yahoo 为可选源（缺席不报错，注册后进 failover 序尾）
 DATA_SOURCES = (SOURCE_BAOSTOCK, SOURCE_AKSHARE, SOURCE_MOOTDX)
+# 股票日K全量源域（含可选源；分片池/合法名校验用）
+BAR_SOURCES = (SOURCE_BAOSTOCK, SOURCE_AKSHARE, SOURCE_MOOTDX, SOURCE_YAHOO)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 单位换算系数（PLAN §2.4：volume 统一单位=股、amount=元）

@@ -22,15 +22,16 @@ BAR_CONTRACT_KEYS = {
 }
 # PLAN §11.1 stock-list 元素契约键集合（Step 5a 增补 ipo_date：BaoStock query_stock_basic 回填）
 STOCK_ITEM_KEYS = {"code", "name", "market", "board", "is_st", "delisted", "ipo_date"}
-HEALTH_SOURCES = ("baostock", "akshare", "mootdx")
+HEALTH_SOURCES = ("baostock", "akshare", "mootdx", "yahoo")
 
 
 def _default_router():
-    """三源均正常的 router：baostock 主源返回含 prev_close 的 bar。"""
+    """四源均正常的 router（与现网 main.build_router 同构）：baostock 主源返回含 prev_close 的 bar。"""
     baostock = StubAdapter("baostock", bars=lambda *a: [make_bar("600000")], delisted=set())
     akshare = StubAdapter("akshare", bars=lambda *a: [make_bar("600000")])
     mootdx = StubAdapter("mootdx", bars=lambda *a: [make_bar("600000", include_prev_close=False)])
-    return DataRouter([baostock, akshare, mootdx])
+    yahoo = StubAdapter("yahoo", bars=lambda *a: [make_bar("600000")])
+    return DataRouter([baostock, akshare, mootdx, yahoo])
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -43,6 +44,7 @@ def test_health_double_mount_same_shape(make_client):
         StubAdapter("baostock", health="ok"),
         StubAdapter("akshare", health="ok"),
         StubAdapter("mootdx", health="ok"),
+        StubAdapter("yahoo", health="ok"),
     ])
     client = make_client(router)
     r1 = client.get("/api/v1/health")

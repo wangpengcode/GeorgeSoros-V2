@@ -23,6 +23,10 @@ def get_health(data_router: DataRouter) -> Dict:
     for name in DATA_SOURCES:
         adapter = data_router.adapters[name]
         sources[name] = adapter.health_state
+    # 可选源（yahoo 等）：仅已注册时透出（未注册不进入聚合与响应）
+    for name in data_router.adapters:
+        if name not in sources:
+            sources[name] = data_router.adapters[name].health_state
 
     states = set(sources.values())
     if HEALTH_DOWN in states:

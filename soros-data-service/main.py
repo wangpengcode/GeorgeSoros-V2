@@ -17,6 +17,7 @@ from adapters.akshare_adapter import AkshareAdapter
 from adapters.base import DataRouter
 from adapters.baostock_adapter import BaostockAdapter
 from adapters.mootdx_adapter import MootdxAdapter
+from adapters.yahoo_adapter import YahooAdapter
 from circuit_breaker import CircuitBreaker
 from config import settings
 from handlers import register_exception_handlers
@@ -51,6 +52,11 @@ def build_router() -> DataRouter:
         MootdxAdapter(
             CircuitBreaker("mootdx", **cb_kwargs),
             TokenBucket(settings.rate_mootdx, jitter=0.0, name="mootdx"),
+        ),
+        # 第四源（可选）：分片默认池成员 + failover 序尾；0.5 rps + 抖动（海外源，间歇性获取）
+        YahooAdapter(
+            CircuitBreaker("yahoo", **cb_kwargs),
+            TokenBucket(settings.rate_yahoo, jitter=settings.yahoo_jitter_seconds, name="yahoo"),
         ),
     ]
     return DataRouter(adapters)

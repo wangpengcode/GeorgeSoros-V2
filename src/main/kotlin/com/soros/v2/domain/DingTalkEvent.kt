@@ -23,6 +23,7 @@ enum class DingTalkEvent(val level: DingTalkEventLevel) {
     DELIST_SUSPECT(DingTalkEventLevel.WARN),
     SOURCE_DEGRADED(DingTalkEventLevel.WARN),
     CROSS_VALIDATE_MISMATCH(DingTalkEventLevel.ERROR),
+    CALIBRATION_MISMATCH(DingTalkEventLevel.WARN),
     SENTIMENT_DERIVE_FAILED(DingTalkEventLevel.ERROR),
     DAILY_COLLECT_SUMMARY(DingTalkEventLevel.INFO),
     ;

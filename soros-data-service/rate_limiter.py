@@ -16,7 +16,8 @@ import time
 class TokenBucket:
     def __init__(self, rate: float, capacity: float | None = None, jitter: float = 0.0, name: str = ""):
         self.rate = float(rate)
-        self.capacity = float(capacity if capacity is not None else rate)
+        # 容量下限 1.0：容量 < 1（如 rate=0.5）时令牌永远攒不到扣减阈值，acquire 必超时
+        self.capacity = float(capacity if capacity is not None else max(self.rate, 1.0))
         self.jitter = float(jitter)
         self.name = name
         self._tokens = self.capacity
