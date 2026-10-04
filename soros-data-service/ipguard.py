@@ -95,6 +95,10 @@ class IPGuard:
         self._failures: Dict[str, deque] = {}  # source -> deque[失败时间戳]
         self._next_probe_at: float = 0.0
         self._probe_backoff: float = 1.0
+        # 事件环形缓冲（最近 100 条）：ban/unban 历史，观测用（/ipguard events 透出）。
+        # 线程安全：deque.append 在 GIL 下原子（daemon 后台线程 + FastAPI 线程池并发写）；
+        # 读侧在 snapshot 内持锁 list() 拷贝，见 snapshot() docstring。
+        self._events: deque = deque(maxlen=100)
 
         # 观测状态（后台线程维护）
         self.egress_ip: Optional[str] = None
@@ -117,8 +121,15 @@ class IPGuard:
             while bucket and now - bucket[0] > self._window_seconds:
                 bucket.popleft()
             if len(bucket) >= self._threshold and source not in self._banned:
-                self._banned[source] = {"at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                                        "egress_ip": self.egress_ip}
+                # at 单一时间点：封禁快照与事件记录同一时刻（观测对拍不漂移）
+                at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                self._banned[source] = {"at": at, "egress_ip": self.egress_ip}
+                self._events.append({
+                    "type": "ban",
+                    "source": source,
+                    "at": at,
+                    "egress_ip": self.egress_ip,
+                })
                 bucket.clear()
                 logger.warning("IPGuard: %s 判定 IP 封禁（%ds 内 %d 次连接层异常），"
                                "该源暂停出请求，等待换IP/探针恢复", source,
@@ -129,6 +140,13 @@ class IPGuard:
         with self._lock:
             self._failures.pop(source, None)
             if source in self._banned:
+                self._events.append({
+                    "type": "unban",
+                    "source": source,
+                    "at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "egress_ip": self.egress_ip,
+                    "reason": "real_success",  # 与探针恢复（probe_recovered）区分解封路径
+                })
                 del self._banned[source]
                 logger.info("IPGuard: %s 真实请求成功，解除封禁标记", source)
 
@@ -147,6 +165,16 @@ class IPGuard:
         with self._lock:
             if ok:
                 sources = list(self._banned)
+                # 探针是全局连通性判定，同刻解除全部封禁 → 逐源记 unban（与 per-source ban 对齐）
+                at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                for s in sources:
+                    self._events.append({
+                        "type": "unban",
+                        "source": s,
+                        "at": at,
+                        "egress_ip": self.egress_ip,
+                        "reason": "probe_recovered",
+                    })
                 self._banned.clear()
                 self._failures.clear()
                 self._probe_backoff = 1.0
@@ -177,11 +205,17 @@ class IPGuard:
                 self.egress_ip = ip
 
     def snapshot(self) -> dict:
+        """观测快照：egress_ip / egress_ip_changed_at / banned / events（渠道台账与封禁历史）。
+
+        线程安全：全量在 _lock 内读取；events 由旧到新排列（deque 追加尾，list() 拷贝保序），
+        最近 100 条环形缓冲——daemon 后台线程（poll/maybe_recover）与 FastAPI 线程池并发安全。
+        """
         with self._lock:
             return {
                 "egress_ip": self.egress_ip,
                 "egress_ip_changed_at": self.egress_ip_changed_at,
                 "banned": dict(self._banned),
+                "events": list(self._events),
             }
 
     # ---- 后台线程 ----

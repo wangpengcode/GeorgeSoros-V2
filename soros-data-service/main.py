@@ -12,6 +12,7 @@ from contextlib import asynccontextmanager
 
 import uvicorn
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from adapters.akshare_adapter import AkshareAdapter
 from adapters.base import DataRouter
@@ -20,10 +21,12 @@ from adapters.mootdx_adapter import MootdxAdapter
 from adapters.yahoo_adapter import YahooAdapter
 from adapters.tencent_adapter import TencentAdapter
 from adapters.sse_adapter import SseAdapter
+from channels import get_channels
 from circuit_breaker import CircuitBreaker
 from config import settings
 from handlers import register_exception_handlers
 from ipguard import guard as ipguard, start_guard_thread
+from models import ChannelsResponse
 from netfix import disable_ipv4_stack_forcer
 from rate_limiter import TokenBucket
 from router import create_router
@@ -78,6 +81,23 @@ def build_router() -> DataRouter:
 data_router = build_router()
 
 
+def apply_cors(app: FastAPI) -> None:
+    """CORS 中间件（file:// 页面 Origin=null 场景，Payment-X 渠道管理台类比）。
+
+    设计依据：本地 HTML（file:// 协议）跨域请求 Origin=null——allow_origins=["*"] 且
+    allow_credentials=False 时 Starlette 返回 Access-Control-Allow-Origin:*，对任何 Origin
+    （含 null）放行；台账观测无 cookie，Credentials 无需放行（且 * 与 credentials 同开
+    浏览器会拒绝）。放行方法/头全开，预检 OPTIONS 由中间件自动应答。
+    """
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=False,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # 进程内 IPv4 强制（根因修复：家宽原生 v6 出口被东财拒，requests v6 优先必踩）
@@ -101,6 +121,8 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="soros-data-service", version="0.1.0", lifespan=lifespan)
 # PLAN §11.1 错误信封：422/404 全局 handler（覆盖下方根路径与 /api/v1 双挂）
 register_exception_handlers(app)
+# 本地 HTML 页面跨域（file:// Origin=null）：allow_origins=* + credentials=False，见 apply_cors
+apply_cors(app)
 
 # PLAN §11.1 统一前缀 /api/v1（Kotlin 侧 PythonDataServiceClient 调用入口）
 app.include_router(create_router(data_router), prefix="/api/v1")
@@ -117,6 +139,12 @@ async def ipguard_status():
     body = {"status": "ok", "ipguard": ipguard.snapshot()}
     body.update(netfix_snapshot())
     return body
+
+
+# 渠道运营台账（CORS 页面展示：每源 最近成功/失败时间 + 封禁 + 熔断）
+@app.get("/api/v1/channels", response_model=ChannelsResponse)
+async def channels_status():
+    return get_channels(data_router, ipguard)
 
 
 if __name__ == "__main__":

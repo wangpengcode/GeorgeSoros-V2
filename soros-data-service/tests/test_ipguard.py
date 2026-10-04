@@ -217,5 +217,69 @@ def test_snapshot_shape():
     """snapshot() 结构稳定（/ipguard 观测端点契约）。"""
     g = _new_guard()
     snap = g.snapshot()
-    assert set(snap.keys()) == {"egress_ip", "egress_ip_changed_at", "banned"}
+    assert set(snap.keys()) == {"egress_ip", "egress_ip_changed_at", "banned", "events"}
     assert snap["banned"] == {}
+    assert snap["events"] == []
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 事件环形缓冲（/ipguard events 观测：ban/unban 历史，最近 100 条，旧→新）
+# ──────────────────────────────────────────────────────────────────────────────
+
+def test_ban_event_recorded_in_snapshot():
+    """5× 连接层异常封禁 → events[0] == ban 事件，且 banned.at 与事件 at 同刻（观测对拍不漂移）。"""
+    g = _new_guard()
+    g.poll_egress()  # 先采 egress 基线 → "1.2.3.4"
+    for _ in range(5):
+        g.report_failure("akshare", ConnectionError("RemoteDisconnected"))
+    snap = g.snapshot()
+    assert len(snap["events"]) == 1
+    ev = snap["events"][0]
+    assert set(ev.keys()) == {"type", "source", "at", "egress_ip"}
+    assert ev["type"] == "ban"
+    assert ev["source"] == "akshare"
+    assert ev["egress_ip"] == "1.2.3.4"
+    assert snap["banned"]["akshare"]["at"] == ev["at"], "封禁快照与事件记录同一时刻"
+
+
+def test_success_unban_event_reason_real_success():
+    """banned 期间真实请求成功（最强未封禁证据）→ events 尾 {type:"unban", reason:"real_success"}，banned 清空。"""
+    g = _new_guard()
+    for _ in range(5):
+        g.report_failure("akshare", ConnectionError("RemoteDisconnected"))
+    assert g.is_banned("akshare"), "前置条件：已封禁"
+    g.report_success("akshare")
+    snap = g.snapshot()
+    assert snap["banned"] == {}
+    ev = snap["events"][-1]
+    assert ev["type"] == "unban"
+    assert ev["source"] == "akshare"
+    assert ev["reason"] == "real_success", "真实成功解封路径须区分解封来源"
+
+
+def test_probe_recover_unban_event_reason_probe_recovered():
+    """探针恢复路径（maybe_recover 探针通过）→ events 尾 {type:"unban", reason:"probe_recovered"}，banned 清空。"""
+    g = _new_guard()
+    for _ in range(5):
+        g.report_failure("akshare", ConnectionError("RemoteDisconnected"))
+    assert g.maybe_recover() is True, "前置条件：探针通过并解除封禁"
+    snap = g.snapshot()
+    assert snap["banned"] == {}
+    ev = snap["events"][-1]
+    assert ev["type"] == "unban"
+    assert ev["source"] == "akshare"
+    assert ev["reason"] == "probe_recovered", "探针恢复解封路径须区分解封来源"
+
+
+def test_events_ring_bounded_at_100():
+    """事件环形缓冲：超 100 条最旧被淘汰，len 恒 ≤ 100（/ipguard events 观测契约）。"""
+    g = _new_guard()
+    for i in range(101):
+        src = f"src-{i:03d}"
+        for _ in range(5):
+            g.report_failure(src, ConnectionError("RemoteDisconnected"))
+    snap = g.snapshot()
+    assert len(snap["events"]) == 100, "环形缓冲上限 100"
+    assert snap["events"][0]["source"] == "src-001", "最旧事件（src-000）应被淘汰"
+    assert snap["events"][-1]["source"] == "src-100", "最新事件（src-100）保留"
+    assert all(ev["type"] == "ban" for ev in snap["events"]), "全部为 ban 事件（无 unban 干扰）"

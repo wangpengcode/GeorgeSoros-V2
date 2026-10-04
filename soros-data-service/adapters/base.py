@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import abc
 import logging
+from datetime import datetime
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from constants import (
@@ -197,6 +198,9 @@ class DataRouter:
         self._index_order = [self.adapters[SOURCE_AKSHARE]]
         # stock-list 只走 baostock/akshare
         self._list_order = [self.adapters[n] for n in (SOURCE_BAOSTOCK, SOURCE_AKSHARE) if n in self.adapters]
+        # 渠道台账（/channels 观测）：{source: {last_success_at, last_failure_at}}，
+        # 进程态重启即清——与 IPGuard「banned 不持久化」同一设计哲学（docstring 见 _mark_*）
+        self._source_ledger: Dict[str, dict] = {}
 
     def _resolve_order(self) -> list:
         from config import settings
@@ -214,6 +218,38 @@ class DataRouter:
             if n not in order and n in self.adapters:
                 order.append(n)
         return order
+
+    # ---- 渠道台账（/channels 观测）----
+    # 语义（与 /channels 响应契约对齐）：
+    # - last_success_at：该源最近一次「成功取到数据」（日K/指数=非空结果；其余端点=调用无异常）
+    # - last_failure_at：该源最近一次「真实请求已发出但源故障」（SourceError）
+    # banned/open（SourceUnavailableError，未发请求）与 ParameterError（调用方参数错误）
+    #   不计入台账——前者归封禁/熔断状态展示（/channels banned/breaker 字段），后者非源故障。
+    # 进程态：重启即清（与 IPGuard「banned 不持久化」同一设计哲学），docstring 注明。
+    def _mark_success(self, source: str) -> None:
+        """记录源最近一次成功时间。线程安全：FastAPI 线程池并发写，
+        dict.setdefault + 赋值在 GIL 下原子；观测读数，允许 last-write-wins 良性竞态。"""
+        entry = self._source_ledger.setdefault(
+            source, {"last_success_at": None, "last_failure_at": None}
+        )
+        entry["last_success_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    def _mark_failure(self, source: str) -> None:
+        """记录源最近一次失败时间（SourceError=真实请求已发出且源故障）。"""
+        entry = self._source_ledger.setdefault(
+            source, {"last_success_at": None, "last_failure_at": None}
+        )
+        entry["last_failure_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    def channel_ledger(self) -> Dict[str, dict]:
+        """渠道台账只读副本（/channels 聚合读取）：{source: {last_success_at, last_failure_at}}。
+
+        返回浅拷贝，避免端点侧与写侧共享可变 dict。
+        先做 C 级原子快照（dict()）再拷贝内部 dict：避免端点并发 _mark_* 的
+        setdefault 在 Python 层迭代期间新增 key 触发 "dictionary changed size
+        during iteration"（verifier M1）。
+        """
+        return {k: dict(v) for k, v in dict(self._source_ledger).items()}
 
     # ---- daily-bars/batch 单股 ----
     def fetch_daily_bars(self, code: str, start: str, end: str, adjust: str) -> Tuple[Optional[dict], List[str]]:
@@ -249,11 +285,13 @@ class DataRouter:
             try:
                 bars = adapter.fetch_daily_bars(code, start, end, adjust)
                 if bars:
+                    self._mark_success(adapter.source_name)  # 非空结果=成功取到数据
                     return {"source": adapter.serving_source, "count": len(bars), "data": bars}, []
                 errors.append(f"{adapter.source_name}: 空结果")
             except SourceUnavailableError as exc:
                 errors.append(f"{adapter.source_name}: {exc}")
             except SourceError as exc:
+                self._mark_failure(adapter.source_name)
                 errors.append(f"{adapter.source_name}: {exc}")
             except ParameterError as exc:
                 errors.append(f"{adapter.source_name}: 参数错误 ({exc})")
@@ -268,11 +306,13 @@ class DataRouter:
             try:
                 bars = adapter.fetch_index_daily(code, start, end, adjust)
                 if bars:
+                    self._mark_success(adapter.source_name)  # 非空结果=成功取到数据
                     return {"source": adapter.serving_source, "count": len(bars), "data": bars}, []
                 errors.append(f"{adapter.source_name}: 空结果")
             except SourceUnavailableError as exc:
                 errors.append(f"{adapter.source_name}: {exc}")
             except SourceError as exc:
+                self._mark_failure(adapter.source_name)
                 errors.append(f"{adapter.source_name}: {exc}")
             except ParameterError as exc:
                 errors.append(f"{adapter.source_name}: 参数错误 ({exc})")
@@ -301,8 +341,13 @@ class DataRouter:
                     delisted.add(bare)
                 if r.get("ipo_date"):
                     ipo_date_map[bare] = r["ipo_date"]
-        except (SourceError, SourceUnavailableError) as exc:
+        except SourceError as exc:
+            self._mark_failure(SOURCE_BAOSTOCK)
             logger.warning("stock-list: 退市状态/ipo_date 获取失败，降级（%s）", exc)
+        except SourceUnavailableError as exc:  # banned/open：未发请求，归封禁/熔断展示
+            logger.warning("stock-list: 退市状态/ipo_date 获取失败，降级（%s）", exc)
+        else:
+            self._mark_success(SOURCE_BAOSTOCK)
 
         # 2) 股票列表（AKShare 主源；若 akshare 整体失败则尝试 baostock 兜底）
         stocks: List[dict] = []
@@ -311,10 +356,16 @@ class DataRouter:
             stocks = akshare.fetch_stock_list()
         except (SourceError, SourceUnavailableError) as exc:
             logger.warning("stock-list: akshare 失败，尝试 baostock 兜底（%s）", exc)
+            if isinstance(exc, SourceError):
+                self._mark_failure(SOURCE_AKSHARE)  # 真实请求已发出且故障才计失败
             try:
                 stocks = self._baostock_stock_list(baostock)
+                self._mark_success(SOURCE_BAOSTOCK)
             except Exception as inner:  # noqa: BLE001
+                self._mark_failure(SOURCE_BAOSTOCK)
                 raise SourceError(f"stock-list 所有源失败: akshare({exc}); baostock({inner})") from inner
+        else:
+            self._mark_success(SOURCE_AKSHARE)
 
         # 3) 合并退市标记 + ipo_date + market/board 过滤
         result: List[dict] = []
@@ -355,12 +406,26 @@ class DataRouter:
     # ---- 交易日历 ----
     def fetch_trading_calendar(self) -> List[str]:
         # 主源 AKShare tool_trade_date_hist_sina（探针实测 PASS，一次全量）
-        return self.adapters[SOURCE_AKSHARE].fetch_trading_calendar()
+        adapter = self.adapters[SOURCE_AKSHARE]
+        try:
+            dates = adapter.fetch_trading_calendar()
+        except SourceError as exc:
+            self._mark_failure(SOURCE_AKSHARE)
+            raise
+        self._mark_success(SOURCE_AKSHARE)  # 空列表是源的正常答复（非故障）
+        return dates
 
     # ---- 业绩报表（仅 akshare，mootdx 永不参与，PLAN §11.1）----
     def fetch_fundamentals(self, report_date: str) -> List[dict]:
         """业绩报表：仅 akshare（stock_yjbb_em）。mootdx/baostock 均无此能力。"""
-        return self.adapters[SOURCE_AKSHARE].fetch_fundamentals(report_date)
+        adapter = self.adapters[SOURCE_AKSHARE]
+        try:
+            result = adapter.fetch_fundamentals(report_date)
+        except SourceError as exc:
+            self._mark_failure(SOURCE_AKSHARE)
+            raise
+        self._mark_success(SOURCE_AKSHARE)
+        return result
 
     # ---- 板块成分（仅 akshare，mootdx 永不参与，PLAN §4.8）----
     def fetch_board_members(self, board_type: str) -> dict:
@@ -370,7 +435,12 @@ class DataRouter:
         （单板块失败降级跳过，消费侧据此跳过清空，防止部分源故障误清全库）。
         """
         adapter = self.adapters[SOURCE_AKSHARE]
-        boards = adapter.fetch_board_members(board_type)
+        try:
+            boards = adapter.fetch_board_members(board_type)
+        except SourceError as exc:
+            self._mark_failure(SOURCE_AKSHARE)
+            raise
+        self._mark_success(SOURCE_AKSHARE)
         return {
             "boards": boards,
             "degraded": bool(getattr(adapter, "_board_members_degraded", False)),
@@ -400,10 +470,12 @@ class DataRouter:
                     bars = adapter.fetch_daily_bars(code, start, end, adjust)
                     entry["count"] = len(bars)
                     entry["data"] = bars
+                    self._mark_success(adapter.source_name)  # 空 data=「无数据」合法占位（§11.2），非故障
                 except SourceUnavailableError as exc:
                     errors.append(f"{adapter.source_name}: {exc}")
                     entry["error"] = str(exc)
                 except SourceError as exc:
+                    self._mark_failure(adapter.source_name)
                     errors.append(f"{adapter.source_name}: {exc}")
                     entry["error"] = str(exc)
                 except ParameterError as exc:

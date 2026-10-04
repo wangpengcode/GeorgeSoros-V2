@@ -235,6 +235,30 @@ class CrossValidateResponse(BaseModel):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# /channels（渠道运营台账，CORS 页面展示：每源 最近成功/失败时间 + 封禁 + 熔断）
+# 时间戳格式 "%Y-%m-%d %H:%M:%S"，与 /ipguard 现状一致（本地墙钟，非 ISO）。
+# ──────────────────────────────────────────────────────────────────────────────
+class ChannelBanned(BaseModel):
+    """IPGuard 封禁快照（与 /ipguard 的 banned[source] 同构：{at, egress_ip}）。"""
+    at: str
+    egress_ip: Optional[str] = None
+
+
+class ChannelStatus(BaseModel):
+    source: str
+    health: str                            # ok | degraded | down（CircuitBreaker.health 口径）
+    last_success_at: Optional[str] = None  # 最近一次成功时间（进程态，重启即清；null=从未成功）
+    last_failure_at: Optional[str] = None  # 最近一次失败时间（SourceError；null=从未失败）
+    banned: Optional[ChannelBanned] = None  # 封禁中：{at, egress_ip}；未封禁 null
+    breaker: str                           # closed | open | half_open（CircuitBreaker.state）
+
+
+class ChannelsResponse(BaseModel):
+    status: str = "ok"
+    channels: list[ChannelStatus]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # 错误信封（PLAN §11.1）
 # ──────────────────────────────────────────────────────────────────────────────
 class ApiError(BaseModel):

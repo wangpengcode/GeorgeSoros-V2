@@ -12,8 +12,15 @@ from adapters.base import SOURCE_AKSHARE, SOURCE_BAOSTOCK, SOURCE_MOOTDX
 
 
 class FakeCircuitBreaker:
-    def __init__(self, health="ok"):
+    """无状态假熔断（/channels 读取 breaker state 需要，与真 CircuitBreaker 接口对齐）。"""
+
+    def __init__(self, health="ok", state="closed"):
         self._health = health
+        self._state = state
+
+    @property
+    def state(self):
+        return self._state
 
     def health(self):
         return self._health
