@@ -5,6 +5,7 @@ import com.soros.v2.domain.Board
 import com.soros.v2.domain.DataSourceType
 import com.soros.v2.domain.DingTalkEvent
 import com.soros.v2.domain.QualityIssueType
+import com.soros.v2.domain.SegmentReason
 import com.soros.v2.entity.DataQualityLog
 import com.soros.v2.entity.StockHistory
 import com.soros.v2.entity.StockInfo
@@ -12,12 +13,18 @@ import com.soros.v2.exception.BusinessException
 import com.soros.v2.exception.SorosBaseException
 import com.soros.v2.notification.DingTalkNotifier
 import com.soros.v2.repository.DataQualityLogRepository
+import com.soros.v2.repository.StockHistoryGapCheckRepository
 import com.soros.v2.repository.StockHistoryRepository
 import com.soros.v2.repository.StockInfoRepository
 import com.soros.v2.service.PythonDataServiceClient
 import com.soros.v2.service.TradingCalendarService
+import com.soros.v2.service.backfill.BackfillClassifier
+import com.soros.v2.service.backfill.BackfillPlanService
 import com.soros.v2.service.backfill.dto.BackfillProgress
 import com.soros.v2.service.backfill.dto.BackfillSummary
+import com.soros.v2.service.backfill.dto.FetchSegment
+import com.soros.v2.service.backfill.dto.RerunPlan
+import com.soros.v2.service.dto.BatchItem
 import com.soros.v2.service.dto.DailyBar
 import com.soros.v2.service.dto.DailyBarsBatchRequest
 import com.soros.v2.service.dto.DailyBarsBatchResponse
@@ -55,18 +62,16 @@ import org.springframework.stereotype.Component
  * ③ TRUNCATE stock_history_stage → 下一批
  * ```
  *
- * 断点续传（设计定稿 2026-10-04）：无持久化检查点——
- * - 幂等重跑 = 续传：ON CONFLICT DO UPDATE 语义与 saveBatch 完全一致，中断后重跑自动补齐；
- * - 已覆盖代码跳过：每批过滤 `findMaxTradeDate(code) ≥ endDate` 的 code，不重复拉取。
- *
- * 完成链（设计定稿）：全部批次 → 派生列补算（recompute_limit_streaks.sql，§六.6）→
- * 3 股抽查对拍（[verifyDerivedColumnsSample]）→ 情绪回放（§13.5，失败不阻塞回填结果只告警）
- * → 钉钉 digest。
+ * 库内重跑计划（2026-10-04 设计定稿，替代全量重拉空转）：
+ * - planService 注入 → 计划驱动：buildRerunPlan 按分类规则产出缺失 FetchSegment（真实缺失区间），
+ *   全齐票零 segment → 零外部请求；批打包 = BackfillClassifier.batchSegments（同批 code 唯一）；
+ * - processSegment 收口 verified-empty：HTTP 200 且该码不在 failed[] 且返回 0 行 →
+ *   gapCheckRepository.upsertVerifiedEmpty（停牌防反复空拉）；failed 里出现绝不记录；
+ * - planService 为 null（旧构造调用方）→ 保留 legacy 分片路径（findMaxTradeDate 断点续传 + codes 模式），
+ *   兼容既有调用方/测试。
  *
  * 间歇性获取铁律（用户 memory：外部数据源必须间歇性获取）：批间 [BackfillProperties.batchPauseMs]
  * 刻意停顿；批次限速由 Python 侧 TokenBucket 承担（baostock 5rps / akshare 2rps）。
- *
- * 运维约束（§17.2）：回填避开交易日 19:00-22:00（人工触发端点不强制，由运维自行遵守）。
  */
 @Component
 class BackfillJob(
@@ -81,6 +86,8 @@ class BackfillJob(
     private val metrics: CollectMetrics,
     private val notifier: DingTalkNotifier,
     private val replayService: SentimentReplayService,
+    private val planService: BackfillPlanService?,
+    private val gapCheckRepository: StockHistoryGapCheckRepository?,
 ) {
     private val logger = LoggerFactory.getLogger(BackfillJob::class.java)
 
@@ -105,26 +112,54 @@ class BackfillJob(
         val from = startDate
         val to = endDate
 
-        // 防御加固（Test Writer 穿透发现）：merge 与 TRUNCATE 之间的中断窗口可能残留 stale stage 行，
+        // 防御加固：merge 与 TRUNCATE 之间的中断窗口可能残留 stale stage 行，
         // 下批 COPY 追加后 merge 抛 "cannot affect row a second time"——run() 起始先清空瞬态中转表（UNLOGGED，零成本）。
         truncateStage()
         prepareCalendar(from, to)
 
-        val plan = buildChunkPlan()
+        // ── 执行计划装配：planService 注入=库内重跑计划（新）；null=legacy 分片（旧行为保留）──
+        val isPlanDriven = planService != null
+        val plan: RerunPlan
+        val segmentBatches: List<List<FetchSegment>>
+        val legacyChunks: List<List<StockInfo>>
+        if (isPlanDriven) {
+            plan = planService!!.buildRerunPlan(from, to)
+            segmentBatches = BackfillClassifier.batchSegments(plan.segments, chunkSize())
+            legacyChunks = emptyList()
+        } else {
+            val stocks = loadValidStocks()
+            // 断点续传：已覆盖到 end_date 的 code 跳过（幂等重跑语义，不重复拉取）
+            val pending = stocks.filter { (stockHistoryRepository.findMaxTradeDateByCode(it.code) ?: LocalDate.MIN) < to }
+            plan = RerunPlan(
+                from = from,
+                to = to,
+                totalCodes = stocks.size,
+                completeCodes = stocks.size - pending.size,
+                zeroWindowCodes = 0,
+                segments = pending.map { FetchSegment(it.code, from, to, SegmentReason.NO_DATA) },
+            )
+            segmentBatches = emptyList()
+            legacyChunks = pending.chunked(chunkSize())
+        }
         // 空候选防御（部署冒烟发现）：空库直接回填=零代码可拉，不能静默 COMPLETED 掩盖配置问题，
         // 明确 FAILED 引导先刷新股票清单（POST /api/v1/info/refresh）
         if (plan.totalCodes == 0) {
             throw BusinessException("股票清单为空：请先 POST /api/v1/info/refresh 刷新股票列表后重试回填")
         }
+        val totalBatches = if (isPlanDriven) segmentBatches.size else legacyChunks.size
         val initial = BackfillProgress(
             totalCodes = plan.totalCodes,
-            totalBatches = plan.chunks.size,
+            totalBatches = totalBatches,
             startedAt = Instant.now(),
         )
         onProgress(initial)
-        logger.info("[backfill] 启动：from={} to={} codes={} batches={}", from, to, plan.totalCodes, plan.chunks.size)
+        logger.info("[backfill] 启动：from={} to={} codes={} batches={} segments={}", from, to, plan.totalCodes, totalBatches, plan.segments.size)
 
-        val collect = collectAllChunks(plan.chunks, from, to, onProgress, initial)
+        val collect = if (isPlanDriven) {
+            collectAllSegmentBatches(segmentBatches, from, to, onProgress, initial)
+        } else {
+            collectAllChunks(legacyChunks, from, to, onProgress, initial)
+        }
         val recomputed = recomputeAndVerify(from, to)
         val replay = replaySentiment(from, to)
         val durationMs = System.currentTimeMillis() - startMs
@@ -138,12 +173,8 @@ class BackfillJob(
         return summary
     }
 
-    /** 分片计划：股票总数 + 分片清单（chunk 大小 = min(batch-size, max-codes-per-batch)，与 Python batch_max_codes 对齐） */
-    private fun buildChunkPlan(): ChunkPlan {
-        val stocks = loadValidStocks()
-        val chunkSize = minOf(backfillProperties.batchSize, backfillProperties.maxCodesPerBatch)
-        return ChunkPlan(stocks.size, stocks.chunked(chunkSize))
-    }
+    /** 每批请求股票数（= min(batch-size, max-codes-per-batch)，与 Python batch_max_codes 对齐） */
+    private fun chunkSize(): Int = minOf(backfillProperties.batchSize, backfillProperties.maxCodesPerBatch)
 
     /** §17.2 交易日历加载（fail-open：加载失败不阻塞回填，日期区间仍按用户/默认参数执行） */
     private suspend fun prepareCalendar(from: LocalDate, to: LocalDate) {
@@ -159,6 +190,136 @@ class BackfillJob(
             }
         }
     }
+
+    // ==================== 新：重跑计划批循环（items 模式） ====================
+
+    /** 段批循环累计：逐批拉取/合并/TRUNCATE，进度回调原子替换，批间刻意停顿（间歇性获取铁律） */
+    private suspend fun collectAllSegmentBatches(
+        batches: List<List<FetchSegment>>,
+        from: LocalDate,
+        to: LocalDate,
+        onProgress: (BackfillProgress) -> Unit,
+        initial: BackfillProgress,
+    ): CollectResult {
+        var succeeded = 0
+        var failed = 0
+        var processedRows = 0L
+        var progress = initial
+        for ((index, batch) in batches.withIndex()) {
+            progress = progress.copy(currentBatch = index + 1)
+            onProgress(progress)
+            val result = MdcSupport.withMdcSuspend(
+                MdcSupport.JOB to "backfill",
+                MdcSupport.DATE_RANGE to "$from..$to",
+                MdcSupport.PHASE to "copy-merge",
+                MdcSupport.ATTEMPT to "1",
+            ) {
+                processSegmentBatch(batch, from, to)
+            }
+            succeeded += result.succeeded
+            failed += result.failed
+            processedRows += result.rows
+            progress = progress.copy(
+                processedCodes = succeeded + failed,
+                succeededCodes = succeeded,
+                failedCodes = failed,
+                processedBatches = index + 1,
+                processedRows = processedRows,
+            )
+            onProgress(progress)
+            logger.info(
+                "[backfill] 批 {}/{} 完成：成功 {} 失败 {} 行 {} 累计行 {}",
+                index + 1, batches.size, result.succeeded, result.failed, result.rows, processedRows,
+            )
+            if (index < batches.lastIndex) {
+                logger.debug("[backfill] 批间停顿 {}ms（间歇性获取铁律）", backfillProperties.batchPauseMs)
+                delay(backfillProperties.batchPauseMs)
+            }
+        }
+        return CollectResult(succeeded, failed, processedRows)
+    }
+
+    /** 单段批处理：批量拉取（items 逐段窗口，重试）→ 逐 segment 处理 → 合并 → TRUNCATE */
+    private suspend fun processSegmentBatch(batch: List<FetchSegment>, from: LocalDate, to: LocalDate): ChunkResult {
+        if (batch.isEmpty()) return ChunkResult(0, 0, 0)
+        val response = fetchWithRetrySegments(batch)
+        if (response == null) {
+            metrics.incrementFailedCodes()
+            return ChunkResult(0, batch.size, 0)
+        }
+        var succeeded = 0
+        var failed = 0
+        var rows = 0L
+        val rejectDetails = mutableListOf<String>()
+        for (seg in batch) {
+            val result = processSegment(seg, response, rejectDetails)
+            succeeded += result.succeeded
+            failed += result.failed
+            rows += result.rows
+        }
+        writeRejectLog(rejectDetails)
+        return ChunkResult(succeeded, failed, rows)
+    }
+
+    /**
+     * 单 segment 处理（回填重跑收口）：
+     * - results[code] 为空 且 不在 failed[] → 记录 verified-empty（HTTP 200 + 0 行 = 停牌，防反复空拉）；
+     * - failed[] 含此码 → 计 failed，**不**记录 verified-empty（语义铁律：failed 里出现绝不记录）；
+     * - 空且既无 results 又无 failed（异常态，防御）→ 计 failed 不记录；
+     * - 非空 → 过滤到 [seg.from, seg.to] 窗口内（防御，Python 已按段窗口返回）后校验 + COPY 合并。
+     */
+    private fun processSegment(
+        seg: FetchSegment,
+        response: DailyBarsBatchResponse,
+        rejectDetails: MutableList<String>,
+    ): ChunkResult {
+        val result = response.results[seg.code]
+        val inFailed = response.failed.any { it.code == seg.code }
+        if (result == null || result.data.isEmpty()) {
+            if (inFailed || result == null) {
+                // 显式失败 或 异常态（code 既不在 results 也不在 failed，防御）→ 计 failed，绝不记录
+                val reason = response.failed.firstOrNull { it.code == seg.code }?.reason ?: "results 缺席异常态"
+                logger.warn("[backfill] 段失败 code={} reason={}", seg.code, reason)
+                metrics.incrementFailedCodes()
+                return ChunkResult(0, 1, 0)
+            }
+            // HTTP 200 且不在 failed[] 且 0 行 → verified-empty（仅记录，不拉重复）
+            gapCheckRepository?.upsertVerifiedEmpty(seg.code, seg.from, seg.to, 0)
+            logger.warn("[backfill] 段验证空 code={} from={} to={}", seg.code, seg.from, seg.to)
+            metrics.incrementFailedCodes()
+            return ChunkResult(0, 1, 0)
+        }
+        val windowed = result.data.filter { bar -> !bar.date.isBefore(seg.from) && !bar.date.isAfter(seg.to) }
+        val valid = filterValidBars(seg.code, windowed, rejectDetails)
+        if (valid.isEmpty()) {
+            logger.warn("[backfill] 段全部校验拒绝 code={} from={} to={}", seg.code, seg.from, seg.to)
+            metrics.incrementFailedCodes()
+            return ChunkResult(0, 1, 0)
+        }
+        val source = DataSourceType.fromPython(result.source)
+        copyMergeBatches(valid, source)
+        metrics.incrementRows(source)
+        return ChunkResult(1, 0, valid.size.toLong())
+    }
+
+    /** 段批量拉取（items 模式：逐段独立窗口；重试语义与 legacy codes 路径一致） */
+    private suspend fun fetchWithRetrySegments(segments: List<FetchSegment>): DailyBarsBatchResponse? {
+        val request = DailyBarsBatchRequest(
+            items = segments.map { BatchItem(it.code, it.from.toString(), it.to.toString()) },
+            adjust = "qfq",
+        )
+        for (attempt in 1..backfillProperties.maxRetriesPerBatch) {
+            try {
+                return pythonClient.fetchDailyBarsBatch(request)
+            } catch (e: SorosBaseException) {
+                logger.warn("[backfill] 批量拉取失败 attempt={}/{} segments={} error={}", attempt, backfillProperties.maxRetriesPerBatch, segments.size, e.message)
+            }
+        }
+        logger.error("[backfill] 批量拉取重试仍失败，segments={} 记为 failed", segments.size)
+        return null
+    }
+
+    // ==================== legacy：分片批循环（codes 模式，planService=null 时保留旧行为） ====================
 
     /** 批循环累计：逐批拉取/合并/TRUNCATE，进度回调原子替换，批间刻意停顿（间歇性获取铁律） */
     private suspend fun collectAllChunks(
@@ -204,6 +365,61 @@ class BackfillJob(
             }
         }
         return CollectResult(succeeded, failed, processedRows)
+    }
+
+    /**
+     * 单批处理（legacy）：断点续传过滤 → 批量拉取（重试）→ 逐股校验 → COPY stage → 合并 → TRUNCATE。
+     *
+     * @return 批内 成功/失败/入库行数（单股失败进 failed，不炸整批）
+     */
+    private suspend fun processChunk(chunk: List<StockInfo>, from: LocalDate, to: LocalDate): ChunkResult {
+        // 断点续传：已覆盖到 end_date 的 code 跳过（幂等重跑语义，不重复拉取）
+        val pending = chunk.filter { (stockHistoryRepository.findMaxTradeDateByCode(it.code) ?: LocalDate.MIN) < to }
+        if (pending.isEmpty()) return ChunkResult(0, 0, 0)
+
+        val response = fetchWithRetry(pending.map { it.code }, from, to)
+        if (response == null) {
+            metrics.incrementFailedCodes()
+            return ChunkResult(0, pending.size, 0)
+        }
+
+        var succeeded = 0
+        var failed = 0
+        var rows = 0L
+        val rejectDetails = mutableListOf<String>()
+        for (stock in pending) {
+            val result = processOneStock(stock, response, rejectDetails)
+            succeeded += result.succeeded
+            failed += result.failed
+            rows += result.rows
+        }
+        writeRejectLog(rejectDetails)
+        return ChunkResult(succeeded, failed, rows)
+    }
+
+    /** 单股处理（legacy）：无数据/全部拒绝进 failed；合法行按 copy-batch-rows 分段 COPY→merge→TRUNCATE */
+    private fun processOneStock(
+        stock: StockInfo,
+        response: DailyBarsBatchResponse,
+        rejectDetails: MutableList<String>,
+    ): ChunkResult {
+        val result = response.results[stock.code]
+        if (result == null || result.data.isEmpty()) {
+            val reason = response.failed.firstOrNull { it.code == stock.code }?.reason ?: "无数据"
+            logger.warn("[backfill] 单股无数据 code={} reason={}", stock.code, reason)
+            metrics.incrementFailedCodes()
+            return ChunkResult(0, 1, 0)
+        }
+        val valid = filterValidBars(stock.code, result.data, rejectDetails)
+        if (valid.isEmpty()) {
+            logger.warn("[backfill] 单股全部校验拒绝 code={}", stock.code)
+            metrics.incrementFailedCodes()
+            return ChunkResult(0, 1, 0)
+        }
+        val source = DataSourceType.fromPython(result.source)
+        copyMergeBatches(valid, source)
+        metrics.incrementRows(source)
+        return ChunkResult(1, 0, valid.size.toLong())
     }
 
     /** 派生列补算 + 抽查对拍（§六.6）：补算失败 fail-open 跳过抽查；补算成功且抽查不一致抛 [BusinessException] 置 FAILED */
@@ -252,64 +468,9 @@ class BackfillJob(
     private fun loadValidStocks(): List<StockInfo> =
         stockInfoRepository.findByIsStFalseAndDelistedFalse()
 
-    /**
-     * 单批处理：断点续传过滤 → 批量拉取（重试）→ 逐股校验 → COPY stage → 合并 → TRUNCATE。
-     *
-     * @return 批内 成功/失败/入库行数（单股失败进 failed，不炸整批）
-     */
-    private suspend fun processChunk(chunk: List<StockInfo>, from: LocalDate, to: LocalDate): ChunkResult {
-        // 断点续传：已覆盖到 end_date 的 code 跳过（幂等重跑语义，不重复拉取）
-        val pending = chunk.filter { (stockHistoryRepository.findMaxTradeDateByCode(it.code) ?: LocalDate.MIN) < to }
-        if (pending.isEmpty()) return ChunkResult(0, 0, 0)
-
-        val response = fetchWithRetry(pending.map { it.code }, from, to)
-        if (response == null) {
-            metrics.incrementFailedCodes()
-            return ChunkResult(0, pending.size, 0)
-        }
-
-        var succeeded = 0
-        var failed = 0
-        var rows = 0L
-        val rejectDetails = mutableListOf<String>()
-        for (stock in pending) {
-            val result = processOneStock(stock, response, rejectDetails)
-            succeeded += result.succeeded
-            failed += result.failed
-            rows += result.rows
-        }
-        writeRejectLog(rejectDetails)
-        return ChunkResult(succeeded, failed, rows)
-    }
-
-    /** 单股处理：无数据/全部拒绝进 failed；合法行按 copy-batch-rows 分段 COPY→merge→TRUNCATE */
-    private fun processOneStock(
-        stock: StockInfo,
-        response: DailyBarsBatchResponse,
-        rejectDetails: MutableList<String>,
-    ): ChunkResult {
-        val result = response.results[stock.code]
-        if (result == null || result.data.isEmpty()) {
-            val reason = response.failed.firstOrNull { it.code == stock.code }?.reason ?: "无数据"
-            logger.warn("[backfill] 单股无数据 code={} reason={}", stock.code, reason)
-            metrics.incrementFailedCodes()
-            return ChunkResult(0, 1, 0)
-        }
-        val valid = filterValidBars(stock, result.data, rejectDetails)
-        if (valid.isEmpty()) {
-            logger.warn("[backfill] 单股全部校验拒绝 code={}", stock.code)
-            metrics.incrementFailedCodes()
-            return ChunkResult(0, 1, 0)
-        }
-        val source = DataSourceType.fromPython(result.source)
-        copyMergeBatches(valid, source)
-        metrics.incrementRows(source)
-        return ChunkResult(1, 0, valid.size.toLong())
-    }
-
     /** 逐股校验：跳过非法行并记录拒绝明细（DataValidator 整批校验，§4.7 防线②） */
     private fun filterValidBars(
-        stock: StockInfo,
+        code: String,
         data: List<DailyBar>,
         rejectDetails: MutableList<String>,
     ): List<DailyBar> = data.filter { bar ->
@@ -317,7 +478,7 @@ class BackfillJob(
         if (check.valid) {
             true
         } else {
-            rejectDetails += "${stock.code}:${bar.date}:${check.description}"
+            rejectDetails += "$code:${bar.date}:${check.description}"
             false
         }
     }
@@ -335,7 +496,7 @@ class BackfillJob(
     }
 
     /**
-     * 批量拉取（backfill profile：PythonDataServiceClientImpl 按 >366 自然日区间自动切
+     * 批量拉取（legacy codes 模式；backfill profile：PythonDataServiceClientImpl 按 >366 自然日区间自动切
      * response 60s / retry 1 次；此处再做应用层重试 maxRetriesPerBatch 轮）。
      *
      * 重试只对 [SorosBaseException]（网络/超时/5xx/熔断 open）触发——幂等安全；
@@ -593,12 +754,6 @@ class BackfillJob(
 
     private fun readSql(path: String): String =
         ClassPathResource(path).inputStream.bufferedReader().use { it.readText() }
-
-    /** 分片计划：股票总数 + 分片清单（chunk 大小 = min(batch-size, max-codes-per-batch)，与 Python batch_max_codes 对齐） */
-    private data class ChunkPlan(
-        val totalCodes: Int,
-        val chunks: List<List<StockInfo>>,
-    )
 
     /** 批循环累计结果（成功/失败股票数与入库行数） */
     private data class CollectResult(

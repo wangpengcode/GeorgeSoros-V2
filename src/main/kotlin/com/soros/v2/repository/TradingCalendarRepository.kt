@@ -26,4 +26,13 @@ interface TradingCalendarRepository : JpaRepository<TradingCalendar, LocalDate> 
 
     /** 区间内交易日（升序；§13.5 回放逐日序列 / §13.4 状态机观察期计数） */
     fun findByTradeDateBetweenOrderByTradeDateAsc(from: LocalDate, to: LocalDate): List<TradingCalendar>
+
+    /** ≥ date 的首个交易日（含 date；期望窗口起点吸附，BackfillClassifier.expectedWindow 生产注入） */
+    fun findFirstByTradeDateGreaterThanEqualOrderByTradeDateAsc(date: LocalDate): TradingCalendar?
+
+    /** ≤ date 的最后交易日（含 date；期望窗口终点吸附） */
+    fun findFirstByTradeDateLessThanEqualOrderByTradeDateDesc(date: LocalDate): TradingCalendar?
+
+    /** 区间内开市日数（含端点；全齐判定 n_rows == 开市日数） */
+    fun countByTradeDateBetween(from: LocalDate, to: LocalDate): Long
 }

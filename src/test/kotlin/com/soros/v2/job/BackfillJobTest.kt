@@ -174,6 +174,9 @@ class BackfillJobTest {
             metrics = metrics,
             notifier = notifier,
             replayService = replayService,
+            // legacy 语义显式表达：旧单测验证无计划服务的 codes 直拉路径（生产装配下 planService 恒非空）
+            planService = null,
+            gapCheckRepository = null,
         )
     }
 

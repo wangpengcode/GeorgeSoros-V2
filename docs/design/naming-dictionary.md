@@ -208,6 +208,10 @@
 | `complete` | 15:10 归档补齐后置 true | intraday_replay |
 | `page` | 页面（intraday_replay=整页渲染 JSONB；daily_note=页面枚举） | intraday_replay、daily_note |
 | `content` | 笔记内容（纯人工日志，不进策略条件） | daily_note |
+| `seg_from` | 已验证空段起点（含；V7 回填验证空段台账，防停牌反复空拉） | stock_history_gap_check |
+| `seg_to` | 已验证空段终点（含） | stock_history_gap_check |
+| `rows_returned` | 该段拉取返回行数（HTTP 200 且非 failed 时 0 即验证空） | stock_history_gap_check |
+| `checked_at` | 验证时间（timestamptz） | stock_history_gap_check |
 
 ## 六、响应 JSON 键区段（非列名，受本册约束，先增册再用名）
 
@@ -241,3 +245,6 @@
 | `finished_at` | 结束时间（ISO-8601；null=运行中） | GET /jobs/backfill/status 响应 progress |
 | `error` | 失败原因（仅 FAILED 非 null） | GET /jobs/backfill/status 响应 |
 | `stock_count` | 本次刷新后的有效股票数（已过滤 ST/退市/北交所） | POST /info/refresh 响应 |
+| `items` | batch 逐段窗口请求数组（{code,start_date,end_date}；与 codes+dates 二选一） | POST /daily-bars/batch 请求体（Python） |
+| `segments` | 重跑计划缺失段扁平清单（一票可多条，全齐票零段） | BackfillPlanService.buildRerunPlan 出参 |
+| `reason` | 缺失段分类原因 HEAD/TAIL/MID/NO_DATA（与 failed[] 的 reason=失败文案不同义，§3 特例留痕） | FetchSegment、failed[] 元素 |

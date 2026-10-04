@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from constants import (
     BOARD_TYPES,
@@ -33,20 +33,56 @@ def _validate_date(value: str) -> str:
     return value
 
 
-class DailyBarsBatchRequest(BaseModel):
-    codes: list[str] = Field(
-        ...,
-        description="证券代码列表：裸数字 6 位股票（600000）或带前缀指数（sh000001），可混收",
-    )
+class DailyBarsBatchItem(BaseModel):
+    """items 单段：code + 独立拉取窗口（回填重跑计划逐段窗口模式，PLAN 2026-10-04 设计定稿）。
+
+    每段一个 [code, start_date, end_date]，Python 侧按段窗口分别拉取；响应仍按 code 键聚合。
+    铁律：请求批内 code 不得重复（同批重复造成 results 按 code 键归属歧义）→ 422。
+    """
+
+    code: str
     start_date: str = Field(..., description="起始日期 YYYY-MM-DD")
     end_date: str = Field(..., description="结束日期 YYYY-MM-DD（含）")
+
+    @field_validator("code")
+    @classmethod
+    def _validate_code(cls, v: str) -> str:
+        code = str(v).strip()
+        if not is_valid_tradeable_code(code):
+            raise ValueError(
+                f"code 必须为裸数字 6 位股票（600000）或带前缀指数（sh000001），收到: {code!r}"
+            )
+        return code
+
+    @field_validator("start_date", "end_date")
+    @classmethod
+    def _validate_dates(cls, v: str) -> str:
+        return _validate_date(v)
+
+
+class DailyBarsBatchRequest(BaseModel):
+    """batch 请求二选一（XOR 铁律，路由层 422 语义校验，见 router.daily_bars_batch）：
+
+    - items 模式：items=[{code, start_date, end_date}...] 逐段独立窗口（重跑计划）；
+    - codes 模式：codes + start_date + end_date（向后兼容，原契约不变）。
+    混用 / 两者皆空 / codes 模式缺日期 → 422 PARAM_INVALID；数量超 batch_max_codes → 422。
+    """
+
+    codes: list[str] = Field(
+        default_factory=list,
+        description="证券代码列表（codes+dates 模式）：裸数字 6 位股票（600000）或带前缀指数（sh000001）",
+    )
+    start_date: Optional[str] = Field(None, description="起始日期 YYYY-MM-DD（codes 模式必填）")
+    end_date: Optional[str] = Field(None, description="结束日期 YYYY-MM-DD，含（codes 模式必填）")
+    items: list[DailyBarsBatchItem] = Field(
+        default_factory=list,
+        description="逐段窗口模式：{code, start_date, end_date} 独立窗口（与 codes+dates 二选一）",
+    )
     adjust: str = Field("qfq", description="复权方式：qfq / hfq / none")
 
     @field_validator("codes")
     @classmethod
     def _validate_codes(cls, v: list[str]) -> list[str]:
-        if not v:
-            raise ValueError("codes 不能为空")
         cleaned = []
         for raw in v:
             code = str(raw).strip()
@@ -59,7 +95,9 @@ class DailyBarsBatchRequest(BaseModel):
 
     @field_validator("start_date", "end_date")
     @classmethod
-    def _validate_dates(cls, v: str) -> str:
+    def _validate_dates(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
         return _validate_date(v)
 
     @field_validator("adjust")
@@ -68,6 +106,17 @@ class DailyBarsBatchRequest(BaseModel):
         if v not in ("qfq", "hfq", "none"):
             raise ValueError(f"adjust 仅支持 qfq/hfq/none，收到: {v!r}")
         return v
+
+    @model_validator(mode="after")
+    def _validate_xor(self) -> DailyBarsBatchRequest:
+        """items 与 codes 二选一铁律（模型层兜底两者皆空；混用/数量超限由路由层 422 信封语义校验）。
+
+        两者皆空 → 模型层即拒（ValidationError → FastAPI 422 信封 PARAM_INVALID）；
+        items 或 codes 单边非空 → 放行（路由层继续 XOR 语义校验）。
+        """
+        if not self.codes and not self.items:
+            raise ValueError("必须提供 items 或 codes+start_date+end_date 二选一")
+        return self
 
 
 class Bar(BaseModel):

@@ -58,12 +58,29 @@ data class DailyBar(
     @JsonProperty("prev_close") val prevClose: BigDecimal? = null,
 )
 
-/** Python /api/v1/daily-bars/batch 请求（§11.1：codes 裸数字、dates YYYY-MM-DD、adjust=qfq） */
+/** Python /api/v1/daily-bars/batch 请求（§11.1；items 模式=重跑计划逐段窗口，codes+dates 模式=向后兼容） */
 data class DailyBarsBatchRequest(
-    @JsonProperty("codes") val codes: List<String>,
+    @JsonProperty("codes") val codes: List<String> = emptyList(),
+    @JsonProperty("start_date") val startDate: String? = null,
+    @JsonProperty("end_date") val endDate: String? = null,
+    @JsonProperty("adjust") val adjust: String = "qfq",
+    @JsonProperty("items") val items: List<BatchItem> = emptyList(),
+) {
+    init {
+        require(items.isNotEmpty() || (codes.isNotEmpty() && startDate != null && endDate != null)) {
+            "必须提供 items 或 codes+start_date+end_date 二选一"
+        }
+        require(items.isEmpty() || (codes.isEmpty() && startDate == null && endDate == null)) {
+            "items 与 codes+start_date+end_date 二选一，禁止混用"
+        }
+    }
+}
+
+/** items 单段（code + 独立拉取窗口） */
+data class BatchItem(
+    @JsonProperty("code") val code: String,
     @JsonProperty("start_date") val startDate: String,
     @JsonProperty("end_date") val endDate: String,
-    @JsonProperty("adjust") val adjust: String = "qfq",
 )
 
 /** Python /api/v1/daily-bars/batch 响应（§11.1：results 按 code 分组，failed[] 单股失败不炸整批） */

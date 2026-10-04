@@ -2146,3 +2146,65 @@ daily_note(
 ### 19.6 国外免费源结论（2026-10-04 定稿，调研 Agent 实测）
 
 **国外源对 A 股无增量价值，Yahoo 已是最优解，不再追加评估**。三层否决：① 覆盖层——Twelve Data/EODHD 把沪深锁付费档、Finnhub 国际行情 Enterprise 专属、FMP 仅美股；② 额度层——Alpha Vantage 25 req/天、EODHD 20 req/天，对 5000 股无意义；③ 可达层——Stooq 本机出口被 Cloudflare JS 挑战拦截。报告存档 `docs/research/2026-10-04-free-intl-sources.md`。
+
+### 19.7 标准复权引擎（2026-10-04 穿透定稿；**设计存档，未落地**，用户拍板后实施）
+
+**动机**：现行复权是"外包"的——库内 qfq 由源算好直接给（baostock/akshare/yahoo/tencent 传 adjust=qfq），正确性靠三层被动保障（CrossValidateJob 双源对拍 / §4.6 prev_close 链校验→ADJUSTMENT_DRIFT→单股全量重拉 / CalibrationJob 已停用）。根本缺陷：源算错无从知晓、两源不一致时无法裁决谁准、除权事件无事件表只能被动发现。用户拍板方向：**复权收敛为一个标准服务，各数据源调用它，正确性由引擎统一保证**。
+
+**公式（穿透验证通过）**：
+```
+f = (C_prev − D_税前/股) / (1 + 送转率S) / C_prev     # C_prev = 除权日前一交易日 raw 收盘
+qfq_t = raw_t × ∏ f(除权日 > t)                        # 尾部锚定：最新段 qfq == raw（r=1.0）
+```
+配股预留 R 项（f = (C_prev − D + R×配股率)/(1+S)/C_prev）但**无真实数据背书，遇配股事件先告警人工，不自动算**。
+
+**穿透四跳实测（2026-10-04，全只读）**：
+1. SSE raw vs baostock raw 逐行一致（600519 close max diff 0.000000；000001 volume 2/1211 行差异疑盘后定价成交；amount ≤0.1%）→ SSE raw 可作引擎输入
+2. 事件腿：**baostock query_dividend_data 漏特别派息**（600519 漏 2022-12-27 十派219.10、2023-12-20 十派191.06），**不可作事件源**；腾讯 day 行内嵌 dict 完整（fh_sh/10=每股税前 D，cqr=除权日，FHcontent 含送/转/特别派息口径）
+3. 本地公式 qfq vs 库内 baostock qfq：4 股 4834 行（000001/000028/000034/000153，含 2 只送转股验证 (1+S) 腿）全可比，**最大偏差 0.072% < 0.1% 容差，超差 0 行**
+4. 尾部锚定：最后一段复权比 r=1.000000
+
+反解 baostock 隐含因子 vs 公式：每事件偏差 ≤0.035%，**税后×0.9 假设偏差大 10 倍被排除**（baostock 为税前口径）。
+
+**穿透中发现的关键坑**：
+- **腾讯 day 接口单次请求静默截断至 ~800 行（约 3 年）**——5 年窗口只回尾部 800 行且不报错。raw 与事件都必须**按年分块**请求；块间校验日期连续性
+- baostock 分红表漏特别派息（见跳2），事件腿**只能**用腾讯行内 dict
+
+**落地范围（待用户批准）**：
+- Python 侧新增 `qfq_engine.py`（纯函数：raw×事件→qfq，TDD + 集成测试）；事件与 raw 腾讯分块获取
+- `sse_adapter` 接入引擎：`raw + 事件 → 引擎 → qfq`，SSE 加入分片池成为第 4 源（现池 baostock,akshare,tencent，yahoo 403 冷却临时摘出）
+- 守卫：① 事件完备性——除权日价格跳变与事件对不上→告警；② 引擎对拍 job——定期抽引擎 qfq vs 源 qfq（跳3 固化为监督）
+- **增量并行，不动现有链路**：引擎只写 SSE 新增行；引擎口径 vs 库内 baostock 口径差 ≤0.072% < ADJUSTMENT_DRIFT 阈值 0.5%，混拼不误报
+
+**独立决策项（不阻塞落地）**：是否将库内存量行重算为引擎口径——现差 ≤0.072%，无实际必要，观测后再定。
+
+**生产实锤（2026-10-04 晚回填发现）**：腾讯 800 行截断已咬到生产——183 只（多为 300xxx 创业板）`min(trade_date)` 停在腾讯窗口尾部（如 2023-06-15），前段 2021-10~2023-06 整段缺失，且 `max(trade_date)=2026-09-30` 满足跳过区判据**被标记为已完成、永不再补拉**（变相静默丢失，用户明令不可接受）。BAOSTOCK 95/96 与 AKSHARE_SINA 1/2 为次新股正常短历史（对照 stock_info.ipo_date 已排除）。修复三件套（随 §19.7 落地一并实施）：
+1. 根因：腾讯适配器按年分块（§19.7 已含）
+2. 守卫：完成判据从"max(trade_date) ≥ to"升级为"max ≥ to 且 min(trade_date) ≤ max(ipo_date, from)+容差"——头部缺口不再被误判完成
+3. 存量修复：183 票一次性补偿重拉（它们的 maxTradeDate 已达标，现有过滤不会再碰）
+
+### 19.8 回填重跑计划完全体（2026-10-04 定稿，TDD 落地中）
+
+**事故驱动**：21:24 轮次实测——跳过判据 `max(trade_date) < to`（to=10-04 休市日）失效，5224 票全量重拉；批1/批2（100 票全齐票）拉回 10.7 万行、落库新增 0 行，纯空转。503 票腾讯截断票（头缺）若轮到也会全窗口重拉（拉回已有 2023-06~09-30 段）。
+
+**用户铁律（零容忍，全部固化为测试用例）**：
+1. 全量已补齐的票 → **零外部请求**
+2. 缺哪段补哪段——拉取窗口=真实缺失区间；票从 2023 年起（上市日 2023）绝不允许从 2021 全量重查
+3. 数据不全（头/尾/中间洞任一缺失）= 事故，三向完整性校验
+4. 重拉缺失段返回 0 行（停牌）→ 记录"已验证空段"，否则下轮计划反复空拉同一洞也是无效调用
+
+**分类规则**（每票期望窗口 `[expectedStart, expectedEnd]`；口径 A 用户已拍板：起点 = max(2021-10-01, ipo_date)，吸附 ≥ 起点的首个交易日，如 10-01→10-08；终点 = ≤to 的最后交易日）：
+
+| 类别 | 判定 | 动作 | 实测 |
+|---|---|---|---|
+| 全齐 | 头尾合格 + 行数=区间开市日数 | 零 segment | ~2010 |
+| 无数据 | 库内无此码 | [expectedStart, expectedEnd] | 2530 |
+| 头缺 | min_d > expectedStart | [expectedStart, min_d-1]（503 腾讯截断 + 139 上市头段缺失） | ~680 |
+| 尾缺 | max_d < expectedEnd | [max_d+1, expectedEnd] 断点续拉 | 6 |
+| 中间洞 | 行数 < 区间开市日数 | gaps-and-islands 逐洞分段 | 611（含停牌误报） |
+
+**实现**：
+- `BackfillPlanService`（纯逻辑可单测）：聚合数据 + 交易日历 → `FetchSegment(code, from, to, reason)` 列表；一票可多 segment；计划计算零外部请求
+- `BackfillJob.kt:262` 粗过滤整体替换为计划驱动；`DailyBarsBatchRequest` 增 `items:[{code,start_date,end_date}]`（保留旧字段向后兼容），Python batch 端点同 accepting
+- 新表 `stock_history_gap_check(code, seg_from, seg_to, rows_returned, checked_at)`：拉取成功但 0 行 → 记录，Planner 排除完全重合的洞段
+- 幂等不变式保持：ON CONFLICT DO UPDATE，拉重无害；批间停顿/限速铁律不变

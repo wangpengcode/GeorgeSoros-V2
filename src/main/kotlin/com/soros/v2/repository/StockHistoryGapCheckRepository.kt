@@ -1,0 +1,44 @@
+package com.soros.v2.repository
+
+import com.soros.v2.entity.StockHistoryGapCheck
+import com.soros.v2.entity.StockHistoryGapCheckId
+import java.time.LocalDate
+import org.springframework.data.jpa.repository.JpaRepository
+import org.springframework.data.jpa.repository.Modifying
+import org.springframework.data.jpa.repository.Query
+import org.springframework.data.repository.query.Param
+import org.springframework.transaction.annotation.Transactional
+
+interface StockHistoryGapCheckRepository : JpaRepository<StockHistoryGapCheck, StockHistoryGapCheckId> {
+
+    /** 是否存在与给定区间完全重合的已验证空段（MID 排除 exact-match） */
+    @Query(
+        "SELECT COUNT(g) > 0 FROM StockHistoryGapCheck g " +
+            "WHERE g.code = :code AND g.segFrom = :from AND g.segTo = :to",
+    )
+    fun existsByCodeAndRange(@Param("code") code: String, @Param("from") from: LocalDate, @Param("to") to: LocalDate): Boolean
+
+    /**
+     * 记录已验证空段（幂等 upsert：重复验证仅刷新 rows_returned/checked_at）。
+     *
+     * 注：from/to 声明为可空仅因单测 verify 用 Mockito.any&lt;LocalDate&gt;()（返回 null）；
+     * 生产调用恒传非空值，@Param 原生 SQL 不受影响。
+     */
+    @Modifying
+    @Transactional
+    @Query(
+        value = """
+            INSERT INTO stock_history_gap_check (code, seg_from, seg_to, rows_returned, checked_at)
+            VALUES (:code, :from, :to, :rows, NOW())
+            ON CONFLICT (code, seg_from, seg_to)
+            DO UPDATE SET rows_returned = :rows, checked_at = NOW()
+        """,
+        nativeQuery = true,
+    )
+    fun upsertVerifiedEmpty(
+        @Param("code") code: String,
+        @Param("from") from: LocalDate?,
+        @Param("to") to: LocalDate?,
+        @Param("rows") rows: Int,
+    )
+}

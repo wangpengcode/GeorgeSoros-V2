@@ -40,6 +40,7 @@ from models import (
     CalendarResponse,
     CrossValidateRequest,
     CrossValidateResponse,
+    DailyBarsBatchItem,
     DailyBarsBatchRequest,
     DailyBarsBatchResponse,
     ErrorEnvelope,
@@ -74,24 +75,75 @@ def create_router(data_router: DataRouter) -> APIRouter:
             )
         return {"status": "ok", "stocks": stocks}
 
+    def _param_invalid(message: str) -> JSONResponse:
+        """422 信封形 PARAM_INVALID（§11.1 错误信封 + constants.py 错误码单点）。"""
+        return JSONResponse(
+            status_code=422,
+            content=ErrorEnvelope(
+                error={"code": ERROR_PARAM_INVALID, "message": message}
+            ).model_dump(),
+        )
+
+    def _is_all_sources_empty(errors: List[str]) -> bool:
+        """errors 是否「所有源都是空结果」→ 停牌占位（results[code] count=0 data=[]，非 failed）。
+
+        语义（重跑计划 verified-empty 铁律）：全源「空结果」= 该票该段无数据（停牌/未上市），
+        非故障——Kotlin 侧据此记录 verified-empty，防反复空拉；任何源真实故障（SourceError）
+        一律归 failed[]（绝不误判为停牌）。
+        """
+        if not errors:
+            return False
+        reason = errors[0]
+        # _fetch_stock_daily 返回 [reason]：reason 形如 "All sources failed: baostock: 空结果; akshare: 空结果"
+        if not reason.startswith("All sources failed"):
+            return False
+        parts = reason.split(": ", 1)[1].split("; ") if ": " in reason else []
+        return bool(parts) and all(p.endswith("空结果") for p in parts)
+
+    def _placeholder_source(errors: List[str]) -> str:
+        """全源空结果占位的 source 标签：取 failover 序第一个源名（仅占位，非真实源归因）。"""
+        try:
+            return errors[0].split(": ", 1)[1].split("; ")[0].split(":")[0]
+        except (IndexError, ValueError):
+            return "baostock"
+
     @router.post("/daily-bars/batch", response_model=DailyBarsBatchResponse)
     def daily_bars_batch(req: DailyBarsBatchRequest):
-        if len(req.codes) > settings.batch_max_codes:
+        items_mode = bool(req.items)
+        codes_mode = bool(req.codes)
+
+        # 二选一铁律（XOR）：混用 / 两者皆空 / codes 模式缺日期 → 422 PARAM_INVALID
+        if items_mode and codes_mode:
+            return _param_invalid("items 与 codes+start_date+end_date 二选一，禁止混用")
+        if not items_mode and not codes_mode:
+            return _param_invalid("必须提供 items 或 codes+start_date+end_date 二选一")
+        if codes_mode and (req.start_date is None or req.end_date is None):
+            return _param_invalid("codes 模式必须提供 start_date/end_date")
+
+        # 批内 code 唯一（items 模式）：同批重复 → 422（results 按 code 键归属歧义）
+        if items_mode:
+            item_codes = [item.code for item in req.items]
+            if len(item_codes) != len(set(item_codes)):
+                return _param_invalid("items 批内 code 不得重复（同批重复造成归属歧义）")
+
+        # 批大小上限（两模式共用同一 batch_max_codes 上限）
+        n = len(req.items) if items_mode else len(req.codes)
+        if n > settings.batch_max_codes:
             logger.warning(
-                "batch codes 超上限: %d > %d", len(req.codes), settings.batch_max_codes
+                "batch %s 超上限: %d > %d",
+                "items" if items_mode else "codes", n, settings.batch_max_codes,
             )
-            return JSONResponse(
-                status_code=422,
-                content=ErrorEnvelope(
-                    error={
-                        "code": ERROR_PARAM_INVALID,
-                        "message": (
-                            f"codes 数量 {len(req.codes)} 超过 batch_max_codes 上限 "
-                            f"{settings.batch_max_codes}"
-                        ),
-                    }
-                ).model_dump(),
+            return _param_invalid(
+                f"{'items' if items_mode else 'codes'} 数量 {n} 超过 batch_max_codes 上限 "
+                f"{settings.batch_max_codes}"
             )
+
+        if items_mode:
+            return _daily_bars_batch_items(req, data_router)
+        return _daily_bars_batch_codes(req, data_router)
+
+    def _daily_bars_batch_codes(req, data_router):
+        """codes+dates 模式（向后兼容）：原契约行为零变化（多源分组并行 + 串行尾批）。"""
         # ── 多源分组并行（2026-10-04 设计定稿）──
         # 设计依据：并行只在源之间，源内节奏不变（防封禁铁律）——不同分片组并行互不干扰；
         # 组内逐只串行走 failover Router（现有语义），各源限流节奏各自独立（TokenBucket 每源独立）。
@@ -150,6 +202,79 @@ def create_router(data_router: DataRouter) -> APIRouter:
             else:
                 failed.append(
                     {"code": code, "reason": errors[0] if errors else "All sources failed"}
+                )
+        return {"status": "ok", "results": results, "failed": failed}
+
+    def _daily_bars_batch_items(req, data_router):
+        """items 逐段窗口模式（重跑计划）：每 item 独立窗口拉取，并行只在源之间。
+
+        - 分组归属与 codes 模式共用 _shard_owner（单点判断，两处归属一致）；组内逐段串行
+          走 failover（防封禁铁律）；
+        - 全源「空结果」→ results[code] count=0 data=[] 占位（停牌语义，非 failed），
+          供 Kotlin 侧 verified-empty 记录（防反复空拉）；
+        - 任何源真实故障 → failed[{code, reason}]（与 codes 模式 failed 语义一致）。
+        """
+        items = req.items
+        groups: Dict[str, List[DailyBarsBatchItem]] = {}
+        tail: List[DailyBarsBatchItem] = []
+        for item in items:
+            owner = data_router._shard_owner(item.code)
+            if owner is None:
+                tail.append(item)
+            else:
+                groups.setdefault(owner.source_name, []).append(item)
+
+        def _worker_items(segments: List[DailyBarsBatchItem]) -> Tuple[Dict[str, dict], List[dict]]:
+            local_results: Dict[str, dict] = {}
+            local_failed: List[dict] = []
+            for seg in segments:
+                result, errors = data_router.fetch_daily_bars(
+                    seg.code, seg.start_date, seg.end_date, req.adjust
+                )
+                if result is not None:
+                    local_results[seg.code] = result
+                elif _is_all_sources_empty(errors):
+                    local_results[seg.code] = {
+                        "source": _placeholder_source(errors),
+                        "count": 0,
+                        "data": [],
+                    }
+                else:
+                    local_failed.append(
+                        {"code": seg.code, "reason": errors[0] if errors else "All sources failed"}
+                    )
+            return local_results, local_failed
+
+        results: Dict[str, dict] = {}
+        failed: List[dict] = []
+        if groups:
+            with ThreadPoolExecutor(max_workers=len(groups)) as pool:
+                futures = [pool.submit(_worker_items, segments) for segments in groups.values()]
+                for (src, segments), fut in zip(groups.items(), futures):
+                    try:
+                        r, f = fut.result()
+                    except Exception as exc:  # noqa: BLE001
+                        logger.error("batch items worker(%s) 异常: %s", src, exc)
+                        r, f = {}, [{"code": s.code, "reason": f"worker 异常: {exc}"} for s in segments]
+                    results.update(r)
+                    failed.extend(f)
+
+        # 串行尾批：指数等非分片代码，主线程逐段拉取（量小，串行防封禁）
+        for seg in tail:
+            result, errors = data_router.fetch_daily_bars(
+                seg.code, seg.start_date, seg.end_date, req.adjust
+            )
+            if result is not None:
+                results[seg.code] = result
+            elif _is_all_sources_empty(errors):
+                results[seg.code] = {
+                    "source": _placeholder_source(errors),
+                    "count": 0,
+                    "data": [],
+                }
+            else:
+                failed.append(
+                    {"code": seg.code, "reason": errors[0] if errors else "All sources failed"}
                 )
         return {"status": "ok", "results": results, "failed": failed}
 

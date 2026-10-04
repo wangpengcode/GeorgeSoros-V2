@@ -54,4 +54,63 @@ interface StockHistoryRepository : JpaRepository<StockHistory, Long> {
 
     /** 该股最新未校准行（CalibrationJob 校准窗终点；null=全部已校准） */
     fun findTopByCodeAndCalibratedFalseOrderByTradeDateDesc(code: String): StockHistory?
+
+    /**
+     * 每票覆盖聚合（重跑计划分类输入；仅统计库内行，min/max 为全量 span）。
+     * 返回 List 空 = 该码无数据（NO_DATA）。注意：只返回有行的 code，无行 code 不在结果集里。
+     */
+    @Query(
+        value = """
+            SELECT h.code AS code, MIN(h.trade_date) AS min_d, MAX(h.trade_date) AS max_d, COUNT(*) AS n_rows
+            FROM stock_history h
+            WHERE h.code IN :codes
+            GROUP BY h.code
+        """,
+        nativeQuery = true,
+    )
+    fun aggregateCoverageByCodes(@Param("codes") codes: Collection<String>): List<StockSpanProjection>
+
+    /**
+     * 单票缺失开市日 gaps-and-islands（calendar 反连接；仅对 n_rows < 开市日数 的票执行）。
+     * 输出升序的 [seg_from, seg_to] islands = 缺失交易日连续段。
+     */
+    @Query(
+        value = """
+            WITH span AS (
+                SELECT MIN(trade_date) AS min_d, MAX(trade_date) AS max_d
+                FROM stock_history WHERE code = :code
+            ),
+            missing AS (
+                SELECT c.trade_date AS d
+                FROM trading_calendar c, span s
+                WHERE c.trade_date BETWEEN s.min_d AND s.max_d
+                  AND NOT EXISTS (SELECT 1 FROM stock_history h
+                                  WHERE h.code = :code AND h.trade_date = c.trade_date)
+            ),
+            islands AS (
+                SELECT d, d - (ROW_NUMBER() OVER (ORDER BY d))::int AS grp
+                FROM missing
+            )
+            SELECT MIN(d) AS seg_from, MAX(d) AS seg_to
+            FROM islands
+            GROUP BY grp
+            ORDER BY seg_from
+        """,
+        nativeQuery = true,
+    )
+    fun findMissingDateIslands(@Param("code") code: String): List<GapIslandProjection>
+
+    /** 每票覆盖聚合投影（别名=字段名；minD/maxD 非空——只有有行的 code 才返回） */
+    interface StockSpanProjection {
+        val code: String
+        val min_d: LocalDate?
+        val max_d: LocalDate?
+        val n_rows: Long
+    }
+
+    /** gaps-and-islands 输出投影 */
+    interface GapIslandProjection {
+        val seg_from: LocalDate?
+        val seg_to: LocalDate?
+    }
 }

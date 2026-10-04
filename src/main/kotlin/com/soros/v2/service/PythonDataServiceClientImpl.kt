@@ -155,11 +155,19 @@ class PythonDataServiceClientImpl(
 
     /** 请求区间是否超阈值（backfill profile 判定；internal 供单测直接验证边界语义） */
     internal fun requestRangeExceeds(request: DailyBarsBatchRequest, days: Long): Boolean = try {
-        val start = LocalDate.parse(request.startDate)
-        val end = LocalDate.parse(request.endDate)
-        ChronoUnit.DAYS.between(start, end) > days
+        if (request.items.isNotEmpty()) {
+            // items 模式：任一段超阈值即判定 backfill（保守，与 codes 路径同一阈值语义）
+            request.items.any {
+                ChronoUnit.DAYS.between(LocalDate.parse(it.startDate), LocalDate.parse(it.endDate)) > days
+            }
+        } else {
+            // codes+dates 模式（向后兼容；init 块保证非空请求下 startDate/endDate 非 null）
+            val start = LocalDate.parse(request.startDate!!)
+            val end = LocalDate.parse(request.endDate!!)
+            ChronoUnit.DAYS.between(start, end) > days
+        }
     } catch (e: Exception) {
-        logger.warn("[daily-bars-batch] 日期解析失败按默认 profile：start={} end={} error={}", request.startDate, request.endDate, e.message)
+        logger.warn("[daily-bars-batch] 日期解析失败按默认 profile：items={} start={} end={} error={}", request.items.size, request.startDate, request.endDate, e.message)
         false
     }
 
