@@ -60,6 +60,8 @@ soros:
     max-codes-per-batch: 1000               # Python /daily-bars/batch batch_max_codes 硬上限
     max-retries-per-batch: 2                # 失败批重试次数
     sample-check-codes: 3                   # 派生列补算后抽查对拍的股票数（§六.6 ⑤）
+  calibration:
+    cron: "-"                               # 2026-10-04 停用：初期对拍未见系统性偏差，流量让给数据拉取；恢复时改为原 cron "0 13,43 * * * *"
   sentiment:
     big-meat-threshold: 5.0
     big-face-threshold: -5.0
