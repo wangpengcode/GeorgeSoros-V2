@@ -29,11 +29,15 @@ object BackfillClassifier {
     }
 
     /**
-     * 单票分类：库内覆盖 vs 期望窗口 → 缺失 segment 清单（0..N 条）。
+     * 单票分类（2026-10-05 计划语义重写：整窗拉齐，不做洞级拆分）。
      *
-     * @param midSegments   中间洞 provider（= StockHistoryRepository.findMissingDateIslands 的包装；
-     *                      仅当 nRows < countOpenDays 时调用）。返回缺失开市日 islands（升序）。
-     * @param isVerifiedEmpty 与 stock_history_gap_check 完全重合判定（exact match code+seg_from+seg_to）
+     * 未覆盖缺失天数 = 窗口开市日数 − 库内行数 − gap_check 已验证空天数；
+     * = 0 → 全齐（或缺失日全部已验证停牌）→ 零 segment（零外部请求铁律）；
+     * > 0 → 产出**一个整窗段** [expectedStart, expectedEnd]——每票成本=一次外部链，
+     * 与洞数无关（用户口径「一次性把所有股票的数据拉齐然后来检查」；窗内已有行随段
+     * 拉回、merge upsert 幂等无害）。
+     *
+     * @param verifiedCoveredDays 该票 gap_check 台账覆盖的开市日数（Planner 一次聚合查询提供）
      */
     fun classifyStock(
         code: String,
@@ -41,36 +45,14 @@ object BackfillClassifier {
         expectedStart: LocalDate,
         expectedEnd: LocalDate,
         cal: TradingDayLookup,
-        midSegments: (String, LocalDate, LocalDate) -> List<Pair<LocalDate, LocalDate>>,
-        isVerifiedEmpty: (String, LocalDate, LocalDate) -> Boolean,
+        verifiedCoveredDays: Long,
     ): List<FetchSegment> {
         if (expectedStart > expectedEnd) return emptyList()
-        val segments = mutableListOf<FetchSegment>()
-        val minD = span.minD
-        val maxD = span.maxD
-        val nRows = span.nRows
-        if (minD == null || maxD == null || nRows == 0L) {
-            // 无数据：整窗一段
-            segments += FetchSegment(code, expectedStart, expectedEnd, SegmentReason.NO_DATA)
-            return segments
-        }
-        // 头缺：min_d > expectedStart
-        if (minD > expectedStart) {
-            segments += FetchSegment(code, expectedStart, minD.minusDays(1), SegmentReason.HEAD)
-        }
-        // 尾缺：max_d < expectedEnd，段起点吸附 maxD 后下一开市日（+1 吸附等价）
-        if (maxD < expectedEnd) {
-            val tailFrom = cal.nextTradingDayAfter(maxD) ?: return segments // 理论不可达：expectedEnd 在其后必有开市日
-            segments += FetchSegment(code, tailFrom, expectedEnd, SegmentReason.TAIL)
-        }
-        // 中间洞：行数 < [minD,maxD] 开市日数
-        val openDays = cal.countOpenDaysInclusive(minD, maxD)
-        if (nRows < openDays) {
-            val gaps = midSegments(code, minD, maxD)
-                .filter { (f, t) -> !isVerifiedEmpty(code, f, t) }
-            segments += gaps.map { FetchSegment(code, it.first, it.second, SegmentReason.MID) }
-        }
-        return segments
+        val openDays = cal.countOpenDaysInclusive(expectedStart, expectedEnd)
+        val missingUncovered = (openDays - span.nRows - verifiedCoveredDays).coerceAtLeast(0)
+        if (missingUncovered == 0L) return emptyList()
+        val reason = if (span.nRows == 0L) SegmentReason.NO_DATA else SegmentReason.FULL
+        return listOf(FetchSegment(code, expectedStart, expectedEnd, reason))
     }
 
     /**

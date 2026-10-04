@@ -12,11 +12,15 @@ import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
 
 /**
- * 回填重跑计划实现（库内驱动，零外部请求）：
- * 1. 防御性 ensureLoaded()（日历是计划的硬依赖，失败 → BusinessException，不再 fail-open）；
- * 2. 全量有效股票清单（非 ST/非退市，ST 隔离铁律）→ 每票库内覆盖聚合（aggregateCoverageByCodes）；
- * 3. 期望窗口 A 计算（起点=max(from, ipo) 吸附首个开市日，终点吸附 ≤to 最后开市日）→ BackfillClassifier 分类；
- * 4. MID 中间洞由 findMissingDateIslands 产出，与 stock_history_gap_check 完全重合的段被排除（exact-match）。
+ * 回填重跑计划实现（库内驱动，零外部请求；2026-10-05 语义重写：整窗拉齐，不做洞级拆分）：
+ * 1. 防御性 ensureLoaded()（日历是计划的硬依赖，失败 fail-open 用库内日历继续）；
+ * 2. stock_info 全量有效股票清单（非 ST/非退市，ST 隔离铁律）→ 每票库内覆盖聚合；
+ * 3. 期望窗口计算（起点=max(from, ipo) 吸附首个开市日，终点吸附 ≤to 最后开市日）；
+ * 4. 单票判定：未覆盖缺失 = 窗口开市日 − 库内行数 − gap_check 台账覆盖天数；
+ *    = 0 → 跳过（全齐或缺失日全部已验证停牌）；> 0 → **一个整窗段**（每票成本=一次外部链，与洞数无关）；
+ * 5. 排序（stock_info 驱动，用户口径「先看 stock_info 决定哪些优先拉」）：
+ *    有部分数据的票优先（大概率能落库真数据）→ 无数据票垫底；组内按 code 升序。
+ * 洞级 islands（findMissingDateIslands）保留供拉齐后检查报告，不再驱动拉取。
  */
 @Service
 class BackfillPlanServiceImpl(
@@ -38,8 +42,11 @@ class BackfillPlanServiceImpl(
 
         val coverageByCode = stockHistoryRepository.aggregateCoverageByCodes(stocks.map { it.code })
             .associateBy { it.code }
+        val coveredDaysByCode = gapCheckRepository.coveredTradingDaysByCode()
+            .associate { it.code to it.coveredDays }
 
-        val segments = mutableListOf<FetchSegment>()
+        val dataSegments = mutableListOf<FetchSegment>()   // 有部分数据的缺失票（优先）
+        val noDataSegments = mutableListOf<FetchSegment>() // 无数据票（垫底）
         var completeCodes = 0
         var zeroWindowCodes = 0
         for (stock in stocks) {
@@ -53,15 +60,11 @@ class BackfillPlanServiceImpl(
                 to = to,
                 cal = tradingDayLookup,
             )
-            if (window == null) {
+            if (window == null || window.first > window.second) {
                 zeroWindowCodes++
                 continue
             }
             val (expectedStart, expectedEnd) = window
-            if (expectedStart > expectedEnd) {
-                zeroWindowCodes++
-                continue
-            }
 
             val stockSegments = BackfillClassifier.classifyStock(
                 code = stock.code,
@@ -69,19 +72,18 @@ class BackfillPlanServiceImpl(
                 expectedStart = expectedStart,
                 expectedEnd = expectedEnd,
                 cal = tradingDayLookup,
-                midSegments = { code, minD, maxD ->
-                    findMissingIslands(code, minD, maxD)
-                },
-                isVerifiedEmpty = { code, segFrom, segTo ->
-                    gapCheckRepository.existsByCodeAndRange(code, segFrom, segTo)
-                },
+                verifiedCoveredDays = coveredDaysByCode[stock.code] ?: 0L,
             )
             if (stockSegments.isEmpty()) {
                 completeCodes++
+            } else if (span.minD != null) {
+                dataSegments += stockSegments
             } else {
-                segments += stockSegments
+                noDataSegments += stockSegments
             }
         }
+        // stock_info 驱动优先级：有部分数据的缺失票 → 无数据票；组内 code 升序
+        val segments = dataSegments.sortedBy { it.code } + noDataSegments.sortedBy { it.code }
         logger.info(
             "[backfill-plan] 构建完成：from={} to={} codes={} complete={} zeroWindow={} segments={}",
             from, to, stocks.size, completeCodes, zeroWindowCodes, segments.size,
@@ -108,14 +110,4 @@ class BackfillPlanServiceImpl(
             logger.warn("[backfill-plan] 交易日历加载失败（fail-open 用库内既有日历继续）：{}", e.message)
         }
     }
-
-    /** 中间洞 gaps-and-islands（calendar 反连接）；仅当 n_rows < 开市日数 时由分类器调用 */
-    private fun findMissingIslands(code: String, minD: LocalDate, maxD: LocalDate): List<Pair<LocalDate, LocalDate>> =
-        stockHistoryRepository.findMissingDateIslands(code)
-            .mapNotNull { island ->
-                val from = island.seg_from
-                val to = island.seg_to
-                if (from != null && to != null) Pair(from, to) else null
-            }
-            .filter { (f, t) -> !f.isBefore(minD) && !t.isAfter(maxD) }
 }

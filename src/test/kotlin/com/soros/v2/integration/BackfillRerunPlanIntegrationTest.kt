@@ -295,15 +295,16 @@ class BackfillRerunPlanIntegrationTest {
     // ==================== 33. 端到端：BackfillJob.run ====================
 
     @Test
-    fun `testEndToEnd completeZeroFetch headTailBySegment gapCheckRecordedMidExcluded`() {
-        // given: 日历 4 日 + 5 只（全齐/头缺/尾缺/洞+已验证空/无数据）
+    fun `testEndToEnd completeZeroFetch fullWindowOneSegmentPerCode gapCheckCoveredSkipped`() {
+        // given: 日历 4 日 + 5 只（全齐/头缺/尾缺/缺失全被台账覆盖/无数据）
+        // 2026-10-05 整窗拉齐语义：部分缺失票产出恰一个整窗段；台账覆盖的缺失日计入已覆盖
         seedCalendar(d1, d2, d3, d4)
         listOf("600001", "600002", "600003", "600004", "600005").forEach { seedInfo(it) }
         seedBar("600001", d1); seedBar("600001", d2); seedBar("600001", d3); seedBar("600001", d4) // 全齐
-        seedBar("600002", d3); seedBar("600002", d4)                                             // 头缺 d1,d2
-        seedBar("600003", d1); seedBar("600003", d2); seedBar("600003", d3)                       // 尾缺 d4
-        seedBar("600004", d1); seedBar("600004", d2); seedBar("600004", d4)                       // 洞 d3
-        seedGapCheck("600004", d3, d3)                                                             // 洞已验证空 → 排除
+        seedBar("600002", d3); seedBar("600002", d4)                                             // 缺 d1,d2（2 天）
+        seedBar("600003", d1); seedBar("600003", d2); seedBar("600003", d3)                       // 缺 d4（1 天）
+        seedBar("600004", d1); seedBar("600004", d2); seedBar("600004", d4)                       // 缺 d3，台账已覆盖
+        seedGapCheck("600004", d3, d3)                                                             // 覆盖 1 天 → 未覆盖缺失=0
         // 600005 无数据 → NO_DATA 整窗 [d1,d4]
 
         val python = FakePythonClient(fetchable = setOf("600002", "600003"))
@@ -331,19 +332,20 @@ class BackfillRerunPlanIntegrationTest {
         // when
         runBlocking { job.run(d1, d4) { } }
 
-        // then ①: 全齐票 600001 零请求；头/尾/无数据票按段拉取；被排除洞票 600004 不进请求
+        // then ①: 全齐票 600001 与台账全覆盖票 600004 零请求；缺失票各恰一个整窗段
         val fetched = python.fetchedItems
         assertEquals(
             setOf("600002", "600003", "600005"),
             fetched.map { it.code }.toSet(),
-            "全齐/被排除段不得进入请求（铁律）",
+            "全齐/台账全覆盖票不得进入请求（铁律）",
         )
         val byCode = fetched.associateBy { it.code }
-        assertEquals(d1.toString() to d2.toString(), byCode["600002"]!!.startDate to byCode["600002"]!!.endDate, "头缺段 [d1,d2]")
-        assertEquals(d4.toString() to d4.toString(), byCode["600003"]!!.startDate to byCode["600003"]!!.endDate, "尾缺段 [d4,d4]")
+        assertEquals(d1.toString() to d4.toString(), byCode["600002"]!!.startDate to byCode["600002"]!!.endDate, "部分缺失 → 整窗段 [d1,d4]")
+        assertEquals(1, fetched.count { it.code == "600002" }, "每票恰一段（不做洞级拆分）")
+        assertEquals(d1.toString() to d4.toString(), byCode["600003"]!!.startDate to byCode["600003"]!!.endDate, "尾缺 → 整窗段 [d1,d4]")
         assertEquals(d1.toString() to d4.toString(), byCode["600005"]!!.startDate to byCode["600005"]!!.endDate, "无数据整窗 [d1,d4]")
 
-        // then ②: gap_check 落库（600005 HTTP200+0 行 → rows_returned=0）；600004 预置行保留（MID 排除不再拉）
+        // then ②: gap_check 落库（600005 HTTP200+0 行 → rows_returned=0）；600004 预置台账行保留
         val recorded = jdbc.queryForMap(
             "SELECT code, seg_from, seg_to, rows_returned FROM stock_history_gap_check WHERE code = '600005'",
         )
@@ -356,21 +358,21 @@ class BackfillRerunPlanIntegrationTest {
             Date.valueOf(d3),
             Date.valueOf(d3),
         )
-        assertEquals(1L, excludedStill, "MID 排除段不再重复拉取，预置 gap_check 行保留")
+        assertEquals(1L, excludedStill, "台账覆盖票零请求，预置 gap_check 行保留")
 
-        // then ③: 头/尾缺段已补齐落库
+        // then ③: 缺失日已补齐落库
         val headFilled = jdbc.queryForObject(
             "SELECT count(*) FROM stock_history WHERE code = '600002' AND trade_date BETWEEN ? AND ?",
             Long::class.java,
             Date.valueOf(d1),
             Date.valueOf(d2),
         )
-        assertEquals(2L, headFilled, "600002 头缺段 [d1,d2] 已补齐")
+        assertEquals(2L, headFilled, "600002 缺失日 [d1,d2] 已补齐")
         val tailFilled = jdbc.queryForObject(
             "SELECT count(*) FROM stock_history WHERE code = '600003' AND trade_date = ?",
             Long::class.java,
             Date.valueOf(d4),
         )
-        assertEquals(1L, tailFilled, "600003 尾缺段 [d4,d4] 已补齐")
+        assertEquals(1L, tailFilled, "600003 缺失日 [d4] 已补齐")
     }
 }
