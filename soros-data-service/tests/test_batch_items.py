@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 
-from adapters.base import DataRouter, SourceError
+from adapters.base import CapabilityError, DataRouter, SourceError
 from config import settings
 from helpers import StubAdapter, make_bar
 
@@ -177,6 +177,105 @@ def test_items_over_batch_max_codes_422(monkeypatch, make_client):
 # ──────────────────────────────────────────────────────────────────────────────
 # 40. items 空 + codes+dates 路径 → 向后兼容（原契约测试不回归）
 # ──────────────────────────────────────────────────────────────────────────────
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 41-44. 全源空结果判定（2026-10-04 生产事故③）：证据分类而非裸字符串比对
+#
+# 生产链（000007 停牌洞段）：akshare/baostock/tencent 空结果（正面证据）+ mootdx/sse
+# 不支持该复权（结构性无证据）+ yahoo 429（限流无证据）→ 原判定要求所有 part 以
+# "空结果" 结尾 → 误归 failed[] → 停牌段永远无法记 verified-empty，每次重跑空拉。
+# 证据分类语义：
+# - 空结果 = 源成功查询且确认无数据（正面证据）；
+# - 不支持该复权 = 结构性无证据（该源无法服务此复权，不构成反证）；
+# - 429/Too Many Requests = 限流无证据（源未下判断）；
+# - 其余（超时/网络/异常）= 真实故障 → 整体归 failed（绝不误判停牌）。
+# 判停牌充要：≥1 个空结果正面证据 且 0 个真实故障。
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _suspend_like_router(akshare_bars=None):
+    return DataRouter([
+        StubAdapter("baostock", bars=lambda *a: [], delisted=set()),
+        StubAdapter("akshare", bars=akshare_bars if akshare_bars is not None else (lambda *a: [])),
+        StubAdapter("mootdx", bars=CapabilityError("mootdx: 不支持 qfq 复权（mootdx/TDX 仅提供不复权日K）")),
+    ])
+
+
+def test_items_suspend_mixed_capability_and_empty_placeholder(make_client):
+    # 41. 生产链复现：空结果 ×2 + 不支持该复权 → 占位非 failed（原判定误归 failed）
+    client = make_client(_suspend_like_router())
+    resp = client.post("/api/v1/daily-bars/batch", json={
+        "items": [{"code": "000007", "start_date": "2022-06-20", "end_date": "2022-06-30"}],
+    })
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["failed"] == [], "空结果+能力缺失混合必须判停牌占位，不得归 failed"
+    assert body["results"]["000007"]["count"] == 0
+    assert body["results"]["000007"]["data"] == []
+
+
+def test_items_suspend_with_rate_limit_429_placeholder(make_client):
+    # 42. 混入 429 限流（源未下判断、无证据）→ 仍有 ≥1 空结果正面证据 → 占位
+    def rate_limited(*a):
+        raise SourceError("yahoo 拉取失败: 429 Client Error: Too Many Requests")
+
+    client = make_client(_suspend_like_router(akshare_bars=rate_limited))
+    resp = client.post("/api/v1/daily-bars/batch", json={
+        "items": [{"code": "000007", "start_date": "2023-04-24", "end_date": "2023-05-05"}],
+    })
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["failed"] == [], "429 限流非反证，空结果正面证据在即判停牌占位"
+    assert body["results"]["000007"]["count"] == 0
+
+
+def test_items_suspend_with_circuit_breaker_open_placeholder(make_client):
+    # 45. 混入「熔断 open」（SourceUnavailableError：未发起请求、源未下判断，base.py 错误分类学）
+    # → 无证据类，与 429 同理；≥1 空结果正面证据在场即判停牌占位
+    # （2026-10-04 生产：000008/000016 段 tencent/baostock/akshare 空结果 ×3 + yahoo 熔断 open → 误归 failed）
+    def cb_open(*a):
+        raise SourceError("yahoo: 熔断 open")
+
+    client = make_client(_suspend_like_router(akshare_bars=cb_open))
+    resp = client.post("/api/v1/daily-bars/batch", json={
+        "items": [{"code": "000008", "start_date": "2022-07-01", "end_date": "2022-07-10"}],
+    })
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["failed"] == [], "熔断 open 非反证（源未发起请求），空结果正面证据在即判停牌占位"
+    assert body["results"]["000008"]["count"] == 0
+
+
+def test_items_real_failure_with_empty_goes_failed(make_client):
+    # 43. 空结果 + 真实故障（网络超时）→ 保守归 failed，绝不误判停牌
+    def timeout(*a):
+        raise SourceError("baostock 网络超时")
+
+    client = make_client(_suspend_like_router(akshare_bars=timeout))
+    resp = client.post("/api/v1/daily-bars/batch", json={
+        "items": [{"code": "000007", "start_date": "2022-06-20", "end_date": "2022-06-30"}],
+    })
+    body = resp.json()
+    assert "000007" not in body["results"], "真实故障在场不得占位"
+    assert len(body["failed"]) == 1 and body["failed"][0]["code"] == "000007"
+
+
+def test_items_all_capability_no_positive_evidence_goes_failed(make_client):
+    # 44. 全部「不支持该复权」（零正面证据）→ failed：没有任何源真正查过，不得判停牌
+    def capability(*a):
+        raise CapabilityError("不支持 qfq 复权")
+
+    client = make_client(DataRouter([
+        StubAdapter("baostock", bars=capability, delisted=set()),
+        StubAdapter("akshare", bars=capability),
+        StubAdapter("mootdx", bars=capability),
+    ]))
+    resp = client.post("/api/v1/daily-bars/batch", json={
+        "items": [{"code": "000007", "start_date": "2022-06-20", "end_date": "2022-06-30"}],
+    })
+    body = resp.json()
+    assert "000007" not in body["results"], "零正面证据不得判停牌"
+    assert len(body["failed"]) == 1
+
 
 def test_items_empty_codes_path_backward_compat(make_client):
     client = make_client(_window_router())

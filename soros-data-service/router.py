@@ -85,11 +85,20 @@ def create_router(data_router: DataRouter) -> APIRouter:
         )
 
     def _is_all_sources_empty(errors: List[str]) -> bool:
-        """errors 是否「所有源都是空结果」→ 停牌占位（results[code] count=0 data=[]，非 failed）。
+        """errors 是否「证据上可判停牌」→ 停牌占位（results[code] count=0 data=[]，非 failed）。
 
-        语义（重跑计划 verified-empty 铁律）：全源「空结果」= 该票该段无数据（停牌/未上市），
-        非故障——Kotlin 侧据此记录 verified-empty，防反复空拉；任何源真实故障（SourceError）
-        一律归 failed[]（绝不误判为停牌）。
+        语义（重跑计划 verified-empty 铁律 + 2026-10-04 生产事故③）：按证据分类逐源判定，
+        而非要求所有 part 以「空结果」结尾——生产中 mootdx/sse 报「不支持该复权」、yahoo 报
+        429 限流，把真停牌段污染成 failed[]，永远无法记 verified-empty、每次重跑空拉。
+
+        证据分类（_fetch_stock_daily 聚合串 part 级，闭合对齐 base.py 错误分类学）：
+        - 「空结果」结尾 = 源成功查询且确认无数据（正面证据）；
+        - 无证据类（源未对数据存在性下判断，不构成反证）：
+          「不支持该复权」= CapabilityError 结构性无证据；
+          「熔断 open」= SourceUnavailableError 未发起请求；
+          429/Too Many Requests = 限流未下判断；
+        - 其余（SourceError 超时/网络/登录失败、ParameterError）= 真实故障 → 绝不判停牌，归 failed[]。
+        判停牌充要：≥1 个空结果正面证据 且 0 个真实故障。
         """
         if not errors:
             return False
@@ -98,7 +107,15 @@ def create_router(data_router: DataRouter) -> APIRouter:
         if not reason.startswith("All sources failed"):
             return False
         parts = reason.split(": ", 1)[1].split("; ") if ": " in reason else []
-        return bool(parts) and all(p.endswith("空结果") for p in parts)
+        if not parts:
+            return False
+
+        def is_real_failure(part: str) -> bool:
+            return not (part.endswith("空结果") or "不支持该复权" in part or "熔断 open" in part
+                        or "429" in part or "Too Many Requests" in part)
+
+        has_empty = any(p.endswith("空结果") for p in parts)
+        return has_empty and not any(is_real_failure(p) for p in parts)
 
     def _placeholder_source(errors: List[str]) -> str:
         """全源空结果占位的 source 标签：取 failover 序第一个源名（仅占位，非真实源归因）。"""
