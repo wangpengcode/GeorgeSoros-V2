@@ -74,6 +74,15 @@ class BaseAdapter(abc.ABC):
     def health_state(self) -> str:
         return self.circuit_breaker.health()
 
+    @property
+    def serving_source(self) -> str:
+        """本次调用实际服务的子源标签（默认=source_name；akshare 内部 failover 覆盖）。
+
+        Router 结果 source 如实透传 → stock_history.data_source 归因对拍可区分
+        （如 akshare 内部 EM→新浪切换标注 akshare-sina，varchar(20) 放得下）。
+        """
+        return self.source_name
+
     # ---- 统一守卫入口：封禁检查 → 限流 → 熔断 → 调用 → 成败登记 ----
     def _call_guarded(self, sync_fn, *args):
         # IPGuard 封禁检查（先于一切）：banned = 小时级封禁语义，与熔断 60s 分离，
@@ -229,7 +238,7 @@ class DataRouter:
             try:
                 bars = adapter.fetch_daily_bars(code, start, end, adjust)
                 if bars:
-                    return {"source": adapter.source_name, "count": len(bars), "data": bars}, []
+                    return {"source": adapter.serving_source, "count": len(bars), "data": bars}, []
                 errors.append(f"{adapter.source_name}: 空结果")
             except SourceUnavailableError as exc:
                 errors.append(f"{adapter.source_name}: {exc}")
@@ -248,7 +257,7 @@ class DataRouter:
             try:
                 bars = adapter.fetch_index_daily(code, start, end, adjust)
                 if bars:
-                    return {"source": adapter.source_name, "count": len(bars), "data": bars}, []
+                    return {"source": adapter.serving_source, "count": len(bars), "data": bars}, []
                 errors.append(f"{adapter.source_name}: 空结果")
             except SourceUnavailableError as exc:
                 errors.append(f"{adapter.source_name}: {exc}")

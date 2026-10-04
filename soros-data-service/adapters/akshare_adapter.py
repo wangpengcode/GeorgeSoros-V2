@@ -26,6 +26,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from datetime import datetime, timedelta
 from typing import List
 
@@ -65,6 +66,9 @@ def _f(v) -> float:
 class AkshareAdapter(BaseAdapter):
     source_name = "akshare"
 
+    # 新浪 raw 窗口前扩（自然日）：供首行涨跌幅计算取前一交易日昨收（sina 全量拉取+本地切片，前扩有效）
+    SINA_RAW_LOOKBACK_DAYS = 10
+
     def __init__(self, circuit_breaker, rate_limiter):
         super().__init__(circuit_breaker, rate_limiter)
         self._supports_stock_list = True
@@ -74,9 +78,41 @@ class AkshareAdapter(BaseAdapter):
         self._supports_fundamentals = True   # stock_yjbb_em（PLAN §11.1，仅 akshare）
         self._supports_board_members = True  # stock_board_industry/concept_*_em（PLAN §4.8，仅 akshare）
         self._board_members_degraded = False  # 板块成分拉取降级标记（单板块失败置 True，响应透传）
+        self._serving = threading.local()    # 本次调用实际子源标注（线程本地，线程池并发安全）
+
+    @property
+    def serving_source(self) -> str:
+        """本次调用实际服务的子源：akshare（EM）/ akshare-sina（东财被拒后新浪接管）。"""
+        return getattr(self._serving, "name", "akshare")
 
     # ---- 日 K 线（PLAN §5.4）----
     def _sync_fetch_daily_bars(self, code: str, start: str, end: str, adjust: str) -> List[dict]:
+        """双链内部 failover：EM(push2his) → 新浪（2026-10-04 东财 WAF 整族拒连）。
+
+        - EM 失败不外抛：不炸到 Router（省 baostock 接管）、不计 IPGuard 封禁窗口
+          （否则 akshare 被 ban 会整体跳过，新浪链路永远轮不到）
+        - 双链全失败才抛 SourceError，带两侧原因
+        - 归因经 serving_source 线程本地标注，Router 结果如实透传
+        """
+        em_reason: str
+        try:
+            bars = self._fetch_em_daily(code, start, end, adjust)
+            self._serving.name = "akshare"
+            return bars
+        except Exception as exc:  # noqa: BLE001 - EM 故障转新浪（见上，刻意不计熔断/封禁）
+            # 注意：`as exc` 名字在块结束即被 Python 删除，必须先固化文本
+            em_reason = f"{type(exc).__name__}: {exc}"
+            logger.warning("akshare: EM 日K失败转新浪 (%s)", em_reason[:120])
+        try:
+            bars = self._fetch_sina_daily(code, start, end, adjust)
+        except Exception as exc:  # noqa: BLE001
+            raise SourceError(
+                f"akshare 日K失败: em({em_reason}); sina({exc})"
+            ) from exc
+        self._serving.name = "akshare-sina"
+        return bars
+
+    def _fetch_em_daily(self, code: str, start: str, end: str, adjust: str) -> List[dict]:
         df = ak.stock_zh_a_hist(
             symbol=code,
             period="daily",
@@ -102,6 +138,69 @@ class AkshareAdapter(BaseAdapter):
                 "prev_close": _f(row["昨收"]) if "昨收" in row.index else None,
             })
         return bars
+
+    def _fetch_sina_daily(self, code: str, start: str, end: str, adjust: str) -> List[dict]:
+        """新浪链路（finance.sina.com.cn，非东财基础设施，不受东财 WAF 影响）。
+
+        口径补齐（穿透确认）：
+        - 新浪无涨跌幅列 → 双拉：不复权（前扩 10 自然日供首行昨收）计算真实涨跌幅
+        - turnover 源为小数（0.003561）→ ×100 百分比对齐东财口径
+        - volume 已是股（东财是手×100）→ 不再乘系数
+        - adjust=none 时单拉 raw 即可（价格即不复权，涨跌幅同源计算）
+        """
+        symbol = ("sh" if code.startswith(("6", "9")) else "sz") + code
+        raw_df = self._sina_call(symbol, start, end, "", lookback=True)
+        price_df = raw_df
+        if adjust in ("qfq", "hfq"):
+            price_df = self._sina_call(symbol, start, end, adjust, lookback=False)
+        if price_df is None or price_df.empty:
+            return []
+        # raw 收盘按日期索引 → 前一交易日昨收表
+        raw_close: dict = {}
+        if raw_df is not None and not raw_df.empty:
+            raw_close = {str(d)[:10]: float(c) for d, c in zip(raw_df["date"], raw_df["close"])}
+        prev_close: dict = {}
+        for prev_d, cur_d in zip(sorted(raw_close), sorted(raw_close)[1:]):
+            prev_close[cur_d] = raw_close[prev_d]
+        bars = []
+        for _, row in price_df.iterrows():
+            d = str(row["date"])[:10]
+            if d < start or d > end:  # 防御：窗口外过滤（前扩/raw 全量的行不输出）
+                continue
+            prev = prev_close.get(d)
+            change = round((float(row["close"]) / prev - 1) * 100, 4) if prev else 0.0
+            bars.append({
+                "date": d,
+                "code": code,
+                "open": _f(row["open"]),
+                "high": _f(row["high"]),
+                "low": _f(row["low"]),
+                "close": _f(row["close"]),
+                "volume": _f(row["volume"]),               # 新浪已是股
+                "amount": _f(row["amount"]),               # 元
+                "change_percent": change,                  # 不复权真实涨跌幅（raw 计算）
+                "turnover": _f(row.get("turnover")) * 100,  # 小数 → 百分比
+                "prev_close": prev,                        # 传输字段不落库
+            })
+        return bars
+
+    def _sina_call(self, symbol: str, start: str, end: str, adjust: str, lookback: bool = False):
+        """新浪单次调用（内层也要过限流：raw+qfq 双拉是两次真实 HTTP）。
+
+        start/end 为 YYYY-MM-DD；sina 入参为 YYYYMMDD。lookback=True 时 start 前扩。
+        """
+        if not self.rate_limiter.acquire():
+            raise RuntimeError("akshare(sina): 限流等待超时")
+        start_param = start
+        if lookback:
+            start_param = (datetime.strptime(start, "%Y-%m-%d")
+                           - timedelta(days=self.SINA_RAW_LOOKBACK_DAYS)).strftime("%Y-%m-%d")
+        return ak.stock_zh_a_daily(
+            symbol=symbol,
+            start_date=start_param.replace("-", ""),
+            end_date=end.replace("-", ""),
+            adjust=adjust,
+        )
 
     # ---- 股票列表 ----
     def _stock_list_df(self):
