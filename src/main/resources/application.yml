@@ -51,7 +51,7 @@ soros:
     rolling-window-days: 10                 # §4.7 防线④
   python-client:
     base-url: http://localhost:8000         # Python FastAPI（§13.2 超时按 profile）
-    backfill-response-timeout: 600s         # 50 股/批 × 5 年节流拉取实测 60-90s+（原 60s 必超时且重试造成重复外拉）
+    backfill-response-timeout: 1800s        # 2026-10-04 提到 30min：全源间隔≥15s 后 50 股/批实拉 10-15min（600s 必超时，整批白烧 20min 全失败实测）
   backfill:
     batch-size: 50                          # 每次 /daily-bars/batch 请求股票数（§4.4 对齐）
     batch-pause-ms: 1000                    # 批间刻意停顿（间歇性获取铁律，防 IP 封禁）

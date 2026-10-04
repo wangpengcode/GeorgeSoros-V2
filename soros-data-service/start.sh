@@ -10,5 +10,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 export SOROS_RATE_BAOSTOCK="${SOROS_RATE_BAOSTOCK:-0.06}"
+# yahoo 403 配额冷却期临时摘出分片池（3 路并行；恢复后改回 baostock,akshare,yahoo,tencent）
+export SOROS_SHARD_SOURCES="${SOROS_SHARD_SOURCES:-baostock,akshare,tencent}"
 
 exec .venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000
