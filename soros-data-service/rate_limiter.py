@@ -14,12 +14,22 @@ import time
 
 
 class TokenBucket:
-    def __init__(self, rate: float, capacity: float | None = None, jitter: float = 0.0, name: str = ""):
+    def __init__(
+        self,
+        rate: float,
+        capacity: float | None = None,
+        jitter: float = 0.0,
+        name: str = "",
+        acquire_timeout_seconds: float = 30.0,
+    ):
         self.rate = float(rate)
         # 容量下限 1.0：容量 < 1（如 rate=0.5）时令牌永远攒不到扣减阈值，acquire 必超时
         self.capacity = float(capacity if capacity is not None else max(self.rate, 1.0))
         self.jitter = float(jitter)
         self.name = name
+        # 实例级 acquire 默认超时（2026-10-04 修 B 完全体）：base._call_guarded 调
+        # acquire() 不传参时用此值——此前 config.rate_acquire_timeout_seconds 是死配置
+        self._acquire_timeout = float(acquire_timeout_seconds)
         self._tokens = self.capacity
         self._last = time.monotonic()
         self._lock = threading.Lock()
@@ -39,8 +49,13 @@ class TokenBucket:
                 return True
             return False
 
-    def acquire(self, timeout: float = 30.0) -> bool:
-        """阻塞式：直到取到令牌或超时。成功后应用抖动。"""
+    def acquire(self, timeout: float | None = None) -> bool:
+        """阻塞式：直到取到令牌或超时。成功后应用抖动。
+
+        timeout=None → 用实例超时（构造时由 settings.rate_acquire_timeout_seconds 接线）；
+        显式传参优先。"""
+        if timeout is None:
+            timeout = self._acquire_timeout
         deadline = time.monotonic() + timeout
         while not self.try_acquire():
             if time.monotonic() >= deadline:

@@ -65,19 +65,36 @@ class BaostockAdapter(BaseAdapter):
             logger.info("baostock 登录成功")
         return True
 
+    # ---- 会话过期自愈（2026-10-04 修 A）----
+    def _query_with_session_retry(self, query_fn):
+        """首查返回"用户未登录"→ 登录态重置 + 重登录 + 重试一次；仍败才抛错。
+
+        背景：服务端会话过期后 _logged_in 粘死为 True，每票必败（回填实测
+        16 连败）→ 熔断 → 分片 failover 全堆下游源 → 下游限流等待超时。
+        重试恰好一次，绝不无限循环。
+        """
+        self._ensure_login()
+        rs = query_fn()
+        if rs.error_code != "0" and "用户未登录" in (rs.error_msg or ""):
+            logger.warning("baostock 会话过期，重登录后重试一次")
+            with self._login_lock:
+                self._logged_in = False
+            self._ensure_login()
+            rs = query_fn()
+        return rs
+
     # ---- 日 K 线（PLAN §5.3）----
     def _sync_fetch_daily_bars(self, code: str, start: str, end: str, adjust: str) -> List[dict]:
-        self._ensure_login()
         bs_code = to_baostock_code(code)
         adjust_flag = BAOSTOCK_ADJUST_MAP.get(adjust, "2")
-        rs = bs.query_history_k_data_plus(
+        rs = self._query_with_session_retry(lambda: bs.query_history_k_data_plus(
             bs_code,
             "date,code,open,high,low,close,volume,amount,pctChg,turn,preclose,tradestatus",
             start_date=start,
             end_date=end,
             frequency="d",
             adjustflag=adjust_flag,
-        )
+        ))
         if rs.error_code != "0":
             raise SourceError(f"baostock 查询失败: {rs.error_msg}")
 
@@ -108,8 +125,7 @@ class BaostockAdapter(BaseAdapter):
         return self._call_guarded(self._sync_fetch_stock_basic_rows)
 
     def _sync_fetch_stock_basic_rows(self) -> List[dict]:
-        self._ensure_login()
-        rs = bs.query_stock_basic()
+        rs = self._query_with_session_retry(bs.query_stock_basic)
         if rs.error_code != "0":
             raise SourceError(f"baostock query_stock_basic 失败: {rs.error_msg}")
         rows = []

@@ -44,7 +44,8 @@ def build_router() -> DataRouter:
     adapters = [
         BaostockAdapter(
             CircuitBreaker("baostock", **cb_kwargs),
-            TokenBucket(settings.rate_baostock, jitter=0.0, name="baostock"),
+            TokenBucket(settings.rate_baostock, jitter=0.0, name="baostock",
+                        acquire_timeout_seconds=settings.rate_acquire_timeout_seconds),
         ),
         AkshareAdapter(
             CircuitBreaker("akshare", **cb_kwargs),
@@ -52,26 +53,31 @@ def build_router() -> DataRouter:
                 settings.rate_akshare,
                 jitter=settings.akshare_jitter_seconds,  # PLAN §11.1: "AKShare 2 rps + 抖动"
                 name="akshare",
+                acquire_timeout_seconds=settings.rate_acquire_timeout_seconds,
             ),
         ),
         MootdxAdapter(
             CircuitBreaker("mootdx", **cb_kwargs),
-            TokenBucket(settings.rate_mootdx, jitter=0.0, name="mootdx"),
+            TokenBucket(settings.rate_mootdx, jitter=0.0, name="mootdx",
+                        acquire_timeout_seconds=settings.rate_acquire_timeout_seconds),
         ),
         # 第四源（可选）：分片默认池成员 + failover 序尾；0.5 rps + 抖动（海外源，间歇性获取）
         YahooAdapter(
             CircuitBreaker("yahoo", **cb_kwargs),
-            TokenBucket(settings.rate_yahoo, jitter=settings.yahoo_jitter_seconds, name="yahoo"),
+            TokenBucket(settings.rate_yahoo, jitter=settings.yahoo_jitter_seconds, name="yahoo",
+                        acquire_timeout_seconds=settings.rate_acquire_timeout_seconds),
         ),
         # 第五源（可选）：国内独立转发商，qfq/hfq 服务端自算；1 rps + 抖动
         TencentAdapter(
             CircuitBreaker("tencent", **cb_kwargs),
-            TokenBucket(settings.rate_tencent, jitter=settings.tencent_jitter_seconds, name="tencent"),
+            TokenBucket(settings.rate_tencent, jitter=settings.tencent_jitter_seconds, name="tencent",
+                        acquire_timeout_seconds=settings.rate_acquire_timeout_seconds),
         ),
         # 第六源（可选）：上交所行情云（源头级校准腿 + 首次建仓灌历史）；0.5 rps + 抖动
         SseAdapter(
             CircuitBreaker("sse", **cb_kwargs),
-            TokenBucket(settings.rate_sse, jitter=settings.sse_jitter_seconds, name="sse"),
+            TokenBucket(settings.rate_sse, jitter=settings.sse_jitter_seconds, name="sse",
+                        acquire_timeout_seconds=settings.rate_acquire_timeout_seconds),
         ),
     ]
     return DataRouter(adapters)

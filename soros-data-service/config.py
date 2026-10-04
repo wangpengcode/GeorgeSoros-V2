@@ -51,7 +51,10 @@ class Settings:
     rate_mootdx: float = field(default_factory=lambda: _env_float("SOROS_RATE_MOOTDX", 0.06))
     # AKShare 抖动（PLAN §11.1 "2 rps + 抖动"）——随机 sleep [0, jitter) 打散请求
     akshare_jitter_seconds: float = field(default_factory=lambda: _env_float("SOROS_AKSHARE_JITTER", 0.2))
-    rate_acquire_timeout_seconds: float = field(default_factory=lambda: _env_float("SOROS_RATE_ACQUIRE_TIMEOUT", 30.0))
+    # 限流排队等待上限（2026-10-04 修 B：30s→120s）：熔断期分片 failover 堆积下游源，
+    # 15s/次节奏下排 2-3 个就超 30s，把等 35s 能成功的请求变成失败。
+    # 120s 安全：最坏单源扛 2 分片 ≈ 100 票 × 16.7s ≈ 1670s < Spring 批预算 1800s
+    rate_acquire_timeout_seconds: float = field(default_factory=lambda: _env_float("SOROS_RATE_ACQUIRE_TIMEOUT", 120.0))
     # Yahoo（第四源，海外）：0.5 rps + 抖动（外部源间歇性获取铁律）
     rate_yahoo: float = field(default_factory=lambda: _env_float("SOROS_RATE_YAHOO", 0.05))
     yahoo_jitter_seconds: float = field(default_factory=lambda: _env_float("SOROS_YAHOO_JITTER", 0.2))
