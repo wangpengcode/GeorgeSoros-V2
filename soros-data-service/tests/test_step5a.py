@@ -20,7 +20,7 @@ from adapters.base import DataRouter, SourceError
 from helpers import FakeCircuitBreaker, FakeRateLimiter, StubAdapter, make_bar, raise_error
 
 FUNDAMENTALS_KEYS = {"code", "revenue", "net_profit"}
-CROSS_RESULT_KEYS = {"source", "count", "data"}
+CROSS_RESULT_KEYS = {"source", "count", "data", "error"}
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -191,6 +191,10 @@ def test_cross_validate_source_failure_still_keeps_placeholder(make_client):
     assert per_source["baostock"]["count"] == 1
     assert per_source["akshare"]["count"] == 0
     assert per_source["akshare"]["data"] == []
+    # 部署穿透发现：源失败时占位必须有 error 文案（否则静默 0 行无法区分「无数据」与「故障」，
+    # 2026-10-04 东财封禁 + baostock 限流等待超时双双表现为 count=0，排查无门）
+    assert "akshare 故障" in per_source["akshare"]["error"], "失败源必须带 error 文案"
+    assert per_source["baostock"]["error"] is None, "成功源 error=null"
 
 
 def test_cross_validate_invalid_code_422(make_client):

@@ -222,6 +222,7 @@ class CrossSourceResult(BaseModel):
     source: str
     count: int
     data: list[Bar]
+    error: Optional[str] = None  # 源故障文案；None=正常（部署穿透 2026-10-04：静默 0 行不可排查）
 
 
 class CrossValidateResponse(BaseModel):

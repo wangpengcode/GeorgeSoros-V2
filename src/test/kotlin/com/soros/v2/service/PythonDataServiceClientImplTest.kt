@@ -13,6 +13,7 @@ import okhttp3.mockwebserver.MockWebServer
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
@@ -131,6 +132,29 @@ class PythonDataServiceClientImplTest {
         // then: 熔断接线——调用前询问 + 成功登记（清零计数）
         Mockito.verify(circuitBreaker).allowRequest()
         Mockito.verify(circuitBreaker).recordSuccess()
+    }
+
+    @Test
+    fun `testFetchDailyBarsCross parses errorFieldStrictJackson`() {
+        // 2026-10-04 部署穿透：Python CrossSourceResult 增补 error 字段（源故障文案），
+        // strict Jackson（fail-on-unknown-properties=true）必须能解析——DTO 未同步会直接炸解析
+        server.enqueue(
+            MockResponse().setResponseCode(200)
+                .setHeader("Content-Type", "application/json")
+                .setBody(
+                    """
+                    {"status":"ok","results":{"600000":{
+                      "baostock":{"source":"baostock","count":1,"data":[{"code":"600000","date":"2026-09-30","open":10.0,"high":10.0,"low":10.0,"close":10.0,"volume":1000,"amount":10000.0,"change_percent":1.0,"turnover":0.5}],"error":null},
+                      "akshare":{"source":"akshare","count":0,"data":[],"error":"akshare: 限流等待超时"}}},"failed":[]}
+                    """.trimIndent(),
+                ),
+        )
+        val response = runBlocking {
+            client.fetchDailyBarsCross(com.soros.v2.service.dto.CrossValidateRequest(listOf("600000"), "2026-09-30", "2026-09-30"))
+        }
+        val perSource = response.results["600000"] ?: error("results[600000] 不应为 null")
+        assertNull(perSource["baostock"]?.error, "成功源 error=null")
+        assertEquals("akshare: 限流等待超时", perSource["akshare"]?.error, "故障源 error 带文案")
     }
 
     @Test

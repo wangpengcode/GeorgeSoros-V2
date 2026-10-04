@@ -338,8 +338,9 @@ class DataRouter:
         """§11.2 双源交叉验证：每 code 独立从 baostock/akshare 各抓一次，mootdx 永不参与。
 
         返回 (results, failed)：
-        - results = {code: {source: {source, count, data[]}}}；源无数据也占位
-          {source, count:0, data:[]}（方便 Kotlin 侧按共同日期对齐）
+        - results = {code: {source: {source, count, data[], error}}}；源无数据也占位
+          {source, count:0, data:[], error:None}（方便 Kotlin 侧按共同日期对齐）；
+          源故障时 error 带失败文案（部署穿透 2026-10-04：静默 0 行无法区分「无数据」与「故障」）
         - failed = [{code, reason}] 仅双源均 ParameterError（理论不发生，跨源参数一致）
         """
         sources = [self.adapters[SOURCE_BAOSTOCK], self.adapters[SOURCE_AKSHARE]]
@@ -349,21 +350,23 @@ class DataRouter:
             per_source: Dict[str, dict] = {}
             errors: List[str] = []
             for adapter in sources:
+                entry = {"source": adapter.source_name, "count": 0, "data": [], "error": None}
                 try:
                     bars = adapter.fetch_daily_bars(code, start, end, adjust)
-                    per_source[adapter.source_name] = {
-                        "source": adapter.source_name, "count": len(bars), "data": bars,
-                    }
+                    entry["count"] = len(bars)
+                    entry["data"] = bars
                 except SourceUnavailableError as exc:
                     errors.append(f"{adapter.source_name}: {exc}")
-                    per_source[adapter.source_name] = {"source": adapter.source_name, "count": 0, "data": []}
+                    entry["error"] = str(exc)
                 except SourceError as exc:
                     errors.append(f"{adapter.source_name}: {exc}")
-                    per_source[adapter.source_name] = {"source": adapter.source_name, "count": 0, "data": []}
+                    entry["error"] = str(exc)
                 except ParameterError as exc:
                     errors.append(f"{adapter.source_name}: 参数错误 ({exc})")
-                    per_source[adapter.source_name] = {"source": adapter.source_name, "count": 0, "data": []}
+                    entry["error"] = f"参数错误 ({exc})"
+                    per_source[adapter.source_name] = entry
                     break
+                per_source[adapter.source_name] = entry
             if per_source:
                 results[code] = per_source
             else:

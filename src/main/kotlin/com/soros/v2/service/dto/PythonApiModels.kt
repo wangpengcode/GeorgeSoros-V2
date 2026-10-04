@@ -78,6 +78,8 @@ data class StockBarsResult(
     @JsonProperty("source") val source: String,
     @JsonProperty("count") val count: Int,
     @JsonProperty("data") val data: List<DailyBar>,
+    /** 源故障文案；null=正常（2026-10-04 部署穿透：Python 侧静默 0 行无法区分「无数据」与「故障」） */
+    @JsonProperty("error") val error: String? = null,
 )
 
 /** 单股失败项（failed[] 元素） */
