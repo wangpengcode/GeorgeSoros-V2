@@ -53,8 +53,8 @@ data class DailyBar(
     @JsonProperty("close") val close: BigDecimal,
     @JsonProperty("volume") val volume: Long,
     @JsonProperty("amount") val amount: BigDecimal,
-    @JsonProperty("change_percent") val changePercent: BigDecimal,
-    @JsonProperty("turnover") val turnover: BigDecimal,
+    @JsonProperty("change_percent") val changePercent: BigDecimal? = null,  // 新股/窗口首行无前收盘 → null（DB change_pct 可空）
+    @JsonProperty("turnover") val turnover: BigDecimal? = null,
     @JsonProperty("prev_close") val prevClose: BigDecimal? = null,
 )
 

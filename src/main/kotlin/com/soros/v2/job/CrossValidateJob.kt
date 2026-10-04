@@ -151,8 +151,12 @@ class CrossValidateJob(
     }
 
     /** change_pct ±0.02pp（百分点） */
-    private fun changePctMismatch(ba: BigDecimal, ak: BigDecimal): Boolean =
-        ba.subtract(ak).abs() > BigDecimal("0.02")
+    // changePercent 可空（新股/窗口首行无前收盘）：双 null 视为一致，单 null 视为不一致
+    private fun changePctMismatch(ba: BigDecimal?, ak: BigDecimal?): Boolean = when {
+        ba == null && ak == null -> false
+        ba == null || ak == null -> true
+        else -> ba.subtract(ak).abs() > BigDecimal("0.02")
+    }
 
     /** 差异落库 + 单批不一致率 >30% 钉钉告警（不一致率 = 差异条数 / 实际比较对数） */
     private fun persistAndAlert(result: CrossValidateResult) {

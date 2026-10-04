@@ -177,7 +177,9 @@ class CalibrationJob(
             if (ratio > VOLUME_TOLERANCE) fields.add("volume")
         }
         val changePct = row.changePct
-        if (changePct != null && bar.changePercent.subtract(changePct).abs() > CHANGE_PCT_TOLERANCE_PP) {
+        val barPct = bar.changePercent
+        // bar.changePercent 可空（新股/窗口首行无前收盘）：无值无可比，跳过该项
+        if (changePct != null && barPct != null && barPct.subtract(changePct).abs() > CHANGE_PCT_TOLERANCE_PP) {
             fields.add("change_pct")
         }
         return fields

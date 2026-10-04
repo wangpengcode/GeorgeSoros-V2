@@ -80,8 +80,8 @@ class Bar(BaseModel):
     close: float
     volume: float            # 股
     amount: float            # 元
-    change_percent: float    # 不复权原始涨跌幅%
-    turnover: float          # 换手率%
+    change_percent: Optional[float] = None  # 不复权原始涨跌幅%；新股/窗口首行无前收盘 → None（2021 后上市股回填实测）
+    turnover: Optional[float] = None        # 换手率%；个别源停牌日可能缺
     prev_close: Optional[float] = None  # 除权后昨收（传输字段不落库；mootdx 不输出 → None）
 
 

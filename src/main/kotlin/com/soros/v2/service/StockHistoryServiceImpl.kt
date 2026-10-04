@@ -205,7 +205,8 @@ class StockHistoryServiceImpl(
 
         var written = 0
         for (bar in sorted) {
-            val (isLimitUp, isLimitDown) = LimitUpDetector.detect(bar.changePercent, board)
+            // changePercent 可空（新股/窗口首行无前收盘）：涨跌判定以 0 处理（不触发涨/跌停）
+            val (isLimitUp, isLimitDown) = LimitUpDetector.detect(bar.changePercent ?: BigDecimal.ZERO, board)
             val ipoGuard = LimitStreakComputer.isWithinIpoGuard(ipoDate, bar.date) { d, n ->
                 tradingCalendarService.recentTradingDays(d, n)
             }
