@@ -46,20 +46,20 @@ class Settings:
     cb_recovery_jitter_seconds: float = field(default_factory=lambda: _env_float("SOROS_CB_RECOVERY_JITTER", 0.0))
 
     # ── TokenBucket（PLAN §11.1）──
-    rate_baostock: float = field(default_factory=lambda: _env_float("SOROS_RATE_BAOSTOCK", 5.0))
-    rate_akshare: float = field(default_factory=lambda: _env_float("SOROS_RATE_AKSHARE", 2.0))
-    rate_mootdx: float = field(default_factory=lambda: _env_float("SOROS_RATE_MOOTDX", 3.0))
+    rate_baostock: float = field(default_factory=lambda: _env_float("SOROS_RATE_BAOSTOCK", 0.06))
+    rate_akshare: float = field(default_factory=lambda: _env_float("SOROS_RATE_AKSHARE", 0.06))
+    rate_mootdx: float = field(default_factory=lambda: _env_float("SOROS_RATE_MOOTDX", 0.06))
     # AKShare 抖动（PLAN §11.1 "2 rps + 抖动"）——随机 sleep [0, jitter) 打散请求
     akshare_jitter_seconds: float = field(default_factory=lambda: _env_float("SOROS_AKSHARE_JITTER", 0.2))
     rate_acquire_timeout_seconds: float = field(default_factory=lambda: _env_float("SOROS_RATE_ACQUIRE_TIMEOUT", 30.0))
     # Yahoo（第四源，海外）：0.5 rps + 抖动（外部源间歇性获取铁律）
-    rate_yahoo: float = field(default_factory=lambda: _env_float("SOROS_RATE_YAHOO", 0.5))
+    rate_yahoo: float = field(default_factory=lambda: _env_float("SOROS_RATE_YAHOO", 0.05))
     yahoo_jitter_seconds: float = field(default_factory=lambda: _env_float("SOROS_YAHOO_JITTER", 0.2))
     # Tencent（第五源，国内独立转发商，qfq/hfq 服务端自算）：1 rps + 抖动
-    rate_tencent: float = field(default_factory=lambda: _env_float("SOROS_RATE_TENCENT", 1.0))
+    rate_tencent: float = field(default_factory=lambda: _env_float("SOROS_RATE_TENCENT", 0.06))
     tencent_jitter_seconds: float = field(default_factory=lambda: _env_float("SOROS_TENCENT_JITTER", 0.3))
     # SSE 上交所行情云（第六源，源头级校准腿 + 首次建仓灌历史，非日常批量）：0.5 rps + 抖动
-    rate_sse: float = field(default_factory=lambda: _env_float("SOROS_RATE_SSE", 0.5))
+    rate_sse: float = field(default_factory=lambda: _env_float("SOROS_RATE_SSE", 0.05))
     sse_jitter_seconds: float = field(default_factory=lambda: _env_float("SOROS_SSE_JITTER", 0.5))
 
     # ── Router（PLAN §11.1：baostock → akshare → mootdx）──
