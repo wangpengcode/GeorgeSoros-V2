@@ -27,6 +27,7 @@ from constants import (
     derive_market,
     derive_board,
 )
+from ipguard import guard
 
 logger = logging.getLogger(__name__)
 
@@ -73,8 +74,12 @@ class BaseAdapter(abc.ABC):
     def health_state(self) -> str:
         return self.circuit_breaker.health()
 
-    # ---- 统一守卫入口：限流 → 熔断 → 调用 → 成败登记 ----
+    # ---- 统一守卫入口：封禁检查 → 限流 → 熔断 → 调用 → 成败登记 ----
     def _call_guarded(self, sync_fn, *args):
+        # IPGuard 封禁检查（先于一切）：banned = 小时级封禁语义，与熔断 60s 分离，
+        # banned 期间不出请求（否则半开探针把负载打回被封 IP，越打越封）
+        if guard.is_banned(self.source_name):
+            raise SourceUnavailableError(f"{self.source_name}: IP被封禁，等待换IP（ipguard）")
         if not self.rate_limiter.acquire():
             raise SourceError(f"{self.source_name}: 限流等待超时")
         if not self.circuit_breaker.allow_request():
@@ -84,9 +89,11 @@ class BaseAdapter(abc.ABC):
         except ParameterError:
             raise
         except Exception as exc:  # noqa: BLE001 - 源故障需兜底计入熔断
+            guard.report_failure(self.source_name, exc)  # 连接层异常计入封禁窗口
             self.circuit_breaker.record_failure()
             raise SourceError(f"{self.source_name}: {exc}") from exc
         else:
+            guard.report_success(self.source_name)
             self.circuit_breaker.record_success()
             return result
 
@@ -198,9 +205,27 @@ class DataRouter:
             return self._fetch_index_daily(code, start, end, adjust)
         return self._fetch_stock_daily(code, start, end, adjust)
 
+    def _ordered_for_stock(self, code: str) -> List[BaseAdapter]:
+        """多源分片分压（2026-10-04 设计穿透 92 分）：按 code 稳态归属源优先，其余按 router_order 兜底。
+
+        - 分片只调整 failover 顺序、不改能力：归属源故障自然 failover（数据完整性 > 分压）
+        - 稳态映射 int(code) % len(shard_sources)：禁 hash()（PYTHONHASHSEED 随机 →
+          重启换归属 → 滚动窗口自愈会互相覆盖）
+        - 指数/非纯数字 code 与单分片配置（<2 源）退化为原 router_order（零风险兜底）
+        """
+        from config import settings
+
+        shard = list(settings.shard_sources)
+        owner = None
+        if code.isdigit() and len(shard) >= 2:
+            owner = self.adapters.get(shard[int(code) % len(shard)])
+        if owner is None:
+            return list(self._bar_order)
+        return [owner] + [a for a in self._bar_order if a is not owner]
+
     def _fetch_stock_daily(self, code: str, start: str, end: str, adjust: str) -> Tuple[Optional[dict], List[str]]:
         errors: List[str] = []
-        for adapter in self._bar_order:
+        for adapter in self._ordered_for_stock(code):
             try:
                 bars = adapter.fetch_daily_bars(code, start, end, adjust)
                 if bars:

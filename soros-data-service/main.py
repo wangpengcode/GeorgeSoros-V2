@@ -20,6 +20,7 @@ from adapters.mootdx_adapter import MootdxAdapter
 from circuit_breaker import CircuitBreaker
 from config import settings
 from handlers import register_exception_handlers
+from ipguard import guard as ipguard, start_guard_thread
 from rate_limiter import TokenBucket
 from router import create_router
 
@@ -60,10 +61,15 @@ data_router = build_router()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    start_guard_thread(ipguard)  # IPGuard 守护线程：出口IP轮询 + 封禁探针自愈（daemon）
+    ipguard.poll_egress()  # 启动即采基线（首次观测是基线不是"变化"）
     logger.info(
-        "soros-data-service 启动自检通过：sources=%s, router_order=%s, port=%s",
+        "soros-data-service 启动自检通过：sources=%s, router_order=%s, shard_sources=%s, "
+        "egress_ip=%s, port=%s",
         [a.source_name for a in data_router.adapters.values()],
         list(settings.router_order),
+        list(settings.shard_sources),
+        ipguard.egress_ip,
         settings.port,
     )
     yield
@@ -78,6 +84,14 @@ register_exception_handlers(app)
 app.include_router(create_router(data_router), prefix="/api/v1")
 # 根路径兼容（冒烟 curl /health；与 /api/v1 路由并存，路径无冲突）
 app.include_router(create_router(data_router))
+
+
+# IPGuard 观测端点（独立于 /health：Kotlin strict fail-on-unknown 对健康 JSON 新增字段会炸解析，
+# 挂独立路径做到 Python 侧零破坏部署；换IP状态/封禁源/出口IP 变化在此观测）
+@app.get("/api/v1/ipguard")
+@app.get("/ipguard")
+async def ipguard_status():
+    return {"status": "ok", "ipguard": ipguard.snapshot()}
 
 
 if __name__ == "__main__":

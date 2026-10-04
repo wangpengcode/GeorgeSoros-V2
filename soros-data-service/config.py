@@ -60,6 +60,16 @@ class Settings:
         )
     )
 
+    # ── 多源分片分压（2026-10-04 设计穿透 92 分）──
+    # 股票日K按 code 稳态分片：int(code) % len(shard_sources) 决定归属源（归属源优先尝试，
+    # 故障仍 failover）。只调顺序不改能力；<2 个源视为关闭分压。禁 hash()（PYTHONHASHSEED
+    # 随机 → 重启换归属 → 滚动自愈互相覆盖），必须稳定映射。
+    shard_sources: tuple = field(
+        default_factory=lambda: tuple(
+            os.getenv("SOROS_SHARD_SOURCES", "baostock,akshare").replace(" ", "").split(",")
+        )
+    )
+
     # 请求校验
     batch_max_codes: int = field(default_factory=lambda: _env_int("SOROS_BATCH_MAX_CODES", 1000))
 
@@ -68,6 +78,8 @@ class Settings:
             self.router_order = ("baostock", "akshare", "mootdx")
         if len(self.router_order) != len(set(self.router_order)):
             raise ValueError(f"SOROS_ROUTER_ORDER 不能包含重复源: {self.router_order}")
+        if len(self.shard_sources) != len(set(self.shard_sources)):
+            raise ValueError(f"SOROS_SHARD_SOURCES 不能包含重复源: {self.shard_sources}")
 
 
 settings = Settings()
