@@ -153,13 +153,14 @@ class PythonDataServiceClientImpl(
             )
         }
 
-    /** 请求区间是否超阈值（backfill profile 判定；internal 供单测直接验证边界语义） */
+    /** 请求是否走 backfill profile（internal 供单测直接验证边界语义）
+     *
+     * items 模式恒判 backfill（2026-10-04 生产实测）：单段拉取耗时由 15s 限速+源 failover 链决定、
+     * 与窗口大小无关，短窗口段走默认 10s 档必超时（Spring 超时重试 + Python 孤儿请求空烧外部源）；
+     * items 仅回填重跑在用，语义上即 backfill 请求。 */
     internal fun requestRangeExceeds(request: DailyBarsBatchRequest, days: Long): Boolean = try {
         if (request.items.isNotEmpty()) {
-            // items 模式：任一段超阈值即判定 backfill（保守，与 codes 路径同一阈值语义）
-            request.items.any {
-                ChronoUnit.DAYS.between(LocalDate.parse(it.startDate), LocalDate.parse(it.endDate)) > days
-            }
+            true
         } else {
             // codes+dates 模式（向后兼容；init 块保证非空请求下 startDate/endDate 非 null）
             val start = LocalDate.parse(request.startDate!!)

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule
 import com.fasterxml.jackson.module.kotlin.KotlinModule
 import com.soros.v2.exception.PythonClientException
+import com.soros.v2.service.dto.BatchItem
 import com.soros.v2.service.dto.DailyBarsBatchRequest
 import java.math.BigDecimal
 import java.time.LocalDate
@@ -280,6 +281,21 @@ class PythonDataServiceClientImplTest {
         val request = DailyBarsBatchRequest(listOf("600000"), "2024-01-01", "2025-01-01", "qfq")
         // when & then: 边界日不判 backfill（走默认 10s / retry 2）
         assertFalse(client.requestRangeExceeds(request, 366), "=366 自然日不应判 backfill（走默认 10s）")
+    }
+
+    @Test
+    fun `testRequestRangeExceeds itemsMode alwaysBackfill`() {
+        // given: items 模式短窗口段（1 天）——2026-10-04 生产实测：items 拉取耗时由 15s 限速+failover 链
+        // 决定、与窗口大小无关，短窗口段走默认 10s 档必超时（批 1-6 全败、Python 孤儿请求空烧外部源）
+        val request = DailyBarsBatchRequest(
+            codes = emptyList(),
+            startDate = null,
+            endDate = null,
+            adjust = "qfq",
+            items = listOf(BatchItem("600000", "2026-09-30", "2026-09-30")),
+        )
+        // when & then: items 模式（仅回填在用）恒判 backfill（1800s / retry 1）
+        assertTrue(client.requestRangeExceeds(request, 366), "items 模式恒走回填档位（限速下短窗口也远超默认超时）")
     }
 
     @Test
