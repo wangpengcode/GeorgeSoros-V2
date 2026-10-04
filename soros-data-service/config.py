@@ -70,6 +70,12 @@ class Settings:
         )
     )
 
+    # ── netfix（2026-10-04 封禁根因修复：家宽原生 v6 出口被东财拒）──
+    # 进程内过滤 AF_INET6，强制数据请求走 IPv4；SOROS_DISABLE_IPV6=0 可关闭
+    disable_ipv6: bool = field(
+        default_factory=lambda: os.getenv("SOROS_DISABLE_IPV6", "1").strip() not in ("0", "false", "no")
+    )
+
     # 请求校验
     batch_max_codes: int = field(default_factory=lambda: _env_int("SOROS_BATCH_MAX_CODES", 1000))
 

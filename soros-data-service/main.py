@@ -21,6 +21,7 @@ from circuit_breaker import CircuitBreaker
 from config import settings
 from handlers import register_exception_handlers
 from ipguard import guard as ipguard, start_guard_thread
+from netfix import disable_ipv4_stack_forcer
 from rate_limiter import TokenBucket
 from router import create_router
 
@@ -61,6 +62,9 @@ data_router = build_router()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # 进程内 IPv4 强制（根因修复：家宽原生 v6 出口被东财拒，requests v6 优先必踩）
+    if settings.disable_ipv6:
+        disable_ipv4_stack_forcer()
     start_guard_thread(ipguard)  # IPGuard 守护线程：出口IP轮询 + 封禁探针自愈（daemon）
     ipguard.poll_egress()  # 启动即采基线（首次观测是基线不是"变化"）
     logger.info(
@@ -91,7 +95,10 @@ app.include_router(create_router(data_router))
 @app.get("/api/v1/ipguard")
 @app.get("/ipguard")
 async def ipguard_status():
-    return {"status": "ok", "ipguard": ipguard.snapshot()}
+    from netfix import snapshot as netfix_snapshot
+    body = {"status": "ok", "ipguard": ipguard.snapshot()}
+    body.update(netfix_snapshot())
+    return body
 
 
 if __name__ == "__main__":

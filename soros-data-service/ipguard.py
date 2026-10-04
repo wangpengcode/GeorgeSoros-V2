@@ -157,6 +157,9 @@ class IPGuard:
             self._next_probe_at = self._clock() + self._probe_interval * self._probe_backoff
             self._probe_backoff = min(self._probe_backoff * 2,
                                       self._max_probe_interval / self._probe_interval)
+            # 探针失败也可能是踩了东财坏边缘（2026-10-04 实锤）→ 顺手轮换边缘候选
+            from netfix import rotate_edges
+            rotate_edges()
             logger.warning("IPGuard: 探针未通过，%.0f 分钟后重试（退避 x%.1f）",
                            self._probe_interval * self._probe_backoff / 60, self._probe_backoff)
             return False
