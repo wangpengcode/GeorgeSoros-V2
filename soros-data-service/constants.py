@@ -14,16 +14,21 @@ from __future__ import annotations
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 数据源名称（PLAN §2.4 data_source 枚举允许值：BAOSTOCK / AKSHARE / MOOTDX / UNKNOWN）
+# V5 增 AKSHARE_SINA（akshare 内部 EM→新浪 failover 归因）/ YAHOO（第四源）；
+# V6 增 TENCENT（第五源，独立转发商）/ SSE（第六源，上交所行情云，源头级）
 # ──────────────────────────────────────────────────────────────────────────────
 SOURCE_BAOSTOCK = "baostock"
 SOURCE_AKSHARE = "akshare"
 SOURCE_MOOTDX = "mootdx"
 SOURCE_YAHOO = "yahoo"
+SOURCE_TENCENT = "tencent"
+SOURCE_SSE = "sse"
 SOURCE_UNKNOWN = "unknown"
-# 核心三源（Router/health 硬依赖）；yahoo 为可选源（缺席不报错，注册后进 failover 序尾）
+# 核心三源（Router/health 硬依赖）；yahoo/tencent/sse 为可选源（缺席不报错，
+# 注册后进 failover 序尾——见 DataRouter._resolve_order「已注册」追加语义）
 DATA_SOURCES = (SOURCE_BAOSTOCK, SOURCE_AKSHARE, SOURCE_MOOTDX)
 # 股票日K全量源域（含可选源；分片池/合法名校验用）
-BAR_SOURCES = (SOURCE_BAOSTOCK, SOURCE_AKSHARE, SOURCE_MOOTDX, SOURCE_YAHOO)
+BAR_SOURCES = (SOURCE_BAOSTOCK, SOURCE_AKSHARE, SOURCE_MOOTDX, SOURCE_YAHOO, SOURCE_TENCENT, SOURCE_SSE)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 单位换算系数（PLAN §2.4：volume 统一单位=股、amount=元）
@@ -41,6 +46,12 @@ MOOTDX_VOLUME_MULTIPLIER = 100      # 手 → 股（待 M3 实测校准）
 BAOSTOCK_AMOUNT_MULTIPLIER = 1      # 元
 AKSHARE_AMOUNT_MULTIPLIER = 1       # 元
 MOOTDX_AMOUNT_MULTIPLIER = 1        # 元
+# Tencent（第五源，2026-10-04 实测）：字段序 [..., volume(手), ..., amount(万元)]
+TENCENT_VOLUME_MULTIPLIER = 100     # 手 → 股
+TENCENT_AMOUNT_MULTIPLIER = 1e4     # 万元 → 元
+# SSE（第六源，上交所行情云，2026-10-04 实测）：volume=股（与 baostock 一字不差）、amount=元
+SSE_VOLUME_MULTIPLIER = 1           # 原生=股，无需换算
+SSE_AMOUNT_MULTIPLIER = 1           # 元
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 指数日K单位换算（探针 2026-10-03，见 docs/research 无专门文档，实测数据源结构）
@@ -73,6 +84,17 @@ def from_baostock_code(bs_code: str) -> str:
 def to_mootdx_market(code: str) -> int:
     """mootdx market 判定（PLAN §5.5）：沪=1、深=0"""
     return 1 if code.startswith(SH_PREFIXES) else 0
+
+
+def to_tencent_symbol(code: str) -> str:
+    """"600000" → "sh600000"（腾讯 fqkline symbol，§19.3 ① 实测：带市场前缀）"""
+    prefix = "sh" if code.startswith(SH_PREFIXES) else "sz"
+    return prefix + code
+
+
+def to_sse_market(code: str) -> str:
+    """上交所行情云 market 段（§19.3 ② 实测）：6/9 开头 → sh1，其余 → sz1。"""
+    return "sh1" if code.startswith(SH_PREFIXES) else "sz1"
 
 
 # AKShare / mootdx 输入直接用裸数字（恒等转换），无需额外函数。

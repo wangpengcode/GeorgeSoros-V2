@@ -55,6 +55,12 @@ class Settings:
     # Yahoo（第四源，海外）：0.5 rps + 抖动（外部源间歇性获取铁律）
     rate_yahoo: float = field(default_factory=lambda: _env_float("SOROS_RATE_YAHOO", 0.5))
     yahoo_jitter_seconds: float = field(default_factory=lambda: _env_float("SOROS_YAHOO_JITTER", 0.2))
+    # Tencent（第五源，国内独立转发商，qfq/hfq 服务端自算）：1 rps + 抖动
+    rate_tencent: float = field(default_factory=lambda: _env_float("SOROS_RATE_TENCENT", 1.0))
+    tencent_jitter_seconds: float = field(default_factory=lambda: _env_float("SOROS_TENCENT_JITTER", 0.3))
+    # SSE 上交所行情云（第六源，源头级校准腿 + 首次建仓灌历史，非日常批量）：0.5 rps + 抖动
+    rate_sse: float = field(default_factory=lambda: _env_float("SOROS_RATE_SSE", 0.5))
+    sse_jitter_seconds: float = field(default_factory=lambda: _env_float("SOROS_SSE_JITTER", 0.5))
 
     # ── Router（PLAN §11.1：baostock → akshare → mootdx）──
     router_order: tuple = field(

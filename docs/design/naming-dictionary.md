@@ -93,7 +93,7 @@
 | `is_limit_down` | 跌停 | stock_history |
 | `limit_up_streak` | 连板数（首板=1，0=非涨停/断板；§4.8 派生） ｜各表：连板数（首板=1，源接口'连板数'） | stock_history、intraday_archive |
 | `limit_down_streak` | 跌停连板（§4.9 崩塌池，镜像派生） | stock_history |
-| `data_source` | 数据来源（failover 可见性；V5 起 CHECK 值域含 AKSHARE_SINA/YAHOO） | stock_history、index_history |
+| `data_source` | 数据来源（failover 可见性；V6 起 CHECK 值域含 AKSHARE_SINA/YAHOO/TENCENT/SSE） | stock_history、index_history |
 | `calibrated` | 是否已校准（CalibrationJob 低频对拍通过后置位；V5） | stock_history |
 | `calibrated_source` | 校准对照源（DataSourceType 枚举名） | stock_history |
 | `calibrated_at` | 校准时间 | stock_history |

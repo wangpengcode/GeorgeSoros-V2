@@ -42,6 +42,46 @@ class DataSourceTypeTest {
     }
 
     @Test
+    fun `testFromPython tencent maps TENCENT`() {
+        assertEquals(DataSourceType.TENCENT, DataSourceType.fromPython("tencent"))
+        assertEquals(DataSourceType.TENCENT, DataSourceType.fromPython("TENCENT"))
+    }
+
+    @Test
+    fun `testFromPython sse maps SSE`() {
+        assertEquals(DataSourceType.SSE, DataSourceType.fromPython("sse"))
+        assertEquals(DataSourceType.SSE, DataSourceType.fromPython("SSE"))
+    }
+
+    @Test
+    fun `testFromPython v6 value domain full round-trip`() {
+        // V6 值域完整断言：六数据源 + AKSHARE_SINA 子源标签 + UNKNOWN 全覆盖 fromPython 往返
+        // （与 V6 迁移文件 stock_history_data_source_check 白名单 8 值逐一对拍）
+        val domain = mapOf(
+            "baostock" to DataSourceType.BAOSTOCK,
+            "akshare" to DataSourceType.AKSHARE,
+            "akshare-sina" to DataSourceType.AKSHARE_SINA,
+            "mootdx" to DataSourceType.MOOTDX,
+            "yahoo" to DataSourceType.YAHOO,
+            "tencent" to DataSourceType.TENCENT,
+            "sse" to DataSourceType.SSE,
+            "unknown" to DataSourceType.UNKNOWN,
+        )
+        domain.forEach { (pythonValue, expected) ->
+            assertEquals(expected, DataSourceType.fromPython(pythonValue), "fromPython('$pythonValue')")
+        }
+    }
+
+    @Test
+    fun `testEnum contains all values for CHECK constraint V6`() {
+        // V6 CHECK 白名单值域 8 值全覆盖（DB 层同步扩展；顺序无关）
+        assert(DataSourceType.entries.map { it.name }.containsAll(
+            listOf("BAOSTOCK", "AKSHARE", "AKSHARE_SINA", "MOOTDX",
+                   "YAHOO", "TENCENT", "SSE", "UNKNOWN")
+        ))
+    }
+
+    @Test
     fun `testEnum contains new values for CHECK constraint V5`() {
         // V5 CHECK 白名单值域（DB 层同步扩展；顺序无关）
         assert(DataSourceType.entries.map { it.name }.containsAll(listOf("AKSHARE_SINA", "YAHOO")))

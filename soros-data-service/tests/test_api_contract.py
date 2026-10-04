@@ -22,7 +22,7 @@ BAR_CONTRACT_KEYS = {
 }
 # PLAN §11.1 stock-list 元素契约键集合（Step 5a 增补 ipo_date：BaoStock query_stock_basic 回填）
 STOCK_ITEM_KEYS = {"code", "name", "market", "board", "is_st", "delisted", "ipo_date"}
-HEALTH_SOURCES = ("baostock", "akshare", "mootdx", "yahoo")
+HEALTH_SOURCES = ("baostock", "akshare", "mootdx", "yahoo", "tencent", "sse")
 
 
 def _default_router():
@@ -45,6 +45,8 @@ def test_health_double_mount_same_shape(make_client):
         StubAdapter("akshare", health="ok"),
         StubAdapter("mootdx", health="ok"),
         StubAdapter("yahoo", health="ok"),
+        StubAdapter("tencent", health="ok"),
+        StubAdapter("sse", health="ok"),
     ])
     client = make_client(router)
     r1 = client.get("/api/v1/health")

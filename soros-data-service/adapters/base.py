@@ -7,6 +7,8 @@
     * SourceUnavailableError —— 熔断 open 或该源不支持该能力，不计熔断失败（未发起请求）
 - DataRouter：Router 顺序 baostock → akshare → mootdx（PLAN §11.1）；
   stock-list/is_st/退市状态永不走 mootdx。
+- 可选源（yahoo/tencent/sse）：Router 缺席不报错（missing-check 只硬查核心三源），
+  注册后按 _resolve_order「已注册」追加到 failover 序尾。
 """
 
 from __future__ import annotations
@@ -20,6 +22,8 @@ from constants import (
     SOURCE_BAOSTOCK,
     SOURCE_MOOTDX,
     SOURCE_YAHOO,
+    SOURCE_TENCENT,
+    SOURCE_SSE,
     DATA_SOURCES,
     BOARD_ALL,
     MARKET_ALL,
@@ -183,7 +187,7 @@ class DataRouter:
 
     def __init__(self, adapters: Sequence[BaseAdapter]):
         self.adapters: Dict[str, BaseAdapter] = {a.source_name: a for a in adapters}
-        # 核心三源硬依赖；yahoo 可选源（缺席不报错——分压/校准增强，非正确性依赖）
+        # 核心三源硬依赖；yahoo/tencent/sse 可选源（缺席不报错——分压/校准增强，非正确性依赖）
         missing = [s for s in DATA_SOURCES if s not in self.adapters]
         if missing:
             raise ValueError(f"缺少数据源 adapter: {missing}")
@@ -198,10 +202,15 @@ class DataRouter:
         from config import settings
 
         order = list(settings.router_order)
-        valid = {SOURCE_BAOSTOCK, SOURCE_AKSHARE, SOURCE_MOOTDX, SOURCE_YAHOO}
+        # 合法源域：核心三源 + 可选源（yahoo/tencent/sse——注册即进序尾，缺席不报错）
+        valid = {
+            SOURCE_BAOSTOCK, SOURCE_AKSHARE, SOURCE_MOOTDX,
+            SOURCE_YAHOO, SOURCE_TENCENT, SOURCE_SSE,
+        }
         order = [n for n in order if n in valid and n in self.adapters]
-        # 兜底：确保核心三源都在（防止配置缺漏）；yahoo 仅在已注册时追加到序尾
-        for n in (SOURCE_BAOSTOCK, SOURCE_AKSHARE, SOURCE_MOOTDX, SOURCE_YAHOO):
+        # 兜底：确保核心三源都在（防止配置缺漏）；可选源仅在已注册时追加到序尾
+        for n in (SOURCE_BAOSTOCK, SOURCE_AKSHARE, SOURCE_MOOTDX,
+                  SOURCE_YAHOO, SOURCE_TENCENT, SOURCE_SSE):
             if n not in order and n in self.adapters:
                 order.append(n)
         return order

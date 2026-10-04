@@ -18,6 +18,8 @@ from adapters.base import DataRouter
 from adapters.baostock_adapter import BaostockAdapter
 from adapters.mootdx_adapter import MootdxAdapter
 from adapters.yahoo_adapter import YahooAdapter
+from adapters.tencent_adapter import TencentAdapter
+from adapters.sse_adapter import SseAdapter
 from circuit_breaker import CircuitBreaker
 from config import settings
 from handlers import register_exception_handlers
@@ -57,6 +59,16 @@ def build_router() -> DataRouter:
         YahooAdapter(
             CircuitBreaker("yahoo", **cb_kwargs),
             TokenBucket(settings.rate_yahoo, jitter=settings.yahoo_jitter_seconds, name="yahoo"),
+        ),
+        # 第五源（可选）：国内独立转发商，qfq/hfq 服务端自算；1 rps + 抖动
+        TencentAdapter(
+            CircuitBreaker("tencent", **cb_kwargs),
+            TokenBucket(settings.rate_tencent, jitter=settings.tencent_jitter_seconds, name="tencent"),
+        ),
+        # 第六源（可选）：上交所行情云（源头级校准腿 + 首次建仓灌历史）；0.5 rps + 抖动
+        SseAdapter(
+            CircuitBreaker("sse", **cb_kwargs),
+            TokenBucket(settings.rate_sse, jitter=settings.sse_jitter_seconds, name="sse"),
         ),
     ]
     return DataRouter(adapters)
