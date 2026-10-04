@@ -19,8 +19,8 @@ import adapters.mootdx_adapter as mootdx_module
 from adapters.akshare_adapter import AkshareAdapter
 from adapters.baostock_adapter import BaostockAdapter
 from adapters.mootdx_adapter import MootdxAdapter
-from adapters.base import SourceError
-from circuit_breaker import HEALTH_DOWN, STATE_OPEN, CircuitBreaker
+from adapters.base import ParameterError, SourceError
+from circuit_breaker import HEALTH_DOWN, STATE_CLOSED, STATE_OPEN, CircuitBreaker
 from constants import (
     AKSHARE_VOLUME_MULTIPLIER,
     BAOSTOCK_VOLUME_MULTIPLIER,
@@ -290,7 +290,7 @@ def test_mootdx_change_percent_and_vol_multiplied(monkeypatch):
     fake_client = FakeClient(bars_in)
     monkeypatch.setattr(adapter, "_get_client", lambda: fake_client)
 
-    bars = adapter._sync_fetch_daily_bars("600000", "2026-09-25", "2026-09-30", "qfq")
+    bars = adapter._sync_fetch_daily_bars("600000", "2026-09-25", "2026-09-30", "none")
 
     assert len(bars) == 2
     assert bars[0]["date"] == "2026-09-29", "分页结果按日期升序"
@@ -315,7 +315,7 @@ def test_mootdx_sz_market_is_zero(monkeypatch):
     adapter = MootdxAdapter(FakeCircuitBreaker(), FakeRateLimiter())
     fake_client = FakeClient(bars_in)
     monkeypatch.setattr(adapter, "_get_client", lambda: fake_client)
-    adapter._sync_fetch_daily_bars("000001", "2026-09-25", "2026-09-30", "qfq")
+    adapter._sync_fetch_daily_bars("000001", "2026-09-25", "2026-09-30", "none")
     assert fake_client.client.calls[0][1] == 0, "000001 深市 market=0"
 
 
@@ -329,7 +329,7 @@ def test_mootdx_filters_outside_date_range(monkeypatch):
     adapter = MootdxAdapter(FakeCircuitBreaker(), FakeRateLimiter())
     fake_client = FakeClient(bars_in)
     monkeypatch.setattr(adapter, "_get_client", lambda: fake_client)
-    bars = adapter._sync_fetch_daily_bars("600000", "2026-09-26", "2026-09-30", "qfq")
+    bars = adapter._sync_fetch_daily_bars("600000", "2026-09-26", "2026-09-30", "none")
     assert len(bars) == 0, "日期区间 [start,end] 外被滤除"
 
 
@@ -358,10 +358,48 @@ def test_mootdx_sdk_error_counts_toward_circuit_breaker(monkeypatch):
     monkeypatch.setattr(adapter, "_get_client", lambda: FailingClient())
 
     with pytest.raises(SourceError):
-        adapter.fetch_daily_bars("600000", "2026-09-25", "2026-09-30", "qfq")
+        adapter.fetch_daily_bars("600000", "2026-09-25", "2026-09-30", "none")
     assert cb.consecutive_failures == 1, "SDK 抛错计入熔断失败（不再误 record_success）"
 
     with pytest.raises(SourceError):
-        adapter.fetch_daily_bars("600000", "2026-09-25", "2026-09-30", "qfq")
+        adapter.fetch_daily_bars("600000", "2026-09-25", "2026-09-30", "none")
     assert cb.state == STATE_OPEN, "连续失败达阈值 → open"
     assert cb.health() == HEALTH_DOWN, "/health 不再恒 ok"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# mootdx 复权能力守卫（2026-10-04 改动 3：qfq/hfq 一律 ParameterError，参照 sse 模式）
+# ──────────────────────────────────────────────────────────────────────────────
+
+def test_mootdx_rejects_qfq_adjust(monkeypatch):
+    """mootdx/TDX 仅不复权日K：qfq 请求一律 ParameterError（跨源一致，不计熔断）。"""
+    adapter = MootdxAdapter(FakeCircuitBreaker(), FakeRateLimiter())
+    monkeypatch.setattr(adapter, "_get_client", lambda: FakeClient([]))
+    with pytest.raises(ParameterError):
+        adapter.fetch_daily_bars("600000", "2026-09-25", "2026-09-30", "qfq")
+
+
+def test_mootdx_rejects_hfq_adjust(monkeypatch):
+    """mootdx/TDX 仅不复权日K：hfq 请求一律 ParameterError（跨源一致，不计熔断）。"""
+    adapter = MootdxAdapter(FakeCircuitBreaker(), FakeRateLimiter())
+    monkeypatch.setattr(adapter, "_get_client", lambda: FakeClient([]))
+    with pytest.raises(ParameterError):
+        adapter.fetch_daily_bars("600000", "2026-09-25", "2026-09-30", "hfq")
+
+
+def test_mootdx_accepts_none_adjust(monkeypatch):
+    """mootdx 仅支持 none 复权：none 请求正常走源 SDK（mock _get_client，不回真实网络）。"""
+    adapter = MootdxAdapter(FakeCircuitBreaker(), FakeRateLimiter())
+    fake_client = FakeClient([])
+    monkeypatch.setattr(adapter, "_get_client", lambda: fake_client)
+    assert adapter.fetch_daily_bars("600000", "2026-09-25", "2026-09-30", "none") == []
+
+
+def test_mootdx_qfq_parameter_error_not_recorded_in_breaker():
+    """mootdx qfq → ParameterError 不计熔断失败（_call_guarded 重抛，不 record_failure）。"""
+    cb = CircuitBreaker("mootdx", failure_threshold=2, open_timeout_seconds=60)
+    adapter = MootdxAdapter(cb, FakeRateLimiter())
+    with pytest.raises(ParameterError):
+        adapter.fetch_daily_bars("600000", "2026-09-25", "2026-09-30", "qfq")
+    assert cb.consecutive_failures == 0, "ParameterError 不计熔断失败"
+    assert cb.state == STATE_CLOSED, "熔断保持 closed（未受参数错误影响）"

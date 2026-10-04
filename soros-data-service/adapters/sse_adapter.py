@@ -16,7 +16,7 @@
     * 端口 32041 SSL 失败用 32042（§19.3 ②）
 
 口径：
-- raw 不复权：_supports_adjust_qfq/hfq 全 False → qfq/hfq 请求一律 ParameterError
+- raw 不复权：_supports_adjust_qfq/hfq 全 False → qfq/hfq 请求一律 CapabilityError
   （跨源一致，不计熔断失败）。官网源口径「raw 真值 + 复权因子推 qfq」归 AdjustCheckStep
   §17.2 B6 咬合，不在本 adapter 内做复权。
 - change_percent 由相邻 raw close 链式自算，首行无昨收时 null（照 yahoo prev_close chain 先例）。
@@ -31,7 +31,7 @@ from typing import List
 
 import requests
 
-from adapters.base import BaseAdapter, ParameterError, SourceError
+from adapters.base import BaseAdapter, CapabilityError, SourceError
 from constants import (
     SOURCE_SSE,
     SSE_VOLUME_MULTIPLIER,
@@ -80,9 +80,9 @@ class SseAdapter(BaseAdapter):
 
     # ---- 日 K 线 ----
     def _sync_fetch_daily_bars(self, code: str, start: str, end: str, adjust: str) -> List[dict]:
-        # 复权能力守卫：raw 仅支持 none；qfq/hfq 一律 ParameterError（跨源一致，不计熔断）
+        # 复权能力守卫：raw 仅支持 none；qfq/hfq 一律 CapabilityError（能力型，不计熔断）
         if adjust in (ADJUST_QFQ, ADJUST_HFQ) and not getattr(self, f"_supports_adjust_{adjust}", False):
-            raise ParameterError(
+            raise CapabilityError(
                 f"{self.source_name}: 不支持 {adjust} 复权（raw 真值 + 复权因子推 qfq 归 AdjustCheckStep）"
             )
         market = to_sse_market(code)

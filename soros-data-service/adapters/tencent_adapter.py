@@ -33,7 +33,7 @@ from typing import List
 
 import requests
 
-from adapters.base import BaseAdapter, ParameterError, SourceError
+from adapters.base import BaseAdapter, CapabilityError, SourceError
 from constants import (
     SOURCE_TENCENT,
     TENCENT_VOLUME_MULTIPLIER,
@@ -77,7 +77,7 @@ class TencentAdapter(BaseAdapter):
     def _sync_fetch_daily_bars(self, code: str, start: str, end: str, adjust: str) -> List[dict]:
         # 复权能力守卫（能力标记 + 显式抛错；raw none 恒支持）
         if adjust in (ADJUST_QFQ, ADJUST_HFQ) and not getattr(self, f"_supports_adjust_{adjust}", False):
-            raise ParameterError(f"{self.source_name}: 不支持 {adjust} 复权")
+            raise CapabilityError(f"{self.source_name}: 不支持 {adjust} 复权")
         symbol = to_tencent_symbol(code)
         kline = self._fetch_kline_json(symbol, start, end, adjust)
         rows = self._parse_kline(kline, symbol)

@@ -12,7 +12,7 @@
 
 from __future__ import annotations
 
-from adapters.base import DataRouter, ParameterError, SourceError
+from adapters.base import CapabilityError, DataRouter, ParameterError, SourceError
 from helpers import StubAdapter, make_bar, raise_error
 from ipguard import IPGuard
 
@@ -140,3 +140,21 @@ def test_parameter_error_not_recorded(monkeypatch):
     result, errors = router.fetch_daily_bars("abc", "2026-09-30", "2026-09-30", "qfq")
     assert result is None
     assert router.channel_ledger() == {}, "ParameterError 不计台账，ledger 全空"
+
+
+def test_capability_error_continues_failover(monkeypatch):
+    """CapabilityError（复权能力型，verifier MEDIUM-1 修复）：该源不支持但后续源
+    可能支持——failover 必须继续，不得像真 ParameterError 那样 break 截断。"""
+    g = _new_guard()
+    monkeypatch.setattr("adapters.base.guard", g)
+    router = DataRouter([
+        StubAdapter("baostock", bars=raise_error(CapabilityError("baostock: 不支持 qfq"))),
+        StubAdapter("akshare", bars=raise_error(CapabilityError("akshare: 不支持 qfq"))),
+        StubAdapter("mootdx", bars=[make_bar("600000", "2026-09-30")]),
+    ])
+    result, _errors = router.fetch_daily_bars("600000", "2026-09-30", "2026-09-30", "qfq")
+    assert result is not None and result["count"] == 1, "能力型错误不截断 failover，后续源接住"
+    ledger = router.channel_ledger()
+    assert ledger["mootdx"]["last_success_at"], "接住的源记成功"
+    assert "baostock" not in ledger or ledger["baostock"]["last_failure_at"] is None, \
+        "CapabilityError 不计台账失败"

@@ -69,13 +69,14 @@ class Settings:
         )
     )
 
-    # ── 多源分片分压（2026-10-04 设计穿透 92 分）──
+    # ── 多源分片分压（2026-10-04 设计穿透 92 分；改动 4 扩 tencent）──
     # 股票日K按 code 稳态分片：int(code) % len(shard_sources) 决定归属源（归属源优先尝试，
     # 故障仍 failover）。只调顺序不改能力；<2 个源视为关闭分压。禁 hash()（PYTHONHASHSEED
     # 随机 → 重启换归属 → 滚动自愈互相覆盖），必须稳定映射。
+    # 默认池含 tencent（qfq 服务端计算口径已验证）；sse 不进池——qfq 不支持，守校准腿本职；env 可覆盖。
     shard_sources: tuple = field(
         default_factory=lambda: tuple(
-            os.getenv("SOROS_SHARD_SOURCES", "baostock,akshare,yahoo").replace(" ", "").split(",")
+            os.getenv("SOROS_SHARD_SOURCES", "baostock,akshare,yahoo,tencent").replace(" ", "").split(",")
         )
     )
 

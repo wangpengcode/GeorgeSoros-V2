@@ -17,7 +17,8 @@
 from __future__ import annotations
 
 import logging
-from typing import Dict, List
+from concurrent.futures import ThreadPoolExecutor
+from typing import Dict, List, Tuple
 
 from fastapi import APIRouter, Query
 from fastapi.responses import JSONResponse
@@ -91,15 +92,65 @@ def create_router(data_router: DataRouter) -> APIRouter:
                     }
                 ).model_dump(),
             )
+        # ── 多源分组并行（2026-10-04 设计定稿）──
+        # 设计依据：并行只在源之间，源内节奏不变（防封禁铁律）——不同分片组并行互不干扰；
+        # 组内逐只串行走 failover Router（现有语义），各源限流节奏各自独立（TokenBucket 每源独立）。
+        # 分组归属与串行 failover 路径共用 DataRouter._shard_owner（单点判断，两处归属一致）。
+        # 指数/非纯数字 code 无分片归属 → 归入串行尾批，主线程在所有 worker 完成后逐只拉取。
+        groups: Dict[str, List[str]] = {}
+        tail: List[str] = []
+        for code in req.codes:
+            owner = data_router._shard_owner(code)
+            if owner is None:
+                tail.append(code)
+            else:
+                groups.setdefault(owner.source_name, []).append(code)
+
+        # worker：组内逐只串行调 failover Router（与现串行语义完全一致），各自收集 results/failed
+        # （局部 dict/list 收集再合并，避免跨线程共享可变对象竞态；合并语义与原串行结果一致）
+        def _worker(codes: List[str]) -> Tuple[Dict[str, dict], List[dict]]:
+            local_results: Dict[str, dict] = {}
+            local_failed: List[dict] = []
+            for code in codes:
+                result, errors = data_router.fetch_daily_bars(
+                    code, req.start_date, req.end_date, req.adjust
+                )
+                if result is not None:
+                    local_results[code] = result
+                else:
+                    local_failed.append(
+                        {"code": code, "reason": errors[0] if errors else "All sources failed"}
+                    )
+            return local_results, local_failed
+
         results: Dict[str, dict] = {}
         failed: List[dict] = []
-        # 单股失败不炸整批：每只股独立走 failover Router，失败进 failed[]
-        for code in req.codes:
-            result, errors = data_router.fetch_daily_bars(code, req.start_date, req.end_date, req.adjust)
+        if groups:
+            # 非空组数 = worker 数：单组（或全部同归属）时 worker 数 1，组内串行天然等价现串行
+            with ThreadPoolExecutor(max_workers=len(groups)) as pool:
+                futures = [pool.submit(_worker, codes) for codes in groups.values()]
+                for (src, codes), fut in zip(groups.items(), futures):
+                    try:
+                        r, f = fut.result()
+                    except Exception as exc:  # noqa: BLE001
+                        # worker 非预期异常不炸整批：该组全部 code 降级进 failed
+                        # （防御性兜底，正常不可达——_fetch_stock_daily 异常兜口完整）
+                        logger.error("batch worker(%s) 异常: %s", src, exc)
+                        r, f = {}, [{"code": c, "reason": f"worker 异常: {exc}"} for c in codes]
+                    results.update(r)
+                    failed.extend(f)
+
+        # 串行尾批：指数等非分片代码，主线程逐只拉取（量小，串行防封禁）
+        for code in tail:
+            result, errors = data_router.fetch_daily_bars(
+                code, req.start_date, req.end_date, req.adjust
+            )
             if result is not None:
                 results[code] = result
             else:
-                failed.append({"code": code, "reason": errors[0] if errors else "All sources failed"})
+                failed.append(
+                    {"code": code, "reason": errors[0] if errors else "All sources failed"}
+                )
         return {"status": "ok", "results": results, "failed": failed}
 
     @router.get("/trading-calendar", response_model=CalendarResponse)

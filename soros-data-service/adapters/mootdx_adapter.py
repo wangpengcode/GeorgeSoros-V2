@@ -14,6 +14,9 @@
 - volume 单位假设=手 ×100 → 股（§2.4 字典口径，MOOTDX_VOLUME_MULTIPLIER）
 - 复权：mootdx 仅不复权日K；作为 failover 源写入的 bar 与库内 qfq 序列口径不一致，
   Kotlin 侧对 source=mootdx 的 bar 跳过 §4.6 漂移检测，并写 data_quality_log（RAW_FALLBACK）
+- 复权能力守卫（2026-10-04 改动 3）：qfq/hfq 请求一律 CapabilityError（能力型，failover 继续；不计熔断）
+  ——TDX 只有 raw 口径，此前静默忽略 adjust 返回 raw，qfq failover 到它会写错误口径行
+  （潜伏口径 bug，参照 sse_adapter 守卫模式补齐）
 """
 
 from __future__ import annotations
@@ -21,8 +24,10 @@ from __future__ import annotations
 import logging
 from typing import List
 
-from adapters.base import BaseAdapter, SourceError
+from adapters.base import BaseAdapter, CapabilityError, SourceError
 from constants import (
+    ADJUST_HFQ,
+    ADJUST_QFQ,
     MOOTDX_VOLUME_MULTIPLIER,
     MOOTDX_AMOUNT_MULTIPLIER,
     to_mootdx_market,
@@ -54,6 +59,10 @@ class MootdxAdapter(BaseAdapter):
         self._supports_stock_list = False
         self._supports_is_st = False
         self._supports_delisted = False
+        # raw 不复权：qfq/hfq 均不支持（mootdx/TDX 仅提供不复权日K；qfq 请求一律 CapabilityError，
+        # 参照 sse_adapter 守卫模式——静默返回 raw 会写错误口径行，潜伏口径 bug）
+        self._supports_adjust_qfq = False
+        self._supports_adjust_hfq = False
         self._client = None
 
     def _get_client(self):
@@ -76,6 +85,12 @@ class MootdxAdapter(BaseAdapter):
         return fn(*args)
 
     def _sync_fetch_daily_bars(self, code: str, start: str, end: str, adjust: str) -> List[dict]:
+        # 复权能力守卫：raw 仅支持 none；qfq/hfq 一律 CapabilityError（能力型，不计熔断；
+        # ParameterError 不计熔断/台账的语义由 base.py _call_guarded/_fetch_stock_daily 现有守卫保证）
+        if adjust in (ADJUST_QFQ, ADJUST_HFQ) and not getattr(self, f"_supports_adjust_{adjust}", False):
+            raise CapabilityError(
+                f"{self.source_name}: 不支持 {adjust} 复权（mootdx/TDX 仅提供不复权日K）"
+            )
         client = self._get_client()
         market = to_mootdx_market(code)
         all_bars = []

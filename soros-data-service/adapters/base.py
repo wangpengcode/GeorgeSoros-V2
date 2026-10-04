@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import abc
 import logging
+import threading
 from datetime import datetime
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -49,6 +50,14 @@ class ParameterError(AdapterError):
     """参数错误（非法代码/日期/复权方式）。跨源一致，不计熔断失败。"""
 
 
+class CapabilityError(ParameterError):
+    """复权能力型参数错误：该源不支持此复权口径，但其他源可能支持。
+
+    failover 对它应继续尝试后续源（区别于非法代码/日期等真·跨源一致的
+    参数错误）；不计熔断失败（verifier MEDIUM-1 修复）。
+    """
+
+
 class SourceError(AdapterError):
     """数据源故障（网络/API 异常/超时/登录失败）。计入熔断失败。"""
 
@@ -75,6 +84,13 @@ class BaseAdapter(abc.ABC):
         self._supports_index = False
         self._supports_fundamentals = False
         self._supports_board_members = False
+        # 同源在途请求互斥锁（2026-10-04 改动 2 设计定稿）：任何时刻同一源最多 1 个在途请求——
+        # baostock 模块级单例 socket 并发会串包；failover 跨线程碰同一源时排队。
+        # 锁用在 _call_guarded 包裹「实际调 adapter 方法」那一小段（含登录/查询），
+        # TokenBucket 限流等待在锁外（慢等 30s 不占着别的线程的源）。
+        # DataRouter 构造时按 source_name 把各源锁登记进 _adapter_locks（key 与台账一致），
+        # 独立使用（测试/桩）时每实例一把锁，天然互斥。
+        self._call_lock = threading.Lock()
 
     @property
     def health_state(self) -> str:
@@ -99,18 +115,24 @@ class BaseAdapter(abc.ABC):
             raise SourceError(f"{self.source_name}: 限流等待超时")
         if not self.circuit_breaker.allow_request():
             raise SourceUnavailableError(f"{self.source_name}: 熔断 open")
-        try:
-            result = sync_fn(*args)
-        except ParameterError:
-            raise
-        except Exception as exc:  # noqa: BLE001 - 源故障需兜底计入熔断
-            guard.report_failure(self.source_name, exc)  # 连接层异常计入封禁窗口
-            self.circuit_breaker.record_failure()
-            raise SourceError(f"{self.source_name}: {exc}") from exc
-        else:
-            guard.report_success(self.source_name)
-            self.circuit_breaker.record_success()
-            return result
+        # 锁内：仅「实际调 adapter 方法」这一小段（含登录/查询）；锁外：封禁检查/限流等待/熔断检查。
+        # 顺序依据（2026-10-04 改动 2 设计定稿）：先桶后调 → 锁包住真正发请求处，TokenBucket
+        # 等待在锁外——限流慢等（最多 30s）不占锁，其它线程仍可排队碰同一源。
+        # 锁=源级（BaseAdapter._call_lock，DataRouter._adapter_locks 登记同一对象）：
+        #   baostock 模块级单例 socket 并发会串包；failover 跨线程碰同一源时排队。
+        with self._call_lock:
+            try:
+                result = sync_fn(*args)
+            except ParameterError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - 源故障需兜底计入熔断
+                guard.report_failure(self.source_name, exc)  # 连接层异常计入封禁窗口
+                self.circuit_breaker.record_failure()
+                raise SourceError(f"{self.source_name}: {exc}") from exc
+            else:
+                guard.report_success(self.source_name)
+                self.circuit_breaker.record_success()
+                return result
 
     # ---- 日 K 线 ----
     def fetch_daily_bars(self, code: str, start: str, end: str, adjust: str) -> List[dict]:
@@ -184,6 +206,11 @@ class DataRouter:
       mootdx 永不参与（PLAN Step 4）；baostock 指数K未做探针验证，暂不启用（未来增强可加）
     - stock-list / is_st / 退市状态：只认 baostock/akshare，mootdx 永不参与
     - 单源失败不炸整批：单股失败进 failed[]
+    - daily-bars/batch 分组并行（router.py）：按 _shard_owner 分片组并行（并行只在源之间），
+      源内逐只串行走 failover（防封禁铁律）；指数等非分片代码归串行尾批由主线程拉取
+    - 同源在途互斥（2026-10-04 改动 2）：_adapter_locks 按 source_name 登记各源
+      adapter._call_lock，_call_guarded 锁住实际请求（TokenBucket 等待在锁外）——
+      baostock 模块级单例 socket 防串包、failover 跨线程碰源排队
     """
 
     def __init__(self, adapters: Sequence[BaseAdapter]):
@@ -201,6 +228,26 @@ class DataRouter:
         # 渠道台账（/channels 观测）：{source: {last_success_at, last_failure_at}}，
         # 进程态重启即清——与 IPGuard「banned 不持久化」同一设计哲学（docstring 见 _mark_*）
         self._source_ledger: Dict[str, dict] = {}
+        # 同源在途请求互斥锁（改动 2）：{source_name: threading.Lock}，按 adapter.source_name
+        # 惰性登记（key 与台账 key 一致）；锁本体 = 各源 adapter._call_lock（每源唯一实例 → 每源
+        # 一把锁），_call_guarded 用它包裹实际请求，TokenBucket 等待在锁外。
+        self._adapter_locks: Dict[str, threading.Lock] = {}
+        for a in self.adapters.values():
+            self._lock_for(a.source_name)
+
+    def _lock_for(self, source: str) -> threading.Lock:
+        """按 source_name 惰性取源级调用锁（不存在则登记）。key=adapter.source_name（与台账 key 一致）。
+
+        锁本体是 BaseAdapter._call_lock（DataRouter 每源唯一实例 → 每源一把锁，_call_guarded
+        包裹实际请求用同一对象）；本方法只做登记/取用，供观测与外部协调取同一锁，不在此处加锁
+        （避免与 _call_guarded 内同一把锁二次获取死锁——threading.Lock 非重入）。
+        """
+        lock = self._adapter_locks.get(source)
+        if lock is None:
+            adapter = self.adapters.get(source)
+            lock = adapter._call_lock if adapter is not None else threading.Lock()
+            self._adapter_locks[source] = lock
+        return lock
 
     def _resolve_order(self) -> list:
         from config import settings
@@ -261,20 +308,29 @@ class DataRouter:
             return self._fetch_index_daily(code, start, end, adjust)
         return self._fetch_stock_daily(code, start, end, adjust)
 
-    def _ordered_for_stock(self, code: str) -> List[BaseAdapter]:
-        """多源分片分压（2026-10-04 设计穿透 92 分）：按 code 稳态归属源优先，其余按 router_order 兜底。
+    def _shard_owner(self, code: str) -> Optional[BaseAdapter]:
+        """code 的分片归属源（无归属返回 None）——串行 failover 与 batch 分组共用的唯一归属判断。
 
-        - 分片只调整 failover 顺序、不改能力：归属源故障自然 failover（数据完整性 > 分压）
         - 稳态映射 int(code) % len(shard_sources)：禁 hash()（PYTHONHASHSEED 随机 →
-          重启换归属 → 滚动窗口自愈会互相覆盖）
-        - 指数/非纯数字 code 与单分片配置（<2 源）退化为原 router_order（零风险兜底）
+          重启换归属 → 滚动窗口自愈会互相覆盖），必须稳定映射
+        - 指数/非纯数字 code 与单分片配置（<2 源）无归属 → None（退化为原 router_order）
+        - 归属源不在已注册 adapter 中（分片池含可选源但未注册）→ None（零风险兜底）
         """
         from config import settings
 
         shard = list(settings.shard_sources)
-        owner = None
-        if code.isdigit() and len(shard) >= 2:
-            owner = self.adapters.get(shard[int(code) % len(shard)])
+        if not code.isdigit() or len(shard) < 2:
+            return None
+        return self.adapters.get(shard[int(code) % len(shard)])
+
+    def _ordered_for_stock(self, code: str) -> List[BaseAdapter]:
+        """多源分片分压（2026-10-04 设计穿透 92 分）：按 code 稳态归属源优先，其余按 router_order 兜底。
+
+        - 分片只调整 failover 顺序、不改能力：归属源故障自然 failover（数据完整性 > 分压）
+        - 归属判断与 batch 分组共用 _shard_owner（单点判断，两处归属一致）
+        - 指数/非纯数字 code 与单分片配置（<2 源）退化为原 router_order（零风险兜底）
+        """
+        owner = self._shard_owner(code)
         if owner is None:
             return list(self._bar_order)
         return [owner] + [a for a in self._bar_order if a is not owner]
@@ -293,6 +349,9 @@ class DataRouter:
             except SourceError as exc:
                 self._mark_failure(adapter.source_name)
                 errors.append(f"{adapter.source_name}: {exc}")
+            except CapabilityError as exc:
+                errors.append(f"{adapter.source_name}: 不支持该复权 ({exc})")
+                # 能力型缺失跨源不一致：后续源可能支持，继续 failover（verifier MEDIUM-1）
             except ParameterError as exc:
                 errors.append(f"{adapter.source_name}: 参数错误 ({exc})")
                 break  # 参数错误跨源一致，无需继续尝试
@@ -314,6 +373,9 @@ class DataRouter:
             except SourceError as exc:
                 self._mark_failure(adapter.source_name)
                 errors.append(f"{adapter.source_name}: {exc}")
+            except CapabilityError as exc:
+                errors.append(f"{adapter.source_name}: 不支持该复权 ({exc})")
+                # 能力型缺失跨源不一致：后续源可能支持，继续 failover（verifier MEDIUM-1）
             except ParameterError as exc:
                 errors.append(f"{adapter.source_name}: 参数错误 ({exc})")
                 break  # 参数错误跨源一致，无需继续尝试
