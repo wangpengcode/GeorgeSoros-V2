@@ -134,7 +134,14 @@ class AkshareAdapter(BaseAdapter):
         任一失败 → 该子集降级为空（不炸整批）。
         """
         codes: set = set()
-        for name, fn in (("st_em", ak.st_em), ("stop_em", ak.stop_em)):
+        for name, candidates in (
+            ("st_em", ("st_em", "stock_zh_a_st_em")),          # akshare ≥1.17 改名 stock_zh_a_st_em
+            ("stop_em", ("stop_em", "stock_zh_a_stop_em")),    # 同上：stock_zh_a_stop_em
+        ):
+            fn = next((getattr(ak, attr) for attr in candidates if hasattr(ak, attr)), None)
+            if fn is None:
+                logger.warning("akshare 无 %s 接口，is_st 子集降级", name)
+                continue
             try:
                 df = fn()
                 if df is None or df.empty or "代码" not in df.columns:

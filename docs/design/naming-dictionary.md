@@ -237,3 +237,4 @@
 | `started_at` | 启动时间（ISO-8601） | GET /jobs/backfill/status 响应 progress |
 | `finished_at` | 结束时间（ISO-8601；null=运行中） | GET /jobs/backfill/status 响应 progress |
 | `error` | 失败原因（仅 FAILED 非 null） | GET /jobs/backfill/status 响应 |
+| `stock_count` | 本次刷新后的有效股票数（已过滤 ST/退市/北交所） | POST /info/refresh 响应 |

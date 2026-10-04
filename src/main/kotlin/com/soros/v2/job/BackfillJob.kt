@@ -111,6 +111,11 @@ class BackfillJob(
         prepareCalendar(from, to)
 
         val plan = buildChunkPlan()
+        // 空候选防御（部署冒烟发现）：空库直接回填=零代码可拉，不能静默 COMPLETED 掩盖配置问题，
+        // 明确 FAILED 引导先刷新股票清单（POST /api/v1/info/refresh）
+        if (plan.totalCodes == 0) {
+            throw BusinessException("股票清单为空：请先 POST /api/v1/info/refresh 刷新股票列表后重试回填")
+        }
         val initial = BackfillProgress(
             totalCodes = plan.totalCodes,
             totalBatches = plan.chunks.size,

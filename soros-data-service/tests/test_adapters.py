@@ -221,6 +221,31 @@ def test_akshare_stock_list_all_sources_fail_raises_source_error(monkeypatch):
         adapter._stock_list_df()
 
 
+def test_akshare_st_codes_resolves_new_api_names(monkeypatch):
+    """akshare ≥1.17 把 st_em/stop_em 改名 stock_zh_a_st_em/stock_zh_a_stop_em：
+    新名优先命中；旧名仍兼容；两名皆缺降级空集（子集降级不炸整批语义）。"""
+    st_df = pd.DataFrame({"代码": ["600000", "000001"], "名称": ["ST测试", "*ST退"]})
+    stop_df = pd.DataFrame({"代码": ["300750"]})
+    monkeypatch.setattr(akshare_module.ak, "stock_zh_a_st_em", lambda: st_df)
+    monkeypatch.setattr(akshare_module.ak, "stock_zh_a_stop_em", lambda: stop_df)
+    monkeypatch.delattr(akshare_module.ak, "st_em", raising=False)
+    monkeypatch.delattr(akshare_module.ak, "stop_em", raising=False)
+    adapter = AkshareAdapter(FakeCircuitBreaker(), FakeRateLimiter())
+    assert adapter._fetch_st_codes() == {"600000", "000001", "300750"}
+
+    # 旧名兼容（若装的是老版本 akshare）
+    monkeypatch.setattr(akshare_module.ak, "st_em", lambda: st_df, raising=False)
+    monkeypatch.setattr(akshare_module.ak, "stop_em", lambda: stop_df, raising=False)
+    assert adapter._fetch_st_codes() == {"600000", "000001", "300750"}
+
+    # 两名皆缺 → 降级空集，不抛
+    monkeypatch.delattr(akshare_module.ak, "st_em", raising=False)
+    monkeypatch.delattr(akshare_module.ak, "stop_em", raising=False)
+    monkeypatch.delattr(akshare_module.ak, "stock_zh_a_st_em", raising=False)
+    monkeypatch.delattr(akshare_module.ak, "stock_zh_a_stop_em", raising=False)
+    assert adapter._fetch_st_codes() == set()
+
+
 def test_akshare_trading_calendar(monkeypatch):
     df = pd.DataFrame({"trade_date": ["2021-10-01", "2021-10-08", "2021-10-11"]})
     monkeypatch.setattr(akshare_module.ak, "tool_trade_date_hist_sina", lambda: df)

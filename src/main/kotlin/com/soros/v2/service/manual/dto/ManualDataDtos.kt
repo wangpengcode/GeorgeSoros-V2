@@ -25,6 +25,11 @@ data class ManualOkResponse(
     @JsonProperty("detail") val detail: String? = null,
 )
 
+/** POST /api/v1/info/refresh 响应：本次刷新后的有效股票数（已过滤 ST/退市/北交所） */
+data class ManualStockListRefreshResponse(
+    @JsonProperty("stock_count") val stockCount: Int,
+)
+
 /** GET /api/v1/history/max/date/{code} 响应（增量锚点，语义原样） */
 data class ManualMaxDateResponse(
     @JsonProperty("code") val code: String,

@@ -5,6 +5,9 @@
 spring:
   application:
     name: soros-v2
+  mvc:
+    async:
+      request-timeout: 600000   # 10min：股票清单刷新/手动重跑等长耗时 suspend 端点（默认 30s 会被 AsyncRequestTimeoutException 取消协程）
   jackson:
     deserialization:
       fail-on-unknown-properties: true   # §2.4 第④层 代码单点层：契约漂移启动/测试期失败
@@ -48,6 +51,7 @@ soros:
     rolling-window-days: 10                 # §4.7 防线④
   python-client:
     base-url: http://localhost:8000         # Python FastAPI（§13.2 超时按 profile）
+    backfill-response-timeout: 600s         # 50 股/批 × 5 年节流拉取实测 60-90s+（原 60s 必超时且重试造成重复外拉）
   backfill:
     batch-size: 50                          # 每次 /daily-bars/batch 请求股票数（§4.4 对齐）
     batch-pause-ms: 1000                    # 批间刻意停顿（间歇性获取铁律，防 IP 封禁）

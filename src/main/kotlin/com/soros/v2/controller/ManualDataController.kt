@@ -1,11 +1,13 @@
 package com.soros.v2.controller
 
+import com.soros.v2.service.StockInfoService
 import com.soros.v2.service.manual.ManualDataService
 import com.soros.v2.service.manual.dto.ManualHistoryDailyRequest
 import com.soros.v2.service.manual.dto.ManualIndexInfoRequest
 import com.soros.v2.service.manual.dto.ManualMaxDateResponse
 import com.soros.v2.service.manual.dto.ManualOkResponse
 import com.soros.v2.service.manual.dto.ManualStockInfoRequest
+import com.soros.v2.service.manual.dto.ManualStockListRefreshResponse
 import com.soros.v2.service.manual.dto.StockIndexDto
 import com.soros.v2.service.manual.dto.StockInfoDto
 import com.soros.v2.service.manual.mapper.toDto
@@ -34,6 +36,7 @@ import org.springframework.web.bind.annotation.RestController
 @RequestMapping("/api/v1")
 class ManualDataController(
     private val manualDataService: ManualDataService,
+    private val stockInfoService: StockInfoService,
 ) {
 
     private val logger = LoggerFactory.getLogger(ManualDataController::class.java)
@@ -71,6 +74,18 @@ class ManualDataController(
     @PostMapping("/info/stock")
     fun infoStock(@RequestBody request: ManualStockInfoRequest): StockInfoDto =
         manualDataService.upsertStockInfo(request).toDto()
+
+    /**
+     * POST /api/v1/info/refresh：全量刷新股票清单（BaoStock query_stock_basic，含
+     * board/market/search_key/ipo_date 回填，ST/退市/北交所隔离）——回填与采集的前置。
+     * 空库直接回填会被防御拒绝（BackfillJob 空候选 FAILED），先调本端点。
+     */
+    @PostMapping("/info/refresh")
+    suspend fun refreshStockList(): ManualStockListRefreshResponse {
+        val stocks = stockInfoService.refreshStockList()
+        logger.info("[manual] 股票清单手动刷新完成 count={}", stocks.size)
+        return ManualStockListRefreshResponse(stockCount = stocks.size)
+    }
 
     /** GET /api/v1/info/all：全量 stock_info */
     @GetMapping("/info/all")

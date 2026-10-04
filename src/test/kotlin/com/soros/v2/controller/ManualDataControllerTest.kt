@@ -1,12 +1,16 @@
 package com.soros.v2.controller
 
+import com.soros.v2.domain.BoardType
 import com.soros.v2.entity.StockIndex
 import com.soros.v2.entity.StockInfo
+import com.soros.v2.service.StockInfoService
 import com.soros.v2.service.dto.SaveBatchResult
+import com.soros.v2.service.dto.StockSearchItem
 import com.soros.v2.service.manual.ManualDataService
 import com.soros.v2.service.manual.dto.ManualHistoryDailyRequest
 import com.soros.v2.service.manual.dto.ManualIndexInfoRequest
 import com.soros.v2.service.manual.dto.ManualStockInfoRequest
+import com.soros.v2.service.manual.dto.ManualStockListRefreshResponse
 import java.time.LocalDate
 import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -75,12 +79,29 @@ class ManualDataControllerTest {
     }
 
     private lateinit var fake: FakeManualDataService
+    private lateinit var fakeStockInfo: FakeStockInfoService
     private lateinit var controller: ManualDataController
+
+    /** Fake StockInfoService：仅 refreshStockList 有行为，其余成员本控制器不触达 */
+    private class FakeStockInfoService : StockInfoService {
+        var refreshResult: List<StockInfo> = emptyList()
+        var refreshCalls = 0
+        override suspend fun refreshStockList(): List<StockInfo> {
+            refreshCalls++
+            return refreshResult
+        }
+        override suspend fun backfillIpoDates(): Int = 0
+        override suspend fun refreshBoardSnapshot(boardType: BoardType): Int = 0
+        override fun findByCode(code: String): StockInfo? = null
+        override fun search(query: String, limit: Int): List<StockSearchItem> = emptyList()
+        override fun saveBenchmarkIndices(): Int = 0
+    }
 
     @BeforeEach
     fun setUp() {
         fake = FakeManualDataService()
-        controller = ManualDataController(fake)
+        fakeStockInfo = FakeStockInfoService()
+        controller = ManualDataController(fake, fakeStockInfo)
     }
 
     // ==================== POST /history/daily：恒返 ok ====================
@@ -257,6 +278,38 @@ class ManualDataControllerTest {
         // then
         assertEquals(2, dtos.size, "全量映射")
         assertEquals(setOf("sh000001", "sz399001"), dtos.map { it.code }.toSet(), "code 集合")
+    }
+
+    // ==================== POST /info/refresh：股票清单手动刷新 ====================
+
+    @Test
+    fun `testInfoRefresh returnsCountFromService`() {
+        // given: 服务返回 3 只有效股票（已过滤 ST/退市/北交所）
+        fakeStockInfo.refreshResult = listOf(stockInfoOf("600000"), stockInfoOf("000001"), stockInfoOf("300750"))
+
+        // when
+        val response = runBlocking { controller.refreshStockList() }
+
+        // then: 返回本次刷新后的有效股票数（snake_case 契约 stock_count）
+        assertEquals(1, fakeStockInfo.refreshCalls, "调用了 refreshStockList")
+        assertEquals(3, response.stockCount, "stock_count=服务返回的有效股票数")
+    }
+
+    @Test
+    fun `testInfoRefresh emptyListReturnsZeroCount`() {
+        // given: 空结果（如 BaoStock 异常返回空，不抛异常路径）
+        fakeStockInfo.refreshResult = emptyList()
+
+        // when
+        val response = runBlocking { controller.refreshStockList() }
+
+        // then: stock_count=0（正常返回，调用方可感知异常态）
+        assertEquals(0, response.stockCount)
+    }
+
+    private fun stockInfoOf(code: String) = StockInfo().apply {
+        this.code = code
+        this.name = "测试股$code"
     }
 
     // ==================== 下游契约：ManualMaxDateResponse / ManualOkResponse 字段 ====================

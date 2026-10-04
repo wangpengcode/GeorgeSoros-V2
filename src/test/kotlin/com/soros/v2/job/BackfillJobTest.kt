@@ -380,6 +380,20 @@ class BackfillJobTest {
     }
 
     @Test
+    fun `testRun emptyUniverseFailsWithGuidanceInsteadOfSilentComplete`() {
+        // given: 不 stub findByIsStFalseAndDelistedFalse（空库——stock_info 无数据）
+        Mockito.`when`(stockInfoRepository.findByIsStFalseAndDelistedFalse()).thenReturn(emptyList())
+
+        // when/then: 空候选必须 BusinessException（BackfillServiceImpl 捕获置 FAILED），
+        // 而不是静默 COMPLETED 掩盖「忘记刷新股票清单」的配置问题
+        val error = assertThrows(BusinessException::class.java) {
+            runBlocking { job.run(from, to) { } }
+        }
+        assertTrue(error.message!!.contains("info/refresh"), "错误信息引导先刷新股票列表：${error.message}")
+        assertEquals(0, pythonClient.fetchCalls, "空清单不发起任何外部请求")
+    }
+
+    @Test
     fun `testRun derivedMismatchFailsJobSurfacesError`() {
         // given: 抽查对拍不一致（DB 派生列与增量路径口径相悖）
         stubMismatchScenario()

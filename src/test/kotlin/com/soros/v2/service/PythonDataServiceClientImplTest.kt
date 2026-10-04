@@ -38,6 +38,7 @@ class PythonDataServiceClientImplTest {
     private lateinit var server: MockWebServer
     private lateinit var client: PythonDataServiceClientImpl
     private lateinit var circuitBreaker: PythonCircuitBreaker
+    private lateinit var webClient: WebClient
 
     @BeforeEach
     fun setUp() {
@@ -47,7 +48,7 @@ class PythonDataServiceClientImplTest {
         val mapper = ObjectMapper()
             .registerModule(KotlinModule.Builder().build())
             .registerModule(JavaTimeModule())
-        val webClient = WebClient.builder()
+        webClient = WebClient.builder()
             .baseUrl(server.url("/").toString())
             .codecs { configurer ->
                 configurer.defaultCodecs().jackson2JsonEncoder(Jackson2JsonEncoder(mapper))
@@ -130,6 +131,44 @@ class PythonDataServiceClientImplTest {
         // then: 熔断接线——调用前询问 + 成功登记（清零计数）
         Mockito.verify(circuitBreaker).allowRequest()
         Mockito.verify(circuitBreaker).recordSuccess()
+    }
+
+    @Test
+    fun `testFetchStockList routesToBackfillClientWhenProvided`() {
+        // given: 提供 backfill WebClient → 全量清单实测 40s+（超 default 10s response timeout），
+        // 必须走 backfill profile（60s / retry 1），不能打在 default client 上
+        val backfillServer = MockWebServer()
+        backfillServer.start()
+        val mapper = ObjectMapper()
+            .registerModule(KotlinModule.Builder().build())
+            .registerModule(JavaTimeModule())
+        val backfillWebClient = WebClient.builder()
+            .baseUrl(backfillServer.url("/").toString())
+            .codecs { configurer ->
+                configurer.defaultCodecs().jackson2JsonEncoder(Jackson2JsonEncoder(mapper))
+                configurer.defaultCodecs().jackson2JsonDecoder(Jackson2JsonDecoder(mapper))
+            }
+            .build()
+        val backfillClient = PythonDataServiceClientImpl(webClient, circuitBreaker, backfillWebClient)
+        backfillServer.enqueue(
+            MockResponse().setResponseCode(200)
+                .setHeader("Content-Type", "application/json")
+                .setBody("""{"status":"ok","stocks":[{"code":"600000","name":"浦发银行","market":"SH","board":"MAIN","is_st":false,"delisted":false}]}"""),
+        )
+        val defaultServerRequest = MockResponse().setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody("""{"status":"ok","stocks":[]}""")
+        server.enqueue(defaultServerRequest.clone())
+
+        // when
+        val stocks = runBlocking { backfillClient.fetchStockList() }
+
+        // then: 请求打在 backfill server，default server 未被消费
+        assertEquals(1, stocks.size)
+        assertEquals("600000", stocks[0].code)
+        assertEquals(1, backfillServer.requestCount, "stock-list 走 backfill client")
+        assertEquals(0, server.requestCount, "default client 未被打到")
+        backfillServer.shutdown()
     }
 
     @Test

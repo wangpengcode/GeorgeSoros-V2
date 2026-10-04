@@ -82,13 +82,18 @@ class PythonDataServiceClientImpl(
         }
     }
 
-    override suspend fun fetchStockList(): List<StockListDto> = executeWithBreaker("stock-list") {
-        callApi(
-            webClient,
-            { webClient.get().uri("/api/v1/stock-list?market=all&board=all").retrieve() },
-            StockListResponse::class.java,
-            DEFAULT_RETRY_COUNT,
-        ).stocks
+    override suspend fun fetchStockList(): List<StockListDto> {
+        // 全量清单实测 40s+（akshare ST 列表 + baostock 退市/ipo 一次拉全市场），
+        // 超出 default profile 10s response timeout（重试必失败）→ 走 backfill profile（60s）
+        val target = backfillWebClient ?: webClient
+        return executeWithBreaker("stock-list") {
+            callApi(
+                target,
+                { target.get().uri("/api/v1/stock-list?market=all&board=all").retrieve() },
+                StockListResponse::class.java,
+                BACKFILL_RETRY_COUNT,
+            ).stocks
+        }
     }
 
     override suspend fun fetchDailyBarsBatch(request: DailyBarsBatchRequest): DailyBarsBatchResponse {

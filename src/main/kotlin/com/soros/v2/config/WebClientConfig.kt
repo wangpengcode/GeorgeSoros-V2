@@ -73,6 +73,8 @@ class WebClientConfig {
                 ExchangeStrategies.builder().codecs { configurer ->
                     configurer.defaultCodecs().jackson2JsonDecoder(Jackson2JsonDecoder(objectMapper))
                     configurer.defaultCodecs().jackson2JsonEncoder(Jackson2JsonEncoder(objectMapper))
+                    // 全市场 stock-list 响应 ~640KB，编解码器默认 256KB 会 DataBufferLimitException
+                    configurer.defaultCodecs().maxInMemorySize(16 * 1024 * 1024)
                 }.build(),
             )
             .build()
