@@ -66,7 +66,8 @@ CREATE TABLE stock_history (
     is_limit_down BOOLEAN DEFAULT FALSE,  -- 跌停
     limit_up_streak SMALLINT DEFAULT 0,   -- 连板数（首板=1，0=非涨停/断板，§4.8 写入时派生）
     limit_down_streak SMALLINT DEFAULT 0, -- 跌停连板数（§4.9 崩塌池依据，与 limit_up_streak 镜像派生）
-    data_source VARCHAR(20) DEFAULT 'UNKNOWN' CHECK (data_source IN ('BAOSTOCK', 'AKSHARE', 'MOOTDX', 'UNKNOWN')),
+    -- V5 起 CHECK 扩 6 值（+AKSHARE_SINA/YAHOO，§18.3）：
+    data_source VARCHAR(20) DEFAULT 'UNKNOWN' CHECK (data_source IN ('BAOSTOCK', 'AKSHARE', 'AKSHARE_SINA', 'MOOTDX', 'YAHOO', 'UNKNOWN')),
     created_at  TIMESTAMP DEFAULT NOW(),
     UNIQUE (code, trade_date)
 );
@@ -333,7 +334,7 @@ CREATE INDEX idx_dragon_cycle_status ON dragon_cycle (status);
 
 | 枚举 | 允许值 | CHECK 约束 |
 |------|--------|-----------|
-| data_source | `BAOSTOCK` / `AKSHARE` / `MOOTDX` / `UNKNOWN` | ✔ stock_history |
+| data_source | `BAOSTOCK` / `AKSHARE` / `AKSHARE_SINA` / `MOOTDX` / `YAHOO` / `UNKNOWN`（V5 扩展，§18.3；akshare 内部 EM→sina failover 归因 akshare-sina） | ✔ stock_history |
 | board | `MAIN` / `GEM` / `STAR`（北交所、B 股不采集） | ✔ stock_info |
 | issue_type（data_quality_log） | `ADJUSTMENT_DRIFT` / `ADJUSTMENT_DRIFT_UNRESOLVED` / `RAW_FALLBACK` / `CROSS_VALIDATE_MISMATCH` / `DELIST_SUSPECT` / `NO_BAR_TODAY` / 其他新增 | ✘（会扩展，代码 enum 单点即可） |
 | market | `SH` / `SZ` | ✘（仅展示用） |
@@ -353,6 +354,9 @@ CREATE INDEX idx_dragon_cycle_status ON dragon_cycle (status);
 | limit_up_streak | 连板数，首板=1，0=非涨停/断板；**Kotlin 派生**（§4.8），Python 不传；停牌断板、IPO 首 5 日强制 0 | limitUpStreak | — | — | — | — |
 | limit_down_streak | 跌停连板数，首日=1；**Kotlin 派生**（§4.8 镜像规则），Python 不传；用于 §4.9 崩塌池 | limitDownStreak | — | — | — | — |
 | data_source | 实际写入来源（failover 可见性） | dataSource | source | — | — | — |
+| calibrated | 该行是否已被 CalibrationJob 与新鲜源对拍通过（V5，§18.3④）；默认 FALSE，merge/saveBatch 均不覆盖 | calibrated | — | — | — | — |
+| calibrated_source | 校准通过时的对拍源（枚举大写，如 BAOSTOCK） | calibratedSource | — | — | — | — |
+| calibrated_at | 校准标记时间（TIMESTAMPTZ） | calibratedAt | — | — | — | — |
 | created_at | 入库时间（DO UPDATE 时不覆盖） | createdAt | — | — | — | — |
 
 **其他表关键口径**：
@@ -924,6 +928,8 @@ PUT /api/v1/sentiment-cycle/{date}/confirm   人工确认/修正 大周期/小�
 
 ### 5.2 三个 Adapter 的代码格式转换
 
+> **2026-10-04 增补第四源**：`YahooAdapter`（可选源，直连 v8/finance/chart，绕开 yfinance 指纹；代码内部 `600000.SS/.SZ`，ticker 映射 6/9→.SS 其余→.SZ）。选型依据与本出口配额约束见 §18.3①；可选源语义（missing-check 只硬查三核心源、failover 恒排尾）见 §18.2。以下表格仍为核心三源。
+
 | 数据源 | 内部格式 | 输入转换 | 输出转换 |
 |--------|---------|---------|---------|
 | BaoStock | `sh.600000` | `"600000"` → 加前缀 → `"sh.600000"` | row[1] `"sh.600000"` → `.replace(".", "")` → 去前缀 → `"600000"` |
@@ -1267,10 +1273,11 @@ SELECT MAX(trade_date) FROM stock_history WHERE code = '600000';
 - **V2 远程**：`git@github.com:wangpengcode/GeorgeSoros-V2.git`（已 push，main 分支在线）
 - **V2 git**：初始 commit `683baae`，已推送至 origin/main
 - **Plan 文件**：`docs/PLAN.md`（本文件，2026-10-02 自 ~/.claude/plans/hazy-brewing-lerdorf.md 迁入；设计产出一律随 repo 走）
+- **2026-10-04 进展**：东财「封禁」事件复盘定稿（§十八）；四件套落地 commit `44d37c3`（YahooAdapter / 分片三源池 / V5 校准三列 / CalibrationJob），Python 129 + Kotlin 399 测试全绿，双服务已部署；存量 UNKNOWN 180,200 行已批准 relabel AKSHARE_SINA；V1→V5 Flyway 全应用。
 
 ### 10.3 等待指令
 
-代码落地等待用户指令。实施顺序参照 §七（Step 1 → Step 6）。
+一期底座（采集/回填/校准/交叉验证）已落地运行。后续实施顺序参照 §七 与 §十二/§十四（二期、盘中实时模块），等待用户指令。
 
 ---
 
@@ -1280,7 +1287,7 @@ SELECT MAX(trade_date) FROM stock_history WHERE code = '600000';
 
 | 端点 | 方法 | 请求 | 响应 |
 |------|------|------|------|
-| /health | GET | — | {status, sources: {baostock/akshare/mootdx: ok\|degraded\|down}} |
+| /health | GET | — | {status, sources: {baostock/akshare/mootdx: ok\|degraded\|down, yahoo: 可选源未注册为 None}} |
 | /stock-list | GET | ?market=all&board=all | {status, stocks: [{code,name,market,board,is_st,delisted}]}（AKShare 列表 + st_em/stop_em 合并） |
 | /daily-bars/batch | POST | {codes[], start_date, end_date, adjust:"qfq"} | {status, results:{code:{source,count,data[]}}, failed:[{code,reason}]}（部分失败不炸整批） |
 | /trading-calendar | GET | — | {dates: ["2021-10-01",...]}（一次全量） |
@@ -1303,7 +1310,7 @@ SELECT MAX(trade_date) FROM stock_history WHERE code = '600000';
 
 错误信封：顶层 {status:"error", error:{code,message}}；单股失败进 failed[]。
 
-**韧性参数**：CircuitBreaker 每源独立（连续 5 次失败 → open 60s → half-open 单探测）；TokenBucket 每源独立（baostock 5 rps / AKShare 2 rps + 抖动 / mootdx 3 rps）；Router 顺序 **baostock → akshare → mootdx**；stock-list/is_st/退市状态**只认 baostock/akshare，mootdx 永不参与**。
+**韧性参数**（2026-10-04 封禁事件后演进，全链路复盘见 §十八）：CircuitBreaker 每源独立（连续 5 次失败 → open 60s → half-open 单探测）+ IPGuard 独立管小时级封禁（§18.2）；TokenBucket 每源独立（baostock 5 rps / AKShare 2 rps + 抖动 / mootdx 3 rps / yahoo 0.5 rps + 0.2s 抖动）；Router 顺序 **baostock → akshare → mootdx → yahoo（可选源，注册才参与，恒排尾）**；多源分片分压 `int(code) % N` 稳态归属（默认池 baostock,akshare,yahoo，§18.3②）；stock-list/is_st/退市状态**只认 baostock/akshare，mootdx/yahoo 永不参与**。
 
 ### 11.2 CrossValidateJob（双源交叉验证，只观测不修正）
 
@@ -2021,3 +2028,71 @@ daily_note(
 **无法判定→定稿**：console 回测指标卡 `r.win/r.trades` ↔ metrics JSONB → §12.5 键名定稿（8 键，console 消费同名）；intraday 样稿未实际消费 strategy_alerts（演示态，M7 实装）。
 
 **样稿侧遗留对齐项（M7 批次，不阻塞落地）**：大肉/大面键名、adr 演示值、events 钉钉混流、kline chip 简写名、notes 简写字段。
+
+---
+
+## 十八、2026-10-04 东财「封禁」事件复盘 + 第四源与校准落地
+
+> 事件：akshare 东财日 K 大面积失败，表象酷似 IP 封禁。经逐跳对照实验定性后，系统性地长出了一套数据源韧性体系（netfix / IPGuard / 分流路由 / 分片分压 / sina failover / Yahoo 第四源 / 校准闭环）。本节是全链路复盘定稿，与正文冲突时以本节为准。
+
+### 18.1 根因定性（对照实验实证链）
+
+**「封禁」假设是错的**。同出口 IP 访问不同东财 CDN 边缘一好一坏 → 不是出口 IP 被封。完整根因链：
+
+1. **家宽原生 IPv6 出口被东财拒**：CDN 的 v6 地址轮换不可控，OS 路由无法按域名治理 v6 目标；
+2. **requests 按 macOS 系统地址序 v6 优先** → 必踩坏边缘；curl 手动 `-4` 能通 ≠ requests 能通（TLS 指纹 / 边缘选择差异）；
+3. push2his K 线族曾整族拒连过一段时间（坏边缘扩散），后自愈。
+
+机器环境事实（repo 记不了，长期留 memory）：飞连全量隧道（utun4，出口固定、重连不换 IP，Claude 流量依赖不能断）；数据源分流路由由用户 sudo 手工添加（61.129.129.196/199、116.162.209.83-85、114.94.20.92、114.94.161.4 → en0 网关），**电脑重启后失效需重加**。
+
+**方法论沉淀：先定性再动手**。若按「IP 封禁」硬打（换代理 / 加大重试），方向全错——本次真正有效的动作全在边缘选择与出口协议栈层面。
+
+### 18.2 韧性体系分层（全部落地）
+
+| 层 | 组件 | 要点与坑 |
+|---|---|---|
+| 进程内网络治理 | **netfix**（soros-data-service） | IPv4 强制（AF_INET）+ eastmoney 域名族边缘 steering（EDGE_POOLS 好边缘池 + 探针失败轮换）。坑①：AF_INET sockaddr 必须 (host, port) **2 元组**，4 元组 create_connection TypeError；坑②：Python `except X as e` 出块 e 即删（作用域陷阱）。**EDGE_POOLS 与 OS 分流路由耦合——新增 EM 域名/IP 必须两处同步补** |
+| OS 分流路由 | sudo 手工 route | 东财/baostock 网段走家宽出口，与 netfix 双保险；重启失效（见 18.1） |
+| 封禁 vs 熔断分离 | **IPGuard** | CircuitBreaker 管秒级瞬态（60s open）；IPGuard 管小时级封禁：连接层失败 5 次/60s → ban，ban 期间请求不出门、failover 立即接管；探针 15→30→60min 退避自愈，真实成功即解封。`/ipguard` 端点独立于 /health（Kotlin Jackson strict 模式，health 模型不能混入新字段） |
+| 多源分片分压 | shard pool | `int(code) % N` 稳态归属（**禁 hash()**——Python 进程间随机），只调顺序不改能力，failover 仍全源可用 |
+| 源内 failover | akshare 双链 | EM(push2his) 失败自动转新浪 `stock_zh_a_daily`，归因 `akshare-sina`；不炸到 Router、不进 IPGuard 失败窗口。sina 口径：无涨跌幅列（raw 双拉计算）、turnover 小数×100、volume 已是股 |
+| 第四源 | Yahoo（可选） | 见 18.3① |
+| 质量闭环 | V5 + CalibrationJob | 见 18.3③④ |
+
+### 18.3 四件套落地（commit `44d37c3`，TDD：Python 129 / Kotlin 399 全绿）
+
+**① YahooAdapter（第四源，可选）**
+- 选型穿透：yfinance 1.2.0 强制 curl_cffi chrome 指纹 → 被 Yahoo 边缘持续 429（喂普通 session 直接 YFDataException）→ **结论=绕开 SDK，直连 `v8/finance/chart` + 普通 requests + 浏览器 UA**。
+- 口径：qfq factor=adjclose/close 缩放 OHLC、close=adjclose；change_percent 用 **RAW** close（拉取窗前扩 10 自然日取 prev close）；turnover 无源=0；amount=(H+L+C)/3×volume 估算；hfq 拒绝（ParameterError）；停牌 None 行跳过；ticker 映射 6/9→`.SS` 其余→`.SZ`。
+- **本出口配额极紧**：突发 ~8 次请求即 403/429 冷却（几十分钟，query1/query2 共享）→ Yahoo 只宜做**校准/对拍腿**，绝不当主力拉取源。
+- 可选源语义：Router missing-check 只硬查三核心源（baostock/akshare/mootdx）；注册后排 failover 序尾；未注册时 /health 的 yahoo 字段为 None。
+
+**② 分片三源池**：默认 `baostock,akshare,yahoo`，`int(code) % 3` 稳态归属；600xxx/000xxx/00xxxx 分布随 %3。
+
+**③ V5 校准三列**：`calibrated` BOOLEAN NOT NULL DEFAULT FALSE / `calibrated_source` VARCHAR(20) / `calibrated_at` TIMESTAMPTZ + 局部索引 `idx_stock_history_uncalibrated (code) WHERE calibrated = FALSE`；CHECK 扩 6 值（+AKSHARE_SINA/YAHOO）；契约测试索引数 44→45。**新增列不被回填覆盖的结构保证**：`merge_stage_to_main.sql` 的 DO UPDATE 是显式列清单（不含校准列）+ saveBatch read-modify-write（findByCodeAndTradeDate ?: new）。
+
+**④ CalibrationJob**：cron `0 13,43 * * * *`（错峰）；回填 RUNNING 整轮让行（避免 COPY/merge 写竞争）；校准窗=未校准行**最新 ≤30 自然日**（确定式尾部推进，分散多天消化）；容差同 CrossValidateJob（close ±0.1% / volume ±1% / change_pct ±0.02pp）；**逐行只标记实际比对过的行**（read-modify-write）；任一差异 → 全部不标记 + data_quality_log(CALIBRATION_MISMATCH) + 钉钉 WARN；Python 空/故障 → 静默跳过（留候选池下轮再试，不产质量噪音）。
+
+### 18.4 事故衍生处置：UNKNOWN 归因缺口
+
+**根因双缺陷叠加**：sina failover 落地前的失败时期 Python 端回 UNKNOWN；且 `DataSourceType.fromPython` 只做大小写等值比对，"akshare-sina"（连字符）映射失败 → 30,255 行 UNKNOWN，存量累积至 180,200 行。
+修复两处：`fromPython` 归一化（`'-'→'_'` + 忽略大小写）；经用户批准执行 relabel（2026-10-04，`UPDATE stock_history SET data_source='AKSHARE_SINA' WHERE data_source='UNKNOWN'` → 180,200 行）。
+现分布：BAOSTOCK 1,153,842 / AKSHARE_SINA 181,378，零 UNKNOWN/MOOTDX。污染监控口径同步改为**只盯 UNKNOWN/MOOTDX 回升**（akshare-sina 是合法值，不误报）。
+
+### 18.5 教训清单（复盘精华）
+
+1. **先定性再动手**：故障表象（"被封了"）与真因（坏边缘 + v6 出口）可能完全无关，对照实验（-4/-6、--resolve 逐边缘、UA A/B）是定性唯一手段。
+2. curl 通 ≠ requests 通（TLS 指纹/边缘选择）；SDK 能跑 ≠ 可控（yfinance 指纹强绑）——SDK 指纹/重试策略不可控时直连 API。
+3. TokenBucket capacity 默认=rate，rate<1 时令牌永远攒不到 1.0 扣减阈值 → acquire 必超时；容量下限 `max(rate, 1.0)`。
+4. Python 嵌套 `except X as e` 出块即删 e（作用域陷阱）。
+5. AF_INET sockaddr 必须 (host, port) 2 元组。
+6. 枚举值域变更必须连 DB CHECK 一起改（V5 CHECK 扩 6 值 + fromPython 归一化同批落地）。
+7. 新增 EM 域名 → EDGE_POOLS + OS 分流路由两处同步（耦合清单，改一处必查另一处）。
+8. 契约测试精确计数（索引 44→45、表 27）是防漂移手段，改 schema 必须同步改断言与命名字典。
+9. 回填续传 to 必须用**交易日末日**：`findMaxTradeDate(code) >= to` 才跳过，to 填今天（非交易日）会全量重拉。
+10. 外源铁律再验证：一律 TokenBucket + 抖动 + 批间停顿，禁止连续猛打（Yahoo 配额事件是最新实证，2026-10-03 用户明令）。
+
+### 18.6 运行态与挂账
+
+- **部署态**：uvicorn 四源注册（/health 四源 ok）、Spring V5 已应用（CHECK 6 值 + 校准列已验证）、回填补拉进行中（2021-10-01 → 2026-09-30，续传跳过已覆盖 code）。
+- **挂账**：Yahoo 配额恢复后 E2E parse 验证（后台探针中）；qfq factor 漂移（存量问题，AdjustCheckStep §17.2 B6 覆盖）；钉钉 webhook 真实地址；search_key 拼音首字母；M3 校准。
