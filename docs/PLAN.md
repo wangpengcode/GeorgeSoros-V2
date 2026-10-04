@@ -2096,3 +2096,53 @@ daily_note(
 
 - **部署态**：uvicorn 四源注册（/health 四源 ok）、Spring V5 已应用（CHECK 6 值 + 校准列已验证）、回填补拉进行中（2021-10-01 → 2026-09-30，续传跳过已覆盖 code）。
 - **挂账**：Yahoo 配额恢复后 E2E parse 验证（后台探针中）；qfq factor 漂移（存量问题，AdjustCheckStep §17.2 B6 覆盖）；钉钉 webhook 真实地址；search_key 拼音首字母；M3 校准。
+
+---
+
+## 十九、数据源拓宽与渠道化管理（2026-10-04 规划定稿，落地待穿透）
+
+> 用户定调：**数据源 = 渠道**（对齐 Payment-X 渠道体系的设计观）。接入形态各异（HTTP API / socket 私有协议 / TDX 二进制 / 浏览器），渠道层归一成统一抽象「能否正确获取数据」；**先接入丰富池子，稳定性归渠道治理兜底**（IPGuard / 熔断 / failover）。数据源是策略、回测、情绪周期等一切下游的起点，渠道池宁多勿缺。
+
+### 19.1 三源溯源结论（源码实锤，2026-10-04）
+
+| 源 | 上游 | 性质 |
+|---|---|---|
+| baostock | `api.baostock.com` 自建服务器（私有二进制 socket） | 二道贩子（自建采集库，qfq 自算） |
+| akshare | 纯聚合爬虫：EM 链→`push2his.eastmoney.com`、sina 链→新浪、**内置腾讯链** `stock_zh_a_hist_tx`→`proxy.finance.qq.com` | 三道贩子 |
+| mootdx | 通达信行情服务器集群（consts.py ~20 个云上 IP），券商 Level-1 转发链路 | 行情转发商 |
+| **关键洞察** | 全部链路上游汇到**交易所/少数转发商**（东财/新浪/腾讯/通达信）；真正源头级=交易所官网自身 | 沪深官网接入依据 |
+
+### 19.2 日更多源分片池（回填完成后实施）
+
+回填（一次性重负载）与日更（~5400 行/天轻负载）是两种负载，源选择逻辑不同。日更模式：**凡有当日记录的源全部接入分片池**，`int(code) % N` 摊派——每源每天仅扛 ~600-800 股，请求量小到任何源都不会触发封禁；单源被封只影响一个分片，failover 接管。
+
+拟纳入池（实测后定稿）：深交所快照 / 上交所接口 / 东财 EM / 新浪 / 腾讯（akshare 内置链，集成成本最低档）/ baostock / mootdx / BrowserAdapter（兜底腿）。**Yahoo 不进日更池**（配额太紧，恒为校准腿，§18.3①）。
+
+### 19.3 国内免费源调研定稿（2026-10-04，调研 Agent 全量实测 + 手工交叉验证）
+
+完整报告：`docs/research/2026-10-04-free-domestic-sources.md`；测试台：`docs/tools/data-source-probe.html`。
+
+**✅ 实测通过（候选池定稿）**：
+1. **腾讯行情（A 级，优先落地）**：`proxy.finance.qq.com / web.ifzq.gtimg.cn / qt.gtimg.cn` 3/3 域全通、无鉴权、qfq 齐全（字段序 [date,open,close,high,low,volume,分红,turnover%,amount万元,占位]）。⚠ akshare 内置 `stock_zh_a_hist_tx` 对 sz000xxx 有 volume×100 bug → **自建 HTTP 解析**（仿现有指数兜底代码），勿直接调包。独立转发商，与东财/新浪不同源。
+2. **上交所行情云 `yunhq.sse.com.cn:32042`（A 级，源头级）**：`GET /v1/sh1/dayk/{code}?select=date,open,high,low,close,volume,amount&begin=0&end=-1` **单次返回单股 IPO 首日至今全历史**（600000 实测 6400 条/377KB，1999-11-10 起）——覆盖深度优于 baostock。raw 不复权、涨跌幅自算；volume 疑似股（落地前与 baostock 交叉核对一次）。端口 32041 SSL 失败用 32042；Referer 必要性待对照实验；深市路径 `v1/sz1/dayk` 待补测。**定位=第五校准源（权威基准）+ 首次建仓灌历史**，非日常批量。
+3. **深交所 CATALOGID=1110 A股列表（B 级）**：2904 只的代码/简称/上市日期/**总股本/流通股本（亿股）**/行业——**§17.1 B1（流通市值）挂账的股本数据源头级来源**，独立立项。
+
+**❌ 实测否决**：雪球（强制 xq_a_token，curl 400）、网易（502 服务端下线坐实）、百度股市通（403 hit-risk 风控，两线程交叉一致，**挂账：加家宽分流表后复测**）、深交所个股日行情（仅单日快照无区间历史——定位改为深市日更入口+校准锚）。
+**同源去重**：efinance/adata 日线主链 100% 同源东财 push2his，无增量不纳；Tushare 免费档 qfq 卡 2000 积分门槛外，列备胎。
+
+**官网源口径**：raw 不复权 → 「raw 真值 + 复权因子推 qfq」（除权日本由 AdjustCheckStep §17.2 B6 重算，两体系咬合）；同时成为 CalibrationJob 的源头级对拍锚。
+
+### 19.4 BrowserAdapter（浏览器取数渠道，规划）
+
+**动机**：真实 Chromium 是最强伪装——yfinance 指纹墙（§18.3①）、Stooq Cloudflare JS 挑战（国外源实测被拦）、SSE Referer、雪球 Cookie 过期、东财坏边缘，全部由浏览器环境天然化解，反封禁能力最强。
+**实现形态**：Playwright 无头浏览器作为 Python 服务的一个 Adapter 进渠道池，定位=**JS 挑战源专属腿 + 其他源全败时的最后兜底腿**（有内存/启动成本，不全量走它）。
+**手工页面形态**：HTML 页以 `<script src>`/JSONP 读数仅限 JS 片段型源（新浪/腾讯），CORS 挡纯 JSON 源——只作应急兜底工具，非日更主链。
+
+### 19.5 渠道管理台（HTML 已建 V1：docs/tools/data-source-probe.html）
+
+- **V1 已交付**：全部渠道的请求配置卡片（URL 模板/Header/口径/风险注记）、参数化测试代码与日期区间、浏览器 no-cors 测连（网络可达+延迟）、一键复制 curl（权威验证，可带 UA/Referer/Cookie）。
+- **V2 渠道运营台账（需后端三件事，落地待确认）**：页面上直接展示每渠道**最近一次成功时间 / 最近一次封禁时间 / 被封的出口 IP / 当前熔断与 IPGuard 状态**——对应后端：① FastAPI 开 CORS（file:// 页面读不到现服务，已实测无 CORS 头）② 渠道状态聚合端点（health+IPGuard+netfix 边缘态归一输出）③ IPGuard 事件历史落库（ban 时间+IP 记录，当前 `/ipguard` 只有瞬时态 `banned:{}`，无历史）。
+
+### 19.6 国外免费源结论（2026-10-04 定稿，调研 Agent 实测）
+
+**国外源对 A 股无增量价值，Yahoo 已是最优解，不再追加评估**。三层否决：① 覆盖层——Twelve Data/EODHD 把沪深锁付费档、Finnhub 国际行情 Enterprise 专属、FMP 仅美股；② 额度层——Alpha Vantage 25 req/天、EODHD 20 req/天，对 5000 股无意义；③ 可达层——Stooq 本机出口被 Cloudflare JS 挑战拦截。报告存档 `docs/research/2026-10-04-free-intl-sources.md`。

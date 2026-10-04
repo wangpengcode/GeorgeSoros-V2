@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>数据源联通性测试台</title>
+<style>
+:root{
+  --bg:#10141a; --panel:#171d26; --panel2:#1d2530; --border:#2a3444;
+  --fg:#d8e0ec; --muted:#8a96a8; --accent:#4ea1ff; --ok:#3ecf8e; --bad:#ff6b6b; --warn:#f0b429;
+  --mono:"SF Mono",Menlo,Consolas,monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--fg);font:14px/1.6 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif;padding:24px 16px 60px}
+.wrap{max-width:1080px;margin:0 auto}
+h1{font-size:22px;margin-bottom:4px}
+.sub{color:var(--muted);font-size:13px;margin-bottom:20px}
+.notice{background:var(--panel2);border:1px solid var(--border);border-left:3px solid var(--warn);border-radius:8px;padding:10px 14px;font-size:13px;color:var(--muted);margin-bottom:20px}
+.notice b{color:var(--warn)}
+.controls{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:14px 16px;display:flex;flex-wrap:wrap;gap:12px;align-items:end;margin-bottom:26px}
+.controls label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted)}
+.controls input{background:var(--panel2);border:1px solid var(--border);color:var(--fg);border-radius:6px;padding:6px 10px;font-family:var(--mono);font-size:13px;width:150px}
+.controls input:focus{outline:1px solid var(--accent)}
+.controls input.wide{width:230px}
+h2{font-size:16px;margin:28px 0 12px;padding-bottom:6px;border-bottom:1px solid var(--border)}
+h2 .tag{font-size:11px;color:var(--muted);font-weight:normal;margin-left:8px}
+.card{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:16px;margin-bottom:14px}
+.card-head{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:6px}
+.card-head .name{font-size:15px;font-weight:600}
+.badge{font-size:11px;padding:2px 8px;border-radius:10px;border:1px solid}
+.badge.role-main{color:var(--ok);border-color:var(--ok)}
+.badge.role-cand{color:var(--accent);border-color:var(--accent)}
+.badge.role-anchor{color:var(--warn);border-color:var(--warn)}
+.badge.role-na{color:var(--muted);border-color:var(--muted)}
+.status{font-size:11px;color:var(--muted);margin-left:auto}
+.desc{font-size:13px;color:var(--muted);margin-bottom:10px}
+.urlbox{background:#0c1016;border:1px solid var(--border);border-radius:6px;padding:10px 12px;font-family:var(--mono);font-size:12px;word-break:break-all;margin-bottom:10px;color:#a8c7e8}
+.meta{font-size:12px;color:var(--muted);margin-bottom:10px}
+.meta b{color:var(--fg);font-weight:600}
+.btns{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+button{cursor:pointer;border-radius:6px;border:1px solid var(--border);background:var(--panel2);color:var(--fg);padding:7px 14px;font-size:13px}
+button:hover{border-color:var(--accent)}
+button.primary{background:var(--accent);border-color:var(--accent);color:#0b1520;font-weight:600}
+button:disabled{opacity:.45;cursor:not-allowed}
+.result{margin-top:10px;font-family:var(--mono);font-size:12px;white-space:pre-wrap;display:none;border-radius:6px;padding:8px 12px}
+.result.ok{display:block;background:rgba(62,207,142,.08);border:1px solid rgba(62,207,142,.4);color:var(--ok)}
+.result.bad{display:block;background:rgba(255,107,107,.08);border:1px solid rgba(255,107,107,.4);color:var(--bad)}
+.card input.cfg{background:var(--panel2);border:1px solid var(--border);color:var(--fg);border-radius:5px;padding:4px 8px;font-family:var(--mono);font-size:12px;width:200px}
+.tokrow{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:8px;align-items:center;font-size:12px;color:var(--muted)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>数据源联通性测试台</h1>
+  <div class="sub">GeorgeSoros-V2 · 全部数据源的请求配置与手动连通性测试 · 2026-10-04</div>
+
+  <div class="notice">
+    <b>使用说明（浏览器硬限制，务必先读）：</b><br>
+    ① 「浏览器测连」用 no-cors 模式，只能判定<b>网络可达 + 延迟</b>，读不到响应体；<br>
+    ② 浏览器禁止伪造 User-Agent / Referer，标注「需特殊头」的源在浏览器里会假阴性——<b>这些源请用「复制 curl」到终端验证（权威方式）</b>；<br>
+    ③ 探测请克制：每个源点一两次即可，禁止连续猛打（防封禁铁律）。
+  </div>
+
+  <div class="controls">
+    <label>测试代码<input id="gCode" value="600000"></label>
+    <label>起始日<input id="gStart" value="2026-09-01"></label>
+    <label>截止日<input id="gEnd" value="2026-09-30"></label>
+    <label>雪球 Cookie<input id="gXq" class="wide" placeholder="xq_a_token=...（可选）"></label>
+    <label>Tushare Token<input id="gTs" class="wide" placeholder="注册后获取（可选）"></label>
+    <label>TwelveData Key<input id="gTd" class="wide" value="demo"></label>
+  </div>
+
+  <div id="cards"></div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const state = {};
+function marketOf(code){
+  code = (code||"").trim();
+  if(/^[69]/.test(code)) return {pre:"sh",suf:"SS",secid:"1."+code,xq:"SH"+code,ts:code+".SH",stooq:code+".ss"};
+  return {pre:"sz",suf:"SZ",secid:"0."+code,xq:"SZ"+code,ts:code+".SZ",stooq:code+".sz"};
+}
+const UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36";
+function fmtD(s){return (s||"").replace(/-/g,"")}
+function days(s,e){ // for yahoo period1/period2 (epoch seconds)
+  const a=new Date((s||"2026-09-01")+"T00:00:00Z").getTime()/1000, b=new Date((e||"2026-09-30")+"T00:00:00Z").getTime()/1000;
+  return [a-86400*10, b+86400]; // yahoo 口径：窗前扩 10 自然日
+}
+
+const SOURCES = [
+// ============ 现役四源 ============
+{g:"现役数据源",name:"akshare · 东财 EM 链",role:"main",roleTxt:"主力分片桶",
+ desc:"东财 push2his K线接口（akshare stock_zh_a_hist 底层）。fqt=1 前复权；secid 市场 1=沪 0=深。",
+ status:"现役 · 已踩过坏 CDN 边缘（netfix steering 治理中）",
+ build:m=>({url:`https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=${m.secid}&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61&klt=101&fqt=1&beg=${fmtD($("gStart").value)}&end=${fmtD($("gEnd").value)}`,headers:{}})},
+{g:"现役数据源",name:"akshare · 新浪链",role:"main",roleTxt:"EM failover 内部链",
+ desc:"新浪日K JSON 接口（scale=240 即日线）。无涨跌幅列（需双拉算），volume 已是股，turnover 为小数需 ×100。归因 akshare-sina。",
+ status:"现役 · 18 万行已归因入库",
+ build:m=>({url:`https://quotes.sina.cn/cn/api/json_v2.php/CN_MarketDataService.getKLineData?symbol=${m.pre}${$("gCode").value}&scale=240&ma=no&datalen=10`,headers:{}})},
+{g:"现役数据源",name:"baostock",role:"main",roleTxt:"主力分片桶",
+ desc:"自建服务器 api.baostock.com，私有二进制 socket 协议——<b>无法用 HTTP/curl 测试</b>。连通性请用 python 一行：import baostock as bs; print(bs.login())",
+ status:"现役 · 列表/ST/退市唯一权威",http:false,build:null},
+{g:"现役数据源",name:"mootdx（通达信）",role:"main",roleTxt:"纯备胎·不复权",
+ desc:"通达信行情服务器集群（consts.py 内置 ~20 个云上 IP），TDX 二进制协议——<b>无法用 HTTP/curl 测试</b>。连通性：python -c &quot;from mootdx.quotes import Quotes; print(Quotes.factory(market=1).bars('600000'))&quot;",
+ status:"现役 · 降级源（记 RAW_FALLBACK）",http:false,build:null},
+{g:"现役数据源",name:"Yahoo Finance（直连 chart API）",role:"main",roleTxt:"可选源·校准腿",
+ desc:"v8/finance/chart 直连（已绕开 yfinance 指纹）。<b>必须带浏览器 UA</b>（浏览器测不到——禁止伪造 UA，请用 curl）。本出口配额极紧：~8 次突发即 403 冷却几十分钟。",
+ status:"现役 · 冷却中（探针监控恢复）",
+ build:m=>{const[p1,p2]=days($("gStart").value,$("gEnd").value);return{url:`https://query1.finance.yahoo.com/v8/finance/chart/${$("gCode").value}.${m.suf}?period1=${Math.floor(p1)}&period2=${Math.floor(p2)}&interval=1d&events=div%2Csplit`,headers:{"User-Agent":UA},note:"403=配额冷却（正常，等自愈）；200=恢复"}}},
+// ============ 交易所官网（源头级） ============
+{g:"交易所官网（源头级）",name:"深交所 SZSE 个股日行情快照",role:"anchor",roleTxt:"源头级·单日快照",
+ desc:"按日期出全市场快照 JSON（一次请求拿全深市当日）。<b>已证实仅单日快照、无区间/历史能力</b>——定位=深市日更入口（raw 真值）+ 校准锚，做不了历史回填。",
+ status:"已实测 ⚠ 单日快照（结构+实测双确认）",
+ build:m=>({url:`https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=<个股行情catalog待定稿>&TABKEY=tab1&txtQueryDate=${$("gEnd").value}`,headers:{},note:"接口族已实测可用（1110 验证通路）；个股日行情 catalog 编号待官网 JS 扫描定稿后替换"})},
+{g:"交易所官网（源头级）",name:"深交所 SZSE CATALOGID=1110 · A股列表",role:"anchor",roleTxt:"源头级·股本数据",
+ desc:"A股列表（2904 只）：代码/简称/上市日期/总股本(亿股)/流通股本(亿股)/行业。<b>§17.1 B1（流通市值）挂账的股本数据源头级来源</b>，独立立项评估。",
+ status:"已实测 ✅ 通路验证（2026-10-04）",
+ build:m=>({url:`https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1110&TABKEY=tab1&txtQueryDate=${$("gEnd").value}`,headers:{}})},
+{g:"交易所官网（源头级）",name:"上交所行情云 yunhq.sse.com.cn · 个股全历史日K",role:"anchor",roleTxt:"源头级·第五校准源",
+ desc:"<b>单次请求返回单股 IPO 首日至今全历史</b>（600000 实测 6400 条、377KB，1999-11-10 起）。select=OHLCV+amount，raw 不复权、涨跌幅自算；volume 疑似股（落地前与 baostock 交叉核对）。端口 32042（32041 SSL 失败）。Referer 必要性待对照实验；深市路径 v1/sz1/dayk 待补测。",
+ status:"已实测 ✅ 全历史一次拉通（2026-10-04）",
+ build:m=>({url:`https://yunhq.sse.com.cn:32042/v1/sh1/dayk/${$("gCode").value}?select=date,open,high,low,close,volume,amount&begin=0&end=-1`,headers:{Referer:"http://www.sse.com.cn/"},note:"begin/end 为日期范围参数（0/-1=全历史）"})},
+// ============ 国内候选 ============
+{g:"国内候选（第五源）",name:"腾讯行情 · 前复权日K",role:"cand",roleTxt:"✅ 实测通过·独立转发商",
+ desc:"param 格式=代码,day,起,止,条数,复权(qfq/hfq/空)。新版接口含成交额/换手率，字段序=[date,open,close,high,low,volume,分红dict,turnover%,amount万元,占位]。⚠ akshare 内置 stock_zh_a_hist_tx 对 sz000xxx 有 volume×100 换算 bug——集成走自建 HTTP 解析，勿直接调包。",
+ status:"已实测 ✅ 3/3 域全通（2026-10-04）",
+ build:m=>({url:`https://proxy.finance.qq.com/ifzqgtimg/appstock/app/newfqkline/get?param=${m.pre}${$("gCode").value},day,${$("gStart").value},${$("gEnd").value},10,qfq`,headers:{}})},
+{g:"国内候选（第五源）",name:"腾讯行情 · 实时快照",role:"cand",roleTxt:"候选",
+ desc:"qt.gtimg.cn 实时行情（GBK 编码，curl 端建议 | iconv -f GBK）。",
+ status:"待实测",
+ build:m=>({url:`https://qt.gtimg.cn/q=${m.pre}${$("gCode").value}`,headers:{}})},
+{g:"国内候选（第五源）",name:"雪球 Xueqiu 日K",role:"cand",roleTxt:"候选·需 Cookie",
+ desc:"v5/stock/chart/kline.json，type=before 即前复权。强制 xq_a_token cookie，curl 无法获取（需浏览器登录保活）。",
+ status:"已实测 ✘ 400 强制 Token（2026-10-04）",
+ build:m=>({url:`https://stock.xueqiu.com/v5/stock/chart/kline.json?symbol=${m.xq}&begin=${Date.now()}&period=day&type=before&count=-10`,headers:{"User-Agent":UA,Cookie:$("gXq").value||"（填 Cookie 后重新复制）"},browserOk:false})},
+{g:"国内候选（第五源）",name:"百度股市通",role:"cand",roleTxt:"候选",
+ desc:"finance.pae.baidu.com vapi 接口。403 hit-risk 风控（两个独立线程交叉验证一致）——疑似飞连隧道出口被标记，<b>挂账：加入家宽分流表后复测</b>。",
+ status:"已实测 ✘ 403 风控（待家宽复测）",
+ build:m=>({url:`https://finance.pae.baidu.com/vapi/v1/getquotation?srcid=5353&pointType=string&group=quotation_kline_ab&query=${$("gCode").value}&code=${$("gCode").value}&market_type=ab&newFormat=1&is_kc=0&finClientType=pc`,headers:{}})},
+{g:"国内候选（第五源）",name:"网易财经 历史CSV",role:"cand",roleTxt:"候选·传闻已关",
+ desc:"quotes.money.163.com/service/chddata.html CSV 下载。服务端已彻底下线，坐实社区传闻。",
+ status:"已实测 ✘ 502 已下线（2026-10-04）",
+ build:m=>({url:`https://quotes.money.163.com/service/chddata.html?code=${/^[69]/.test($("gCode").value)?1:0}${$("gCode").value}&start=${$("gStart").value}&end=${$("gEnd").value}&fields=TCLOSE;VOTURNOVER`,headers:{}})},
+{g:"国内候选（第五源）",name:"Tushare Pro（注册制）",role:"cand",roleTxt:"候选·需 Token",
+ desc:"api.tushare.pro POST JSON。免费 120 积分档日线额度有限；项目挂账里已有「~200元/年 Pro 档」备选项。浏览器 no-cors 发不了 application/json——<b>请用 curl</b>。",
+ status:"待实测（需注册 token）",
+ build:m=>({url:"https://api.tushare.pro",method:"POST",body:JSON.stringify({api_name:"daily",token:$("gTs").value||"（填 token 后重新复制）",params:{ts_code:m.ts,start_date:fmtD($("gStart").value),end_date:fmtD($("gEnd").value)},fields:"trade_date,open,high,low,close,vol,amount"}),headers:{"Content-Type":"application/json"},browserOk:false})},
+// ============ 国外候选 ============
+{g:"国外候选（Yahoo 之外的增量）",name:"Stooq 免费 CSV",role:"cand",roleTxt:"候选·无鉴权",
+ desc:"stooq.com 历史CSV下载，A股符号规则 s=600000.cn（.cn 后缀，非 Yahoo 的 .ss/.sz）。<b>已实测：本机出口被 Cloudflare JS 挑战拦截</b>，curl 只能拿到挑战页。",
+ status:"已实测 ✘ 不可用",
+ build:m=>({url:`https://stooq.com/q/d/l/?s=${$("gCode").value}.cn&d1=${fmtD($("gStart").value)}&d2=${fmtD($("gEnd").value)}&i=d`,headers:{}})},
+{g:"国外候选（Yahoo 之外的增量）",name:"Twelve Data",role:"cand",roleTxt:"候选·免费 800 credits/天",
+ desc:"time_series 接口。官方文档明确 XSHG/XSHE 锁 Venture+ 付费档，免费 Basic 只开 15 交易所不含中国（demo key 实测 401）。",
+ status:"已实测 ✘ A股锁付费档（2026-10-04）",
+ build:m=>({url:`https://api.twelvedata.com/time_series?symbol=${$("gCode").value}.${m.suf}&interval=1day&outputsize=10&apikey=${$("gTd").value||"demo"}`,headers:{}})},
+{g:"国外候选（Yahoo 之外的增量）",name:"Alpha Vantage / Finnhub / Tiingo / FMP / Marketstack",role:"na",roleTxt:"快速排除区",
+ desc:"已定稿排除（2026-10-04 调研）：AV 25 req/天额度无意义且无 A 股符号清单；Finnhub 国际行情 Enterprise 专属；FMP 免费档仅美股；EODHD 免费档 20 req/天且 demo key 对 .SHG/.SHE 直接 403；Marketstack 免费档 100 次/月。",http:false,build:null},
+];
+
+function esc(s){return s.replace(/&/g,"&amp;").replace(/</g,"&lt;")}
+function curlFor(s,m){
+  const r=s.build(m); if(!r)return"";
+  let c=`curl -sS -m 15 -w '\\nHTTP %{http_code} · %{time_total}s\\n'`;
+  for(const[k,v]of Object.entries(r.headers||{})) c+=` -H '${k}: ${v}'`;
+  if(r.method==="POST") c+=` -X POST -d '${r.body}'`;
+  c+=` '${r.url}'`;
+  if(/gtimg\.cn\/q=/.test(r.url)) c+=" | iconv -f GBK -t UTF-8";
+  return c;
+}
+function render(){
+  const code=$("gCode").value.trim()||"600000", m=marketOf(code);
+  const host=$("cards"); let html="",lastG="";
+  for(const s of SOURCES){
+    if(s.g!==lastG){html+=`<h2>${s.g}</h2>`;lastG=s.g}
+    const role=`<span class="badge role-${s.role}">${s.roleTxt}</span>`;
+    let body="";
+    if(s.http===false){
+      body=`<div class="desc">${s.desc}</div>`;
+    }else{
+      const r=s.build(m);
+      const curl=curlFor(s,m);
+      body=`<div class="desc">${s.desc}</div>
+      ${r.note?`<div class="meta">💡 ${r.note}</div>`:""}
+      ${r.method==="POST"?`<div class="meta"><b>POST body:</b> ${esc(r.body)}</div>`:""}
+      ${Object.keys(r.headers||{}).length?`<div class="meta"><b>必要 Header:</b> ${Object.entries(r.headers).map(([k,v])=>k+": "+esc(v)).join(" · ")}</div>`:""}
+      <div class="urlbox">${esc(r.url)}</div>
+      <div class="btns">
+        ${s.browserOk!==false?`<button class="primary" data-test="${SOURCES.indexOf(s)}">浏览器测连</button>`:""}
+        <button data-copy="${SOURCES.indexOf(s)}">复制 curl 命令</button>
+        <span class="status">探测频率克制：1-2 次即可</span>
+      </div>
+      <div class="result" id="res${SOURCES.indexOf(s)}"></div>`;
+    }
+    html+=`<div class="card"><div class="card-head"><span class="name">${s.name}</span>${role}<span class="status">${s.status}</span></div>${body}</div>`;
+  }
+  host.innerHTML=html;
+  host.querySelectorAll("[data-test]").forEach(b=>b.onclick=()=>doTest(+b.dataset.test,m));
+  host.querySelectorAll("[data-copy]").forEach(b=>b.onclick=()=>doCopy(+b.dataset.copy,m,b));
+}
+async function doTest(i,m){
+  const s=SOURCES[i],r=s.build(m),res=$("res"+i);
+  res.className="result bad";res.style.display="block";res.textContent="测试中…";
+  const ctrl=new AbortController();const t=setTimeout(()=>ctrl.abort(),12000);
+  const t0=performance.now();
+  try{
+    await fetch(r.url,{mode:"no-cors",method:r.method||"GET",signal:ctrl.signal});
+    const ms=Math.round(performance.now()-t0);
+    res.className="result ok";
+    res.textContent=`✔ 网络可达 · ${ms}ms\n（no-cors 模式读不到响应体；${Object.keys(r.headers||{}).some(k=>/Referer|User-Agent|Cookie/i.test(k))?"⚠ 本源需特殊 Header，浏览器测连可能假阴性——请用 curl 权威验证":"如需看真实数据请用 curl"}）`;
+  }catch(e){
+    res.textContent=`✘ 失败：${e.name==="AbortError"?"超时 12s":e.message}\n网络层不通或被拒——先换 curl 验证（可带必要 Header）再下结论`;
+  }finally{clearTimeout(t)}
+}
+async function doCopy(i,m,btn){
+  const cmd=curlFor(SOURCES[i],m);
+  try{await navigator.clipboard.writeText(cmd);btn.textContent="已复制 ✓";setTimeout(()=>btn.textContent="复制 curl 命令",1200)}
+  catch(e){const ta=document.createElement("textarea");ta.value=cmd;document.body.appendChild(ta);ta.select();document.execCommand("copy");ta.remove();btn.textContent="已复制 ✓";setTimeout(()=>btn.textContent="复制 curl 命令",1200)}
+}
+["gCode","gStart","gEnd","gXq","gTs","gTd"].forEach(id=>$(id).addEventListener("input",render));
+render();
+</script>
+</body>
+</html>
