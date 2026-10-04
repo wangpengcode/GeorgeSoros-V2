@@ -66,7 +66,8 @@ def _steer(getaddrinfo_fn: Callable[..., List[Tuple]]) -> Callable[..., List[Tup
         edge = current_edge(host) if isinstance(host, str) else None
         if edge is None or not isinstance(port, int) or port <= 0:
             return getaddrinfo_fn(host, port, *args, **kwargs)
-        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (edge, port, 0, 0))]
+        # AF_INET sockaddr 是 2 元组 (host, port)——v6 的 4 元组会让 create_connection 炸 TypeError
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (edge, port))]
 
     return resolve
 
