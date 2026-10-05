@@ -23,10 +23,14 @@ class SentimentReplayController(
     private val replayService: SentimentReplayService,
 ) {
 
-    /** POST /api/v1/jobs/sentiment-replay → 冷启动回放（耗时分钟级，同步返回摘要） */
+    /**
+     * POST /api/v1/jobs/sentiment-replay?from=&to=&force=false|true → 情绪回放（耗时分钟级，同步返回摘要）。
+     * force=false（默认）= 增量补缺断点续跑；force=true = 全量重建（BackfillJob §13.5 钩子传 true）。
+     */
     @PostMapping("/sentiment-replay")
     fun replay(
         @RequestParam("from") @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) from: LocalDate,
         @RequestParam("to") @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) to: LocalDate,
-    ): SentimentReplaySummary = replayService.replay(from, to)
+        @RequestParam("force", defaultValue = "false") force: Boolean = false,
+    ): SentimentReplaySummary = replayService.replay(from, to, force).copy(force = force)
 }

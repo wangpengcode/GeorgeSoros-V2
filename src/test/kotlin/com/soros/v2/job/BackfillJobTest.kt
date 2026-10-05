@@ -317,7 +317,7 @@ class BackfillJobTest {
         // given: 3 股全量成功 + 情绪回放返回摘要
         stubStocks("600000", "600036", "600050")
         pythonClient.batchResponse = response("600000", "600036", "600050")
-        Mockito.`when`(replayService.replay(from, to))
+        Mockito.`when`(replayService.replay(from, to, true))
             .thenReturn(SentimentReplaySummary(from, to, 2, 1, listOf("600000")))
 
         // when: 完整走完完成链（PLAN §六.6⑤：抽 sampleCheckCodes=3 只与增量路径派生列对拍）
@@ -345,7 +345,7 @@ class BackfillJobTest {
         // given: 3 股成功，但情绪回放抛异常（§13.5 失败不阻塞回填结果只告警）
         stubStocks("600000", "600036", "600050")
         pythonClient.batchResponse = response("600000", "600036", "600050")
-        Mockito.`when`(replayService.replay(from, to)).thenThrow(RuntimeException("replay boom"))
+        Mockito.`when`(replayService.replay(from, to, true)).thenThrow(RuntimeException("replay boom"))
 
         // when: 完整走完（含 seam 实现后到回放段）
         val summary = runBlocking { job.run(from, to) { } }

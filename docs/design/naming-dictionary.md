@@ -256,3 +256,7 @@
 | `market_rows` | 落库 market_daily 行数（§19.11.1 回放摘要） | POST /jobs/signal-replay 响应 SignalReplaySummary |
 | `sector_rows` | 落库 sector_daily 行数（§19.11.1 回放摘要） | POST /jobs/signal-replay 响应 SignalReplaySummary |
 | `codes_processed` | 处理股票数（§19.11.1 回放摘要） | POST /jobs/signal-replay 响应 SignalReplaySummary |
+| `force` | 回放模式标记（false=增量补缺断点续跑 / true=全量重建；缺省 false，§19.12 决策 4） | POST /jobs/sentiment-replay 请求参数 + 响应 SentimentReplaySummary（Kotlin 字段 force） |
+| `filled_days` | 本次补算落库交易日数（force=false 增量，§19.12 决策 4） | POST /jobs/sentiment-replay 响应 SentimentReplaySummary（Kotlin 字段 filledDays） |
+| `skipped_days` | force=false 跳过日数（已有行跳过 + 空洞日不落库但状态推进 + 守卫 defer 日，§19.12 决策 4；filled+skipped=总天数不变式成立） | POST /jobs/sentiment-replay 响应 SentimentReplaySummary（Kotlin 字段 skippedDays） |
+| `deferred_dates` | 数据守卫拦下留待下次的缺日清单（覆盖率<90% 前缀截止，§19.12 决策 4） | POST /jobs/sentiment-replay 响应 SentimentReplaySummary（Kotlin 字段 deferredDates） |

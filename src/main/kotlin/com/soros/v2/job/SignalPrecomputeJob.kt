@@ -26,7 +26,9 @@ import org.springframework.stereotype.Component
  *   PARTIAL 行不跳过 → 补算重算为 FULL（§17.2「存在且非 PARTIAL」）。
  * - 21:30 兜底 cron：跳过条件 = 当日 signal_daily 行数>0 且 market_daily 存在且非 PARTIAL；否则 replayDay(today) 补算。
  * - 启动对账（ApplicationReadyEvent）：最近 N 交易日（N=RECONCILE_WINDOW=5）三表
- *   （signal/market/sector_daily）齐全 → 零动作；缺任一 → 对缺失日 replayDay 补算。
+ *   （signal/market/sector_daily）齐全 → 零动作；缺任一 → 对缺失日 replayDay 补算；
+ *   **空库守卫（§19.12）**：缺失窗口首日（或当日）之前无 signal_daily 历史行 → 逐日补算不适用填空库，
+ *   WARN + 钉钉 SIGNAL_DERIVE_FAILED 告警 + 直接返回（零 replayDay），引导全历史回放 POST /api/v1/jobs/signal-replay。
  *
  * 全部盘后入口统一 isTradingDay 守卫（§17.2）；失败降级：补算异常 runCatching 吞掉记日志 + 钉钉告警，不阻塞主流程。
  */
@@ -76,6 +78,16 @@ class SignalPrecomputeJob(
             }
         }
         logger.warn("[Step Signal] 兜底 cron 补算：tradeDate={}（事件丢失或 market PARTIAL）", today)
+        // §19.12 空库守卫：signal_daily 无当日之前的历史行 → 逐日补算不适用填空库，须全历史回放
+        if (!signalDailyRepository.existsByTradeDateLessThan(today)) {
+            logger.warn("[Step Signal] 空库守卫触发：signal_daily 无缺失窗口之前的历史行，逐日补算不适用填空库，请触发全历史回放 POST /api/v1/jobs/signal-replay")
+            notifier.notify(
+                DingTalkEvent.SIGNAL_DERIVE_FAILED,
+                "信号兜底补算空库守卫",
+                "signal_daily 无当日之前的历史行，逐日补算不适用填空库，请触发全历史回放 POST /api/v1/jobs/signal-replay",
+            )
+            return
+        }
         runCatching { replayService.replayDay(today) }
             .onFailure { exception ->
                 logger.error("[Step Signal] 兜底补算失败：tradeDate={} error={}", today, exception.message)
@@ -87,12 +99,13 @@ class SignalPrecomputeJob(
             }
     }
 
-    /** §17.2 启动对账：最近 N 交易日三表齐全性检查，缺则对缺失日补算 */
+    /** §17.2 启动对账：最近 N 交易日三表齐全性检查，缺则对缺失日补算（§19.12 空库守卫前置） */
     @EventListener(ApplicationReadyEvent::class)
     fun startupReconciliation() {
         val today = LocalDate.now()
         val recentDays = calendarService.recentTradingDays(today, RECONCILE_WINDOW)
         logger.info("[Step Signal] 启动对账：最近 {} 交易日三表齐全性检查", RECONCILE_WINDOW)
+        val missingDays = mutableListOf<LocalDate>()
         for (day in recentDays) {
             val signalOk = signalDailyRepository.countByTradeDate(day) > 0
             val marketOk = marketDailyRepository.existsByTradeDate(day)
@@ -104,16 +117,31 @@ class SignalPrecomputeJob(
                     "[Step Signal] 启动对账发现缺口补算：tradeDate={} signal={} market={} sector={}",
                     day, signalOk, marketOk, sectorOk,
                 )
-                runCatching { replayService.replayDay(day) }
-                    .onFailure { exception ->
-                        logger.error("[Step Signal] 启动对账补算失败：tradeDate={} error={}", day, exception.message)
-                        notifier.notify(
-                            DingTalkEvent.SIGNAL_DERIVE_FAILED,
-                            "信号启动对账补算失败",
-                            "交易日=$day，异常=${exception.message}",
-                        )
-                    }
+                missingDays.add(day)
             }
+        }
+        if (missingDays.isEmpty()) return
+        // §19.12 空库守卫：signal_daily 无缺失窗口首日之前的历史行 → 逐日补算不适用填空库，须全历史回放
+        val windowStart = missingDays.min()
+        if (!signalDailyRepository.existsByTradeDateLessThan(windowStart)) {
+            logger.warn("[Step Signal] 空库守卫触发：signal_daily 无缺失窗口之前的历史行，逐日补算不适用填空库，请触发全历史回放 POST /api/v1/jobs/signal-replay")
+            notifier.notify(
+                DingTalkEvent.SIGNAL_DERIVE_FAILED,
+                "信号启动对账空库守卫",
+                "signal_daily 无缺失窗口之前的历史行，逐日补算不适用填空库，请触发全历史回放 POST /api/v1/jobs/signal-replay",
+            )
+            return
+        }
+        for (day in missingDays) {
+            runCatching { replayService.replayDay(day) }
+                .onFailure { exception ->
+                    logger.error("[Step Signal] 启动对账补算失败：tradeDate={} error={}", day, exception.message)
+                    notifier.notify(
+                        DingTalkEvent.SIGNAL_DERIVE_FAILED,
+                        "信号启动对账补算失败",
+                        "交易日=$day，异常=${exception.message}",
+                    )
+                }
         }
     }
 

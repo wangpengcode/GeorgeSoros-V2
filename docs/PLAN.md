@@ -2278,3 +2278,313 @@ qfq_t = raw_t × ∏ f(除权日 > t)                        # 尾部锚定：�
 7. 递推桶数 → **180**（PLAN 180/300 两处不一致，取 180 定稿）
 
 设计要点：cost_dev=PLAN 版符号（迁移 COMMENT 纠正 DDL 注释）；递推 D_t=D_{t-1}×(1−tr)+tr×triangular(high,low,close)，qfq 坐标，一字板±0.5% 扁平兜底，停牌分布冻结，warm-up 60 日 NULL；增量=监听 SentimentCycleCompleted（新事件）+21:30 兜底，每票全历史只读递推只写当日行（幂等+除权免疫）；全历史回放=按股分批 200 股/事务（**禁止照抄 SentimentReplay 单事务整区间**），每 500 股进度日志，断点续跑；除权检测内置（隐含昨收≠前日 close → 该票全日期重算重写+更新 adj_processed_until）；AttributionStep(LLM 归因) 拆独立后续任务。落码清单 V9 迁移+3 entity/3 repo+事件+递推纯函数+聚合 service+回放 service+Job+触发端点+单测/TestContainers 集成，估 2.5-3.5 天。
+
+#### §19.12 情绪回放性能改造定稿（2026-10-05，用户拍板：批量加载+按天分事务+增量补缺断点续跑）
+
+**背景与目标**：SentimentReplayServiceImpl 现状 = 单巨型 @Transactional + 每日单查 6 日窗（1211 天 × 全市场 ≈ 3800 万行实体加载）、无进度日志、挂掉全回滚必须从头重跑（实测小时级跑不完）。改造后：柱子 [from,to] 批量瘦身投影加载（~548-630 万行，**按年分块**）、**每日独立事务**（TransactionTemplate，镜像 §19.11.1 SignalReplayServiceImpl）、**增量补缺 + force 参数**（断点续跑天然成立）、进度日志每 50 交易日。**对外契约保持**：派生口径（涨停/连板/强势池/大肉大面/龙头状态机，纯 stock_history + trading_calendar + stock_info ST 推导）完全不变；POST /api/v1/jobs/sentiment-replay?from=&to= 入参与响应字段（追加 force/skipped/补算日数，向后兼容）；BackfillJob §13.5 回填钩子调用点。
+
+**已拍板决策**：
+
+1. **瘦身投影批量加载**：StockHistoryRepository 新增 native 投影查询 `findReplayBars(start, end)`，只取回放推导**实际消费的 8 字段**（穿透核对 computeFor 全链：code/tradeDate/close/changePct/isLimitUp/isLimitDown/limitUpStreak/limitDownStreak；**open/high/low/volume/amount/turnoverRate 在回放推导路径零消费，不进投影**——KDoc 留痕：未来 computeFor 新增字段消费须同步扩投影）。加载范围 = [区间首日 −6 日历日, 区间末日]，按 code 分组驻内存（每股 tradeDate 升序）。**禁止逐日 × 6 日窗全实体加载**。投影用接口投影（防实体 hydration），Loader 物化为瘦身 StockHistory（id=0，仅 8 字段），`SentimentComputeContext.barsByCode` 仍 `Map<String, List<StockHistory>>`（computeFor 签名**零改动**，Job 路径不受影响）。
+2. **内存账与分块结论：按年分块**。全区间 ≈ 5224 股 × ~1211 交易日 ≈ 630 万行；瘦身 StockHistory ~200B/行 → 全量驻留 ~1.26GB，超常规堆安全余量；**按年分块**每块 ~250 交易日 × 5224 ≈ 130 万行 ≈ 260MB（+瞬时投影 ~130MB，峰值 ~390MB/块）→ 安全。块间衔接：`prevCycle`/`activeDragon` 为程序变量随循环跨块（本就驻内存、不落库、不重读），bars 块内独立；每块加载 [块首 −6 日, 块末]。区间 ≤1 年则单块（不触发分块）。堆紧张时 Implementer 可选 JdbcTemplate 行流折叠转换（投影→实体），峰值再降一半。
+3. **按天分事务（TransactionTemplate）**：去掉 `replay()` 上的 `@Transactional`，构造注入 `PlatformTransactionManager`（镜像 SignalReplayServiceImpl）。每日独立事务：`txTemplate.execute { delete(sentiment_cycle 当日行) + delete(dragon_cycle 当日行) + save(sentiment) + saveAll(dragonUpdates) }`；computeFor 在事务外（纯函数零 DB 访问），事务只持 delete+insert 短锁。挂掉最多损失正在算的一天；重跑幂等。**force=true（全量重建）路径保留事务0 预清理**（区间整体 delete 两表，现状语义）——防 `uq_dragon_active` 冲突（重建期冷启动空 activeDragon，区间内旧进行中周期必须先清）。force=false 不做预清理（增量热启动须保留区间前进行中龙头，见决策 5）。
+4. **增量补缺 + force 参数（用户定稿，替代「砍掉断点续跑」）**：
+   - `POST /api/v1/jobs/sentiment-replay?from=&to=&force=false|true`，`SentimentReplayService.replay(from, to, force=false)`。
+   - **force=false 增量**：待算清单 = trading_calendar ∩ [from,to] − sentiment_cycle 已有行日期；已有行跳过（断点续跑天然成立，重跑同一接口即从第一个缺日 D0 继续）。自 D0 起内存逐日递推，**只落缺日行**；D0 前一交易日做断点热启动（决策 5）。D0 之后若遇已存在「空洞日」（缺日集合不连续），该日内存照常 computeFor 推进递推状态但**不落库**（状态连续性），`skippedDays` 累计；持久化仅对缺日。
+   - **force=true 全量重建**：事务0 删区间行后从头冷启动重建（现状语义），用于 stock_history 底层被修正后的修复场景（**BackfillJob §13.5 钩子传 force=true**）。
+   - **数据守卫**：缺日 D 若当日非 ST 有效股柱子覆盖率 < 90%（`barCount(D) < stockInfoRepository.countByIsStFalseAndDelistedFalse() × 0.9`）→ 不硬算、记 WARN 列当日清单，并**停止本轮的后续落库**（前缀截止；此前已落库行保留），等数据到位下次触发自动补；不因个别缺日中断整体、不写基于残缺数据的错误行（守卫阈值常数 `BAR_COVERAGE_THRESHOLD=0.9`）。
+   - **响应结构扩展（便于对账）**：SentimentReplaySummary 增 `force` / `filledDays`（本次补算落库交易日数）/ `skippedDays`（force=false 跳过日数）/ `deferredDates`（守卫拦下留待下次的缺日清单）；既有 from/to/sentimentRows/dragonRows/dragonCycleList 不变。
+5. **断点热启动（决策 4 的一致性核心）**：跳过模式下递推状态**必须从「第一个缺日 D0 的前一交易日」重建**，不能假设从 from 冷启动（from 若非历史真起点，冷启动龙头状态会偏离 DB 已编码的历史真值）。核对表结构后选 **方案 b：断点热启动，可行**——
+   - `prevCycle = sentimentCycleRepository.findByTradeDate(D0 前一交易日)`：sentiment_cycle 已落每行大肉/大面名单 JSONB（§17.5 C1 结构），followup 兑现所需列齐全；
+   - `activeDragon = dragonCycleRepository.findAllByEndDateIsNull()`：dragon_cycle `end_date IS NULL` 每股唯一（uq_dragon_active 索引），**SentimentCycleJob 每日增量即此口径（已生产验证）**；
+   - `calendar` = [min(from, 全部进行中龙头的 brokenDate), to] 交易日前缀：热启动龙头 `brokenDate` 可能 < from，观察期计数须从 brokenDate 起算，否则 advanceBroken 观察窗少计、BROKEN 存活被拉长；
+   - 代价：额外 2 次启动读 + calendar 前缀扩展；假设 DB 现有进行中龙头与前一交易日行是当前口径产物（computeFor 纯函数 + 同 bars → 确定性一致）。用户若怀疑 DB 状态陈旧/损坏 → force=true 全量重建。对比**方案 a（区间首日全内存递推、只写缺日）**：实现更简但要求 from=历史真起点，from 中途时龙头状态偏离 DB 真值 → 弃。
+6. **进度日志**：开始/结束（from/to/交易日数/总耗时/总行数/补算-跳过-守卫数）+ 每 50 个交易日一条进度（已完成/总交易日、累计落库行数、最近一日耗时）。
+
+**设计要点**（穿透核对）：
+- **事务边界图**：force=false——computeFor 事务外 → `persistDay` 内 `transactionTemplate.execute { deleteByTradeDateBetween(day,day) → deleteByStartDateBetween(day,day) → save(sentiment) → saveAll(dragonUpdates) }`，异常当日整体回滚、异常向上抛（abort 本轮，此前天已提交）；force=true——事务0（区间 delete 两表+flush）+ 同每日事务。删除重建语义整体 = 区间删后重建（force=false 按天删当日行增量重建，防新旧混杂）。
+- **dragon 跨日一致性确认（成立）**：龙头状态机跨日递推在内存中连续推进（同一对象引用，状态机就地 mutate），落库按天提交；递推状态（prevCycle/activeDragon）不落库、不重读——现有代码已成立（computeFor 纯函数零 DB 访问；Job 每日从 DB 读 activeDragon 是增量口径，回放从空/热启动）。按天提交向并发读（网页/每日 Job）暴露中间状态，属有意取舍（挂掉最多损失一天）。
+- **不变式清单**：① 派生口径零改动（computeFor 纯函数不动；投影 8 字段 ⊇ 实际消费字段，缺一即口径漂移）；② `SentimentComputeService`/`SentimentComputeContext` 签名不变（barsByCode 仍 `Map<String, List<StockHistory>>`）；③ `SentimentReplayService.replay(from,to,force=false)` 的 from/to 语义与既有 summary 字段不变；④ BackfillJob §13.5 钩子调用点 + try/catch 语义不变（仅改传 force=true）；⑤ 严格按 trading_calendar 升序、不可并行、不可跳日（守卫 defer 除外）；⑥ 回放首日新建龙头 note=BOOT；⑦ JSON 名单列（dragon_json/big_meat_list 等）回放路径不富化（纯函数留 null 原样落库），现状保持；⑧ ST 隔离——is_st 仅用于排除（stCodes 过滤 + 守卫口径非 ST 有效股），不出现为业务可选项；⑨ uq_dragon_active 每股至多 1 条进行中周期（按天 merge-update 不产生重复 active 行）。
+- **风险与回归点**：① 内存——全量不按年分块 ~1.26GB 有 OOM 风险，分块后 ~260-390MB/块安全；② 测试回归——单测构造参数 + 删段断言、集成测试 mock 双对象 + 重跑语义、BackfillJob 系列 stub 均须随新签名调整（见落码清单）；③ 部分区间重放 + 区间前进行中龙头 → uq_dragon_active 冲突为**预先存在**问题（现状同），force=false 热启动反而更稳，force=true 冷启动由事务0 预清理兜底；④ 守卫阈值下覆盖率不足日被 defer 属预期，重触发自动补；⑤ 每日常量级短事务（~1211 次）开销可忽略；dragon delete 无 start_date 索引走全表扫（表小 ~几千行，可接受，可选补索引）。
+
+**落码清单**（文件级；只动以下，不改派生口径）：
+- `src/main/kotlin/com/soros/v2/repository/StockHistoryRepository.kt`：新增 `findReplayBars(start, end)` + 嵌套 `ReplayBarProjection`（8 字段接口投影）。
+- `src/main/kotlin/com/soros/v2/service/sentiment/SentimentReplayService.kt`：签名改 `replay(from, to, force=false)`；SentimentReplaySummary 增 force/filledDays/skippedDays/deferredDates。
+- `src/main/kotlin/com/soros/v2/service/sentiment/SentimentReplayServiceImpl.kt`：去 @Transactional；构造注入 PlatformTransactionManager（`transactionTemplate`）；拆 private 方法：`loadBars(chunkStart, chunkEnd)`（分块加载+ST 过滤+按 code 分组）/ `buildMissingList(from,to)`（待算清单）/ `hotStartState(D0)`（prevCycle+activeDragon）/ `sliceWindow(barsByCode, day)`（6 日窗子列表）/ `persistDay(day, result)`（每日事务）/ 数据守卫 / 进度日志。
+- `src/main/kotlin/com/soros/v2/controller/SentimentReplayController.kt`：端点加 `force`（默认 false）。
+- `src/main/kotlin/com/soros/v2/job/BackfillJob.kt`：`replaySentiment(from,to)` 改传 `force=true`。
+- 测试（Test Writer）：`SentimentReplayServiceImplTest`（构造加 transactionManager + 删段断言改按天）、`SentimentReplayIntegrationTest`（setUp 复用同一 DragonCycle 对象引用 + 重跑用 force=true）、`BackfillJobTest/BackfillJobRerunTest/BackfillJobRoundRescanTest/BackfillRerunPlanIntegrationTest`（stub 改 3 参 `replay(from,to,true)`）。
+- **无 Flyway 迁移**（无新表/新列；投影只读现有列）。
+- 估时 1-2 天。
+
+### 19.13 三页面端点/前端契约定稿（2026-10-05，用户拍板：三个页面一起做）
+
+> 本节只定「端点契约 + 页面结构 + 落码范围 + 6 个契约缝隙处置」，**不改 schema、不动命名册**——三页全部复用现有 26 表（5 张盘中表 V1 已建，零新表）。新响应键在设计中标注「命名待增册」，字典增册统一留 test-writer 阶段做（避免与在跑的 Implementer 冲突）。口径铁律重申：OHLC=qfq、change_pct=不复权、volume=股、amount=元、`is_st` 仅用于排除（全链路无 ST 数据）。
+
+#### 19.13.1 K线复盘 kline.html（步骤 2，需求已定稿）
+
+**决策**：
+
+1. **kline 端点 = query 风格 `GET /api/v1/kline?code=&from=&to=&date=`**，取代 §17.5 C4 的 path 风格 `/stocks/{code}/kline`。理由：页面切换股票不重建路由（与 /stock-search 同风格）；from/to 缺省语义用 query param 表达更干净。C4 响应 schema 保留并扩充（决策 3）。
+2. **默认窗口 = 近 250 交易日，可拉全量**（§19.11 步骤 2 定稿语义）。行为矩阵（优先级：date > 显式 to；from 缺省 250 日窗口；from 显式即全量）：
+   - 仅 `code`：`to`=最近交易日（≤today，吸附口径 A 同款），`from`=`to`−249 交易日
+   - `code+date`：`to`=`≤date` 最近交易日（date 语义=该日为终点，to=date 截断），`from`=`to`−249
+   - `code+from+to`：显式区间（含两端）；**date 与 from/to 同时传时 date 作废 + WARN**（页面不触发该组合）
+   - `code+from`（无 to）→ `to`=最近交易日；`code+to`（无 from）→ `from`=`to`−249
+   - 「全量」按钮 = `from=2021-01-01`（后端按实际最早 bar 自然截断，回填起点 2021-10-01 起步）
+3. **响应 bars 增 `change_pct`/`turnover_rate` 两字段**（§19.11 决策 2）；筹码 8 列不增不删；**avg_cost 后端不返回**（前端自算，见决策 4）。换手率直读 `stock_history.turnover_rate`（采集已落库，§12.4.1 旧注「现算 volume/float_shares×100」作废——2026-10-03 后 turnover_rate 已由采集管线入库，直读即可）。
+4. **筹码曲线前端递推渲染**（§19.11 决策 2 复述）：前端拿 bars（含 turnover_rate）自算 180 桶三角分布递推（`D_t=D_{t-1}×(1−tr)+tr×tri(qfq_high,qfq_low,qfq_close)`，qfq 坐标）画密度曲线；**signal_daily 8 列为权威锚**画 c90/c70 带状区间（带内叠曲线），avg_cost 前端派生 = `close/(1+cost_dev/100)`（与 §12.4.1 后端公式同源）。**明确结论：不加新端点**——8 列画带状 + bar 自算成本线足够，细粒度桶不落库不传输（决策 2「不落库不补端点」的完整落地）。
+
+**端点契约**（snake_case，命名先查册）：
+
+```
+GET /api/v1/kline?code=600000&from=&to=&date=
+→ 200 {
+  "code": "600000",
+  "name": "浦发银行",                  // stock_info.name（联想下拉选中即带，页面缓存即可）
+  "bars": [{
+    "trade_date": "2026-09-30",        // 命名字典 trade_date；C4 §12.4.1 字面 "date" 作废
+    "open": 9.22, "high": 9.49, "low": 9.16, "close": 9.48,   // qfq
+    "volume": 147484820, "amount": 1386209937.38,             // 股 / 元
+    "change_pct": 1.28, "turnover_rate": 0.42,                // 不复权 / %
+    "chip": {                                                  // signal_daily 8 列（键名=DDL 一字不差）
+      "profit_ratio": 92.9, "cost_dev": -1.2,
+      "c90_low": 8.10, "c90_high": 9.55, "c90_conc": 61.2,
+      "c70_low": 8.65, "c70_high": 9.40, "c70_conc": 43.8
+    }   // chip=null：warm-up 前 60 日或 signal_daily 缺行 → 前端画"筹码暂缺"，avg_cost 线退化为 1 日
+  }] }
+→ 404：code 不存在（stock_history 无行 且 stock_info 无此码）
+→ 422：from>to
+```
+- 键名过册情况：`trade_date/open/high/low/close/volume/amount/change_pct/turnover_rate` + chip 8 键全在 §5 册；`code/name` 复用列名语义。**`bars` 命名待增册**（升序区间数组，语义与 §6 `items` 同族但页面消费名 bars——建议增册为独立键）。
+- 实现路径（零新表）：`StockHistoryRepository.findByCodeAndTradeDateBetween`（已存在）+ `SignalDailyRepository.findByCodeAndTradeDateBetween`（已存在）+ `StockInfoRepository.findByCode`，Service 按 trade_date 键 join 成 bars[]；chip 无 signal_daily 行 → null。
+
+**页面结构 kline.html**（静态 resources，风格对齐 sentiment.html：深色单主题 / 红涨绿跌 / gs-nav 侧栏）：
+
+1. **搜索框（防抖 300ms + 联想下拉）**：`GET /api/v1/stock-search?q=&limit=8`（现状已满足：code 前缀 OR name 小写包含，排除 is_st/delisted；**拼音挂账**，本期不实现），选中 → `GET /api/v1/kline?code=` 加载。
+2. **日期选择**：`input type=date` + 快速按钮「近 250 日 / 全量」；?date= 即该日为终点。
+3. **K线主图（ECharts candlestick）**：CDN cdnjs pinned 版（建议 `https://cdnjs.cloudflare.com/ajax/libs/echarts/5.5.1/echarts.min.js`），MA5/MA10/MA20 叠加 + 成交量副图，dataZoom 联动；CDN 失败降级 = 简易 SVG 蜡烛（零依赖兜底，不阻塞主功能）。
+4. **筹码带副图（与主图同 x 轴 dataZoom sync）**：c90 带（浅）+ c70 带（深）+ avg_cost 中心线（前端派生）+ 前端自算密度曲线（决策 4）。
+5. **数字卡**：获利盘%（profit_ratio）、成本偏离%（cost_dev，红涨绿跌着色）、90%/70% 集中度、avg_cost（前端派生）、换手率、最高/最低/量能。
+6. **备注卡**：与笔记系统联动（`GS_NOTE_SYNC(code)` 钩子同 sentiment.html，daily_note page=KLINE，§15）。
+7. **侧栏导航**：gs-nav 增「K线复盘 / 盘中监控 / 策略控制台」三个入口（sentiment.html 同款 navcss）。
+
+**落码清单**（文件级）：
+- `src/main/kotlin/com/soros/v2/controller/KlineController.kt`（新建）：`GET /api/v1/kline`
+- `src/main/kotlin/com/soros/v2/service/kline/KlineService.kt` + `KlineServiceImpl.kt`（新建）：窗口计算（trading_calendar 吸附）+ bars∘chip join + code 存在性校验
+- `src/main/kotlin/com/soros/v2/service/kline/dto/KlineDtos.kt`（新建）：`KlineResponse/KlineBar/KlineChip`（@JsonProperty snake_case，chip 键=DDL 全名）
+- `src/main/kotlin/com/soros/v2/service/kline/mapper/KlineMappers.kt`（新建）：`StockHistory.toKlineBar()` / `SignalDaily.toKlineChip()` 扩展函数
+- `src/main/resources/static/kline.html`（新建，~ECharts + 零依赖降级）
+- **无 Flyway 迁移**（读现有列）
+- 估时 1-1.5 天
+
+**测试要点**（Test Writer）：
+- MockMvc 契约：GET /api/v1/kline 默认窗口（250 日）/ ?date= 截断 / from+to 显式 / from>to 422 / 未知 code 404 / chip=null（warm-up 段）响应键与字典逐字段对齐
+- TestContainers 数据回放断言：灌少量 bars（含 turnover_rate）+ signal_daily 8 列 → 断言响应 bars[] 升序、chip 键值映射、date 吸附逻辑（date=非交易日 → 吸附最近交易日）
+
+#### 19.13.2 盘中监控 intraday.html（步骤 3，决策 3/4/5 前提开工）
+
+**决策（§19.11 决策 3/4/5 的定稿展开）**：
+
+1. **盘中数据写入 = Kotlin 从 Python 数据服务拉**（决策 3）：Kotlin `IntradayJob` 为盘中唯一调度器；Python 只新增**只读拉取端点（不碰库）**，实时层五表写入全在 Kotlin 侧（「实时层绝不写 stock_history」机器级成立，§14.1 铁律 1）。
+2. **盘中实时 ladder = snap 现拼**（决策 4）：`GET /api/v1/intraday/summary` 读 `intraday_pool_snap` 最新行 JSON 现拼（ZT 池按 `limit_up_streak` DESC + PREV 昨涨停 + STRONG 候选），不落梯队表；收盘后读 `intraday_archive`；曲线走 `intraday_replay`（回放/当日盘后完整态）。
+3. **盘中限频 = 独立 TokenBucket**（决策 5，与日 K 桶分家）：Kotlin 侧新增独立 TokenBucket（不共享日 K fetch 路径），参数建议值 + 纪律：
+   - 池接口（ZT/ZB/DT/STRONG/PREV）：**0.10 rps（1 请求/10s）、容量 3、抖动 ±5s**——5 池错峰相位铺在 90s 采样周期内（每池间隔 ≥15s），每分钟 ≤6 次池请求；与日 K AKShare 桶（0.06 rps≈3.6/min）**分桶隔离互不干扰**（决策 5「分家」语义：回填高峰不饿死盘中，盘中节奏不叠加进日 K 桶），聚合 EM 压力由 90s 采样节奏 + IPGuard/退避兜底（§14.3 已探针验证该节奏上限）
+   - 全市场快照 spot：**0.012 rps（≈1/85s）、容量 1、抖动 30s**（90s 一轮 + 随机抖动）
+   - bid_ask 五档：**0.5 rps（30/min 上限，决策 5「收敛 ≤30/min」）、容量 10、抖动 0.2s**——候选名单（梯队 ∪ 强势池预警 ∪ 龙头 ~50 只）30s 一轮分片轮询，单轮 ≤15 次
+   - 退避铁律（§14.3 同款）：连续 3 次失败 → 降频 2 倍；连续 6 次 → 停轮 300s + 钉钉告警；间歇性获取纪律（TokenBucket 限流 + 抖动 + 批间停顿）不因盘中「实时」需求打破
+4. **交易时段守卫**：`trading_calendar.isTradingDay` + 时段窗口 `09:15-11:30 / 13:00-15:00`；午休（11:30-13:00）与非交易日**零轮询零空转**（§14.6 定稿；IntradayJob 不依赖 §13.4 握手链，独立故障域）。9:15-9:25 竞价窗口预留 pre_min gap 快照槽位（**gap_pct 竞价方案落地盘中时再穿透定稿**，§19.11 决策 5 遗留，本期不做）。
+5. **落表范围**：**五表 V1 已建、零新表**（intraday_pool_snap/pool_state/event/archive/replay）；Kotlin 侧 entity/repo 全缺 → 补齐。可选 V10（性能）：`CREATE INDEX idx_snap_pool_at ON intraday_pool_snap (pool, snap_at DESC)`（summary 现拼「每池最新行」高频读；表小非必需，Implementer 视量级定）。
+
+**Python 服务现状核对（源码实锤）与缝隙**：`soros-data-service/main.py + router.py` 现有端点 = `/health /stock-list /daily-bars/batch /daily-bars/cross-validate /trading-calendar /fundamentals /board-members /ipguard /channels`——**无任何盘中端点**（5 池函数名 §14.2 已在 PLAN 定稿，adapter 层未实现）。**缝隙清单（最小补法，不扩 scope）**：
+
+| # | 缝隙 | 影响 | 最小补法 |
+|---|------|------|---------|
+| P1 | Python 无 5 池拉取端点 | 决策 3 无供数来源，IntradayJob 无法拉 | Python 新增 `GET /api/v1/pools?pool=ZT\|ZB\|DT\|STRONG\|PREV&date=`（date 可选，回查归档；**不写库**），响应 rows 按 §14.2 中→英映射表逐池出英文 DTO（缺列 NULL，不造默认值）；池函数 `stock_zt_pool_*_em` + 各自独立 TokenBucket（rate 0.1 rps、jitter 5s） |
+| P2 | Python 无全市场快照端点 | adv/dec 与高位股大面预警无数据源 | Python 新增 `GET /api/v1/spot?codes=`（codes 可选过滤，全市场照常算 adv/dec），响应 `{adv,dec,rows:[{code,name,price,change_pct}]}`；TokenBucket 0.012 rps |
+| P3 | Python 无 bid_ask 端点 | 候选名单五档/涨停价确认无源 | Python 新增 `GET /api/v1/bid-ask?code=`，响应按 §14.2 五档字段（f31-f50 盘后缺省预期内）；Kotlin 侧独立 bid_ask 桶（决策 3） |
+| P4 | Python 无竞价 pre_min 端点 | 9:25 竞价 gap 槽位空 | **本期挂账**（gap_pct 方案落地盘中时一并穿透），不补 |
+| P5 | Kotlin 无盘中 entity/repo/TokenBucket/Job | 五表已建无法读写 | 落码清单补齐（5 entity + 5 repo + IntradayTokenBucket + IntradayJob） |
+| P6 | 盘中池函数为 akshare 东财链（EM 腿） | 复用日 K EM 腿级熔断语义 | 池请求走独立 IntradaySource 抽象（§14.2 预留 EastmoneySource 初始实现），EM 腿级熔断/退避不并入日 K Router |
+
+**落表时序（IntradayJob 每 90s 一轮）**：拉 5 池（错峰）→ 写 `intraday_pool_snap`（payload=接口原样英文 DTO 行）→ 读上轮最新 snap → diff 出事件（ZT 新封 / ZB 炸板 / HF 回封 / DT 新跌停 / OPEN 开板 / MAXCHG 最高板易主）→ 写 `intraday_event`（ev_type/detail 按 §14.4，detail 键过册：limit_up_streak/seal_amount/zhaban_count/change_pct）→ spot 出 adv/dec + 高位股大面（强势池成员现价 ≤-5%）→ 钉钉推送（§14.5 规则）→ `intraday_replay` 当日行追加 kpi_series（90s 采样点）。**15:10 IntradayArchiveStep**：date=当日重拉 5 池权威归档 → `intraday_archive`（完整 8 列）→ 补齐 `intraday_replay.page`（ladder/events/panels）并置 complete=true。
+
+**预警规则口径（结合 sentiment/signal 已有口径，§14.5 定稿）**：
+- **钉钉推送**（防刷屏，普通涨停不推）：龙头(最高板)炸板 / 高位股大面（强势池成员现价 ≤-5%）/ 最高板易主（MAXCHG）→ 推；ev_type=DM/MAXCHG/ZB(龙头) 带「**盘中预警，收盘确认**」文案
+- **事件落库**：全量 diff 事件（ZT/ZB/HF/DT/OPEN/MAXCHG/ALERT）全部落 `intraday_event`，pushed_dd 标记钉钉已推
+- **策略开仓预警（ALERT，§14.9，a 期不接线）**：alert_enabled 策略命中 → `intraday_event(ev_type=ALERT, detail={...,kelly})`，本期只留面板槽位（panels.strategy_alerts），Evaluator 挂 b 期
+- 口径诚实边界：盘中=预警级（15-90s 粒度），收盘 bar 权威判定在 signal 层——页面/钉钉统一标注
+
+**页面结构 intraday.html**（静态 resources，风格对齐 sentiment.html）：
+1. **KPI 6 卡**：涨停家数 / 跌停家数 / 炸板家数 / 最高板 / 昨涨停溢价（PREV 池现拼）/ 涨跌家数比（adr=adv/dec，§17.6 定稿口径）
+2. **连板梯队（snap 现拼）**：ZT 池按 limit_up_streak DESC，行内 code/name/limit_up_streak/change_pct/seal_amount/first_seal_time/zhaban_count/limit_stat（键名=§14.4 定稿 ladder 全名，样稿简写 M7 对齐）
+3. **大面预警面板**：强势池成员现价 ≤-5% 列表（点击行 → 引用到笔记）
+4. **策略开仓预警面板**：panels.strategy_alerts（本期空态 + 「b 期接线」标注）
+5. **数据池状态面板**：`intraday_pool_state`（enabled/reason）+ 运行时 last_ok_at/rate_state（内存态，不入库，重启清零可接受，§17.6 定稿）
+6. **事件流**：intraday_event 当日最新 N 条（tg/txt 渲染，钉钉记录独立面板不混流）
+7. **刷新机制**：实时态前端每 2-3s 轮询 `GET /api/v1/intraday/summary`（一次聚合，无 WebSocket 基建，§14.5）；日期选择器切回放态 → 读 `intraday_replay` 当日行（同一 DTO 渲染，落库前已过渲染自校验，§14.4）
+8. **侧栏导航**：K线复盘 / 盘中监控 / 策略控制台 入口
+
+**端点契约（本期）**：
+```
+GET /api/v1/intraday/summary            实时聚合（KPI+ladder+events+panels；回放=读 intraday_replay.page 同 DTO）
+GET /api/v1/intraday/summary?date=      回放态（data ≤ 当日，读 intraday_replay；无行 404）
+PUT /api/v1/intraday/pools/{pool}/enabled  池开关（§17.5 C2 已定稿，body {enabled, reason?}，pool∈5 池）
+GET  /api/v1/intraday/events?date=&limit=  事件流明细（可选独立端点；summary 已含时可不做）
+```
+（`pools/last_ok_at/rate_state` 运行时键为 §17.6 已定稿名称，字典 §6 未枚举 → 命名待增册批次。）
+
+**落码清单**：
+- Python：`adapters/intraday_source.py`（EastmoneySource：5 池 + spot + bid_ask）+ router.py 3 端点 + 各自 TokenBucket（P1-P3）
+- Kotlin：`entity/IntradayPoolSnap/IntradayPoolState/IntradayEvent/IntradayArchive/IntradayReplay`（5 新建，KDoc 同文 schema.sql）+ 5 repo + `util/IntradayTokenBucket.kt`（独立桶）+ `service/intraday/IntradayPollService`（拉取+diff+落表）+ `service/intraday/IntradayArchiveService`（15:10 归档）+ `job/IntradayJob.kt`（@Scheduled 时段守卫轮询）+ `controller/IntradayController.kt`（summary/enabled）+ `service/intraday/dto/IntradayDtos.kt`
+- `src/main/resources/static/intraday.html`（新建）
+- 可选 `V10__intraday_snap_index.sql`（idx_snap_pool_at，视量级）
+- 估时 4-5 天（§14.8 对齐）
+
+**测试要点**：MockMvc /intraday/summary 契约（实时 vs 回放态、ladder 现拼键名、pools 面板）、PUT pools/{pool}/enabled 启停生效、TestContainers 数据回放（seed snap/event/replay → 断言 summary 聚合、diff 出事件、kpi_series 追加、归档置 complete）、时段守卫（非交易日零调用 mock Python 计数）
+
+#### 19.13.3 策略控制台 strategy-console.html（步骤 4 a期）
+
+**a 期范围（任务定稿 + 2026-10-05 用户补拍 G5）**：策略 CRUD + YAML 契约（6 个文档缺口全部定稿）+ **A 类条件（信号驱动，直读 signal_daily/market_daily/sector_daily）真实求值** + **标签类条件（source=sentiment_cycle op=label，候选池扫描现算，用户拍板 a 期直接求值）** + 触发流水展示；**C 类条件（依赖信号预计算层的跨股聚合，§12.4.1 C 类语义）本期只做「数据就绪标记」，条件计算挂 b 期**。回测引擎（§12.7 B/A 类逐 bar 现算）与盘中 ALERT Evaluator（§14.9）均挂 b 期，本期不落。**纪律声明（KDoc + 页面文案统一）**：「策略信号展示，非自动交易」——控制台只读展示 + 流水记录，V2 不对接券商（§12.8 不变）。
+
+**6 个契约缝隙定稿（§19.11 提记，逐个穿透定稿）**：
+
+| # | 缝隙 | 现状 | 影响 | 推荐解法（一句话） | 决策权 |
+|---|------|------|------|-------------------|--------|
+| G1 | 结果列表端点 | §12.9 接口清单只有 POST /backtests + GET /backtests/{id}，无列表 | 结果对比页（tab3）无历史结果清单可勾选对比 | 补 `GET /api/v1/backtests?strategy=&from=&to=`（默认过滤 is_dry=false，字段按 §12.5 metrics 8 键） | 可自行定 |
+| G2 | watchlist members 读取端点 | §12.9 有 GET /watchlists（分组含成员数）/POST 导入/DELETE 成员，**缺成员明细读取** | tab4 自选股页无法展开某组成员列表 | 补 `GET /api/v1/watchlists/{id}/members`（join stock_info 出 code/name/note，成员按创建序） | 可自行定 |
+| G3 | history 回滚端点 | 只有 strategy_config_history 表 + GET /strategies/{id}/yaml 导出，无历史列表/回滚 | 无法回滚误保存的配置版本 | **定稿（回滚=新版本、保留留痕）**：`POST /strategies/{id}/rollback?version=` 把目标版本 yaml 复制为**新版本**（version+1）写回 strategy_config，同时落一条 strategy_config_history 指向旧内容，历史链不断可无限回退；配 `GET /api/v1/strategies/{id}/history`（版本列表） | ✅ 已拍板（2026-10-05 用户） |
+| G4 | POST /backtests 与表单 JSON schema | 只有端点名无请求体定稿（strategy_name? config_id? L1 参数? 区间?） | 表单→端点映射不确定，b 期实现无契约可依 | **定稿（is_dry 显式必填、无默认值兜底）**：请求体 `{strategy_name, config_id?, start_date, end_date, is_dry}`，表单与 API 强制显式选择试跑/正式（缺 is_dry → 422，禁止静默兜底）；L1 参数**不允许 overrides**（单一事实来源取 config YAML 内 L1，防表单与 YAML 双份漂移）；响应沿用 backtest_result 主键 id | ✅ 已拍板（2026-10-05 用户） |
+| G5 | 情绪术语标签落库归属 | 词表条件引用「术语标签（反包/大肉/大面/…）」与「周期阶段（冰点/主升/…）」，但数据落点模糊：status_text 已落库，个股动作标签（/stocks/{code}/actions）由 SentimentClassifier **现算**不落库 | 标签类条件需确定性求值源 | **定稿（标签类 a 期直接求值）**：周期阶段=读 sentiment_cycle.status_text/big_cycle_sug/small_cycle_sug（已落库，A 类可求值）；个股动作标签（反包/大面/止跌反核/晋级/断板）= **候选池扫描现算**——求值扫描范围 = **五池并集 ∪ 进行中龙头**（有界候选集几十只量级，不做全市场盲扫；动作标签只可能出现在池内票，语义等价），复用 SentimentClassifier.labelFor 既有实现（现算不落库，口径与 /terms、/stocks/{code}/actions 永不漂移） | ✅ 已拍板（2026-10-05 用户） |
+| G6 | chip 60日 warm-up vs 冒烟窗口 | signal_daily 筹码 8 列 warm-up 前 60 交易日为 NULL（§19.11.1 决策）；回测冒烟窗口=60 交易日（§12.9） | 冒烟窗口恰好落在 warm-up 内 → chip 条件全 NULL，冒烟测试必然空转/误判 | **冒烟窗口自动前移预卷**：冒烟区间 `[start, start+60)` 前强制预卷 60 交易日（`start−60 → start` 先算好 chip 再进冒烟求值），回测引擎 b 期实现时把预卷固化为引擎前置步骤 | 可自行定（b 期实现约束，本期只在契约定稿标注） |
+
+**a 期端点契约（策略 CRUD + 条件诊断）**：
+```
+GET  /api/v1/strategies                     列表（含 version/status/alert_enabled/note）
+POST /api/v1/strategies                     新建（结构化 JSON，服务端生成 YAML；DRAFT 态，§12.9 决策 1 无自由 YAML 文本）
+PUT  /api/v1/strategies/{id}                修改（落 strategy_config_history，version+1）
+GET  /api/v1/strategies/{id}/yaml           导出
+GET  /api/v1/strategies/{id}/history        （G3）
+POST /api/v1/strategies/{id}/rollback?version=  （G3）
+GET  /api/v1/strategies/{id}/conditions     **本期核心**：条件表（触发状态/数据就绪度/最近触发日）
+GET  /api/v1/strategies/{id}/flow           **本期核心**：触发流水列表（近 N 交易日逐条命中记录）
+GET  /api/v1/watchlists                     分组列表（含成员数，§12.9 已有）
+POST /api/v1/watchlists                     新建分组（已有）
+PUT  /api/v1/watchlists/{id}                改名（已有）
+DELETE /api/v1/watchlists/{id}              删组（仍有成员 409，已有）
+GET  /api/v1/watchlists/{id}/members        （G2）
+POST /api/v1/watchlists/{id}/members        批量导入（逐行返回拒绝原因，服务端校验存在性/非 ST，已有）
+DELETE /api/v1/watchlists/{id}/members/{code}  （已有）
+POST /api/v1/backtests                      契约定稿（G4），实现挂 b 期
+```
+
+**`GET /strategies/{id}/conditions` 响应 schema（snake_case，新键命名待增册）**：
+```json
+{
+  "strategy": { "id": 1, "name": "打龙头回调", "version": 3, "status": "ACTIVE" },
+  "conditions": [{
+    "cond_id": "buy_0", "side": "BUY", "source": "limit_up_streak", "op": "between", "value": [3, 7],
+    "class": "A",                       // A=聚合表直查 / L=标签类候选池扫描现算(本期) / B=单股现算(挂b期) / C=跨股聚合(本期只就绪)
+    "ready": "READY",                   // READY=数据齐可求值 / PARTIAL=表缺行 / PENDING=挂b期只标记
+    "last_fired": "2026-09-30",         // 最近触发日（A 类真实求值；C 类 null）
+    "fired_30d": 5,                     // 近 30 交易日触发次数（A 类）
+    "data_state": {                     // 数据就绪度（C 类本期唯一有意义输出）
+      "signal_daily": { "latest": "2026-09-30", "days": 1211, "coverage": "FULL" },
+      "market_daily": { "latest": "2026-09-30", "coverage": "FULL" },
+      "sector_daily": { "latest": "2026-09-30", "board_rows": 86 }
+    }
+  }],
+  "as_of": "2026-10-05"
+}
+```
+- A 类求值口径（本期）：`limit_up_streak/ladder_rank/is_zhaban/sector_ladder_rank` + chip 4 组（profit_ratio/cost_dev/c90_conc/c70_conc）直读 signal_daily；`adv/dec/yst_limit_premium/yst_face_count/limit_up_count` 直读 market_daily；`limit_up_count/avg_chg_pct_all/sector_ladder_rank` 直读 sector_daily。求值窗口 = 近 30 交易日（trading_calendar），每条件逐日判真。求值路径 = ConditionEvaluator **路径 A（聚合表直查）**，零候选依赖。
+- 标签类求值口径（本期，G5 定稿展开见下方独立块）：`source=sentiment_cycle op=label` 条件走 ConditionEvaluator **路径 L（候选池扫描现算）**——`LabelEvaluationService` 对「五池并集 ∪ 进行中龙头」候选集逐票复用 SentimentClassifier.labelFor 得逐日标签，条件逐日判真 = 候选集内任一 universe 票当日命中目标标签（within_days N 放宽至 [D−N+1, D]）；`data_state` 标注 `scan_scope` 与依赖表 latest。`last_fired/fired_30d/flow` 均真实产出行。
+- 语义约束：`class=C` 条件（梯队排名/板块聚合/涨跌家数比/昨涨停溢价/昨日大面/炸板等需全市场聚合的）本期只出 `data_state`（表存在性+latest+coverage），`ready=PENDING`，不求值不误导；`class=B`（单股时序现算，price_action/volume 等）本期也 `ready=PENDING`。
+
+**`GET /strategies/{id}/flow` 响应 schema（新键命名待增册）**：`{strategy_id, from, to, flow:[{trade_date, cond_id, side, source, op, value, summary}]}`——`summary`=命中摘要（如「连板数 5 在 [3,7]」「反包: 000905 平潭发展 6/20」），近 30 交易日升序；C/B 类条件不产 flow 行（未求值）。
+
+**标签求值服务（G5 定稿展开，2026-10-05 用户拍板「a 期直接求值」）**：
+
+**候选集（有界，不盲扫全市场）**：`五池并集 ∪ 进行中龙头`——五池成员当日从 `intraday_pool_snap` 最新行（盘中实时）/ 盘后从 `intraday_archive`（自盘中上线日起逐日积累）取，龙头从 `dragon_cycle`（end_date IS NULL 进行中 + status=BROKEN 观察期）取；典型量级 50-150 只，极端高潮日 ≈300 只（STRONG 池 199 + ZT/ZB/DT/PREV 并集）。求值窗口近 30 交易日 → 候选 × 30 日 ≈ ≤9,000 bar 行驻留，毫秒级。**标签只可能出现在池内票，universe ∩ 候选集 内任一票命中即触发**（coordinator 语义等价已定）。
+
+**标签规则（复用 SentimentClassifier.labelFor 既有实现，§4.9 术语表，逐条列举、不发明新语义）**：
+
+| 标签 | 规则（labelFor 既有 when 分支，KDoc 同源） | 依赖输入 |
+|------|------------------------------------------|---------|
+| 反核止跌 REBOUND_STOP | 候选 ∈ 崩塌池 且（今日 ≥+5% 或涨停） | 崩塌池成员判定（口径缺口 L3）+ 当日 bar |
+| 反包 REBREAK | 断板龙头（dragon_cycle status=BROKEN）观察期内再涨停 | 观察窗判定（口径缺口 L2）+ 断板日 |
+| 晋级 PROMOTE | 今日涨停 且 昨涨停（n→n+1） | 当日+昨日 bar |
+| 断板 BROKEN | 昨涨停 今未涨停 | 当日+昨日 bar |
+| 继续大面 CONTINUE_FACE | 跌停 且 ≤-5% | 当日 bar |
+| 大肉 BIG_MEAT | 今日 ≥+5%（bigMeatThreshold） | 当日 bar |
+| 大面 BIG_FACE | 今日 ≤-5%（bigFaceThreshold） | 当日 bar |
+| 停牌 SUSPENDED | 交易日历开市但无 bar | 交易日历 + bar 缺失 |
+
+优先级从高到低（§4.9，labelFor when 分支固化）：反核止跌 → 反包 → 晋级 → 断板 → 继续大面 → 大肉 → 大面。阈值走 SentimentProperties（bigMeatThreshold=+5 / bigFaceThreshold=−5 / dragon.observeDays=3）同源。
+
+**数据来源与复用**：① `stock_history` 候选票窗口柱（tradeDate/changePct/isLimitUp/isLimitDown/limitUpStreak，findByCodeInAndTradeDateBetween）；② `dragon_cycle` 窗口内 status=BROKEN 行（按日回溯，见 L4）；③ 崩塌池成员（候选内 C1/C2 派生，见 L3）；④ 交易日历（trading_calendar，判 SUSPENDED）。**直接注入 SentimentClassifier（@Component，labelFor 公开）**——不复制规则，保证与 /terms、/stocks/{code}/actions 现算口径永不漂移。
+
+**标签口径缺口清单（无既有口径可依据项，不自行发明语义，需协调方定稿）**：
+
+| # | 缺口 | 现状 | 建议（给协调方） |
+|---|------|------|------------------|
+| L1 | 五池历史成员边界 | 五池=盘中池接口产物，历史仅 intraday_archive 自盘中上线日起积累（snap 仅 3 天）；a 期求值窗口近 30 日可能早于盘中上线日 | 候选集分段口径：盘中上线日后 = 全量五池并集 ∪ 龙头；上线日前 = 日线涨停池（stock_history.is_limit_up）∪ 龙头（STRONG 强势池无法日线还原，等价近似） |
+| L2 | 反包观察窗精确口径 | labelFor.isWithinObserveWindow 为 bar 序列粗判（brokenDate 起 ≤observeDays+1 交易日），注释明示「精确判定由状态机 advance 用日历」 | a 期直接复用粗判（与 /terms 现算同口径）；b 期若要对齐状态机日历口径，把 DragonCycleStateMachine 观察期抽为可复用纯函数再替换 |
+| L3 | 崩塌池派生口径 | REBOUND_STOP 依赖「候选 ∈ 崩塌池」；崩塌池 C1/C2 口径在 SentimentComputeService（sentiment 派生）内实现，无独立复用面 | a 期在 LabelEvaluationService 内对候选子集独立实现同口径判定（candidate-only，非全市场；阈值走 sentiment.pool-* 配置同源） |
+| L4 | 历史日 activeDragon 回溯 | labelFor 单日用「当前 activeDragon」；求值窗口覆盖历史日时，当日断板龙头应为「当日当时观察期内」的 dragon_cycle 行 | a 期按日回溯 dragon_cycle（status=BROKEN 且 broken_date ≤ D ≤ 观察窗末），语义与状态机逐日推进等价 |
+| L5 | 候选集外 universe 票 | 标签只在池内票出现；策略 universe（watchlist）个股可能不在池内 | 条件触发 = universe ∩ 候选集；候选集外票该条件 ready=READY 但永不触发（不误导文案「仅池内票可出标签」），或标注 data_state.candidate_cover |
+
+**ConditionEvaluator 扩展（两条求值路径 + data_state）**：
+
+```
+interface ConditionEvaluator {
+    /** 入口：按条件 source/op 派发路径 A（聚合表直查）或路径 L（候选池扫描现算）；B/C 类只产 data_state 不就绪 */
+    fun evaluate(cond: ParsedCondition, ctx: EvalContext): ConditionResult
+
+    data class EvalContext(
+        val window: List<LocalDate>,                 // 近 30 交易日（trading_calendar）
+        val signalTables: SignalWindow,              // signal/market/sector_daily 窗口数据（路径 A 直查）
+        val universe: Set<String>,                   // 策略 universe（watchlist 并集 or 全市场）
+        val labelService: LabelEvaluationService,    // 路径 L（内含当日缓存）
+    )
+    data class ConditionResult(
+        val cls: ConditionClass,                     // A / L / B / C
+        val ready: ReadyState,                       // READY / PARTIAL / PENDING
+        val lastFired: LocalDate?,                   // A/L 真实；C/B null
+        val fired30d: Int,
+        val firedDays: List<LocalDate>,              // 触发流水（flow 数据源）
+        val dataState: Map<String, Any>,             // 见下
+    )
+}
+```
+
+- **路径 A**：聚合表直查（signal/market/sector_daily），条件逐日判真，零候选依赖，无扫描。
+- **路径 L**：`LabelEvaluationService.getLabels(endDate, windowDays)` → 缓存 `Map<code, Map<trade_date, StockActionLabel>>` → 条件逐日判真 = `∃ code ∈ universe ∩ 候选集` 当日 label == 目标（within_days N 放宽至 [D−N+1, D]）；`firedDays` 产 flow 行。
+- **data_state（路径 L）**：`{scan_scope:"五池并集∪龙头", candidate_count:N, covered_days:D, stock_history:{latest}, dragon_cycle:{latest}, archive_since:"2026-XX-XX"}`（archive_since=盘中上线日，标注 L1 边界；stock_history/dragon_cycle 为窗口数据最新日）。
+
+**性能边界与当日缓存**：
+- 预期扫描量：候选集 × 窗口 ≤ 300 × 30 ≈ 9,000 bar 行 + 同量级 labelFor 调用，毫秒~十毫秒级；无全市场盲扫（候选集有界），条件求值总时间受控。
+- **当日缓存**：`LabelEvaluationCache` = `ConcurrentHashMap<窗口末日 LocalDate, LabelResult>`，首次请求当日构建（读 3 表窗口 + 候选集派生），**同日多次刷新控制台 / 多策略复用同一份，不重复扫**；失效时机：① 窗口末日变化（跨交易日）② signal_daily 最新日变化（SignalPrecomputeJob 增量后）③ 显式 invalidate（盘中 archive 归档后）。仅驻内存，重启重算可接受（数据 ≤9,000 行，重算毫秒级）。
+- 全市场动作标签（/terms actions[]、/stocks/{code}/actions）仍按现状现算不落库；a 期 LabelEvaluationService 只服务条件求值路径 L，不做全市场展开（b 期如需性能再议落库）。
+
+**页面结构 strategy-console.html**（静态 resources，风格对齐 sentiment.html）：
+1. **tab① 策略**：策略列表 + 新建/编辑表单（结构化条件树生成 YAML，右侧只读 YAML 预览，§12.9 决策 1）+ **条件诊断面板（本期核心）**：所选策略的条件表（触发状态/数据就绪度/最近触发日，GET /conditions）+ 触发流水列表（GET /flow，近 30 交易日逐条命中）
+2. **tab② 回测**：本期显示「b 期」占位（POST /backtests 契约定稿已就，触发按钮禁用 + 标注）
+3. **tab③ 结果对比**：本期显示「b 期」占位
+4. **tab④ 自选股**：分组管理 + 成员增删 + 批量导入（G2 端点本期实装）
+5. **纪律横幅**：「策略信号展示，非自动交易」全页常驻
+6. **侧栏导航**：K线复盘 / 盘中监控 / 策略控制台 入口
+
+**落码清单（a 期，不含回测引擎）**：
+- `entity/StrategyConfig/StrategyConfigHistory/WatchlistGroup/WatchlistMember`（4 新建，KDoc 同文 schema.sql）+ 4 repo
+- `service/strategy/StrategyService.kt` + `StrategyServiceImpl.kt`（CRUD/YAML 生成/历史/回滚）+ `service/strategy/dto/StrategyDtos.kt` + `service/strategy/mapper/StrategyMappers.kt`
+- `service/strategy/ConditionEvaluator.kt`（**双路径**：A 类聚合表直查 + L 类候选池扫描现算，+ C/B 类 data_state，纯函数可单测）+ `service/strategy/dto/ConditionDtos.kt`
+- `service/strategy/LabelEvaluationService.kt` + `LabelEvaluationServiceImpl.kt`（候选集派生：五池并集 ∪ 进行中龙头 + 崩塌池 C1/C2 候选内判定 + 逐日回溯 dragon_cycle；复用 SentimentClassifier.labelFor）+ `service/strategy/LabelEvaluationCache.kt`（当日缓存 ConcurrentHashMap，窗口末日失效）+ `service/strategy/dto/LabelDtos.kt`（LabelResult/CandidateScope）
+- `controller/StrategyController.kt`（strategies/conditions/flow/history/rollback）+ `controller/WatchlistController.kt`（watchlists CRUD + members，§12.9 已有端点清单补齐 G2）
+- `src/main/resources/static/strategy-console.html`（新建）
+- **无 Flyway 迁移**（四表 V1 已建）
+- 估时 3-4 天（不含 b 期回测引擎）
+
+**测试要点**：MockMvc 契约（strategies CRUD 422 校验/version+1/history/rollback/watchlists G2 + POST /backtests 缺 is_dry → 422）、ConditionEvaluator 纯函数单测（A 类逐条件真值 + **L 类候选池扫描现算判真（seed 五池并集+龙头+bar 窗口 → 断言 label 命中与 within_days 放宽）** + C 类 data_state 就绪判定 + warm-up chip 段 ready=PARTIAL + LabelEvaluationCache 同日复用不重复扫）、TestContainers 集成（seed 近 30 日 signal/market/sector + strategy YAML → 断言 conditions 表 last_fired/fired_30d 与 flow 列表命中日期、非 ST 无参与、标签条件 flow 行含 summary「标签: 代码 名称 日期」）
+
+**本页 6 缝隙定稿状态**：G3/G4/G5 用户已拍板（2026-10-05，见上表 ✅）；G1/G2/G6 自行定稿（见上表）。全部闭环，无待拍板项。标签口径缺口 L1-L5（见上方缺口清单）交由实现阶段按「建议」口径落地，如协调方后续有不同定稿以协调方为准。

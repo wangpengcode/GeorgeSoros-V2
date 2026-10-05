@@ -1,6 +1,7 @@
 package com.soros.v2.repository
 
 import com.soros.v2.entity.StockHistory
+import java.math.BigDecimal
 import org.springframework.data.jpa.repository.JpaRepository
 import org.springframework.data.jpa.repository.Query
 import org.springframework.data.repository.query.Param
@@ -19,6 +20,26 @@ interface StockHistoryRepository : JpaRepository<StockHistory, Long> {
 
     /** 按 交易日区间 查全部行情（升序；§13.4 情绪派生窗口 / §13.5 回放 barsByCode 数据源） */
     fun findByTradeDateBetween(start: LocalDate, end: LocalDate): List<StockHistory>
+
+    /**
+     * §19.12 情绪回放瘦身投影批量加载（只取回放推导实际消费的 8 字段）。
+     *
+     * **投影消费约束**：回放推导（SentimentComputeService.computeFor 全链）仅消费
+     * code/tradeDate/close/changePct/isLimitUp/isLimitDown/limitUpStreak/limitDownStreak 这 8 字段；
+     * open/high/low/volume/amount/turnoverRate 在回放推导路径零消费、不进投影。
+     * **未来 computeFor 新增字段消费须同步扩本投影**（口径漂移防线，§19.12 不变式①）。
+     */
+    @Query(
+        """
+        SELECT h.code AS code, h.tradeDate AS tradeDate, h.close AS close, h.changePct AS changePct,
+               h.isLimitUp AS isLimitUp, h.isLimitDown AS isLimitDown,
+               h.limitUpStreak AS limitUpStreak, h.limitDownStreak AS limitDownStreak
+        FROM StockHistory h
+        WHERE h.tradeDate BETWEEN :start AND :end
+        ORDER BY h.code, h.tradeDate
+        """,
+    )
+    fun findReplayBars(@Param("start") start: LocalDate, @Param("end") end: LocalDate): List<ReplayBarProjection>
 
     /** 是否已存在 代码+交易日 行（增量 upsert 幂等判重） */
     fun existsByCodeAndTradeDate(code: String, tradeDate: LocalDate): Boolean
@@ -112,5 +133,35 @@ interface StockHistoryRepository : JpaRepository<StockHistory, Long> {
     interface GapIslandProjection {
         val seg_from: LocalDate?
         val seg_to: LocalDate?
+    }
+
+    /**
+     * §19.12 情绪回放瘦身投影（8 字段接口投影，防实体 hydration）。
+     * 回放推导仅消费此 8 字段；未来 computeFor 新增字段消费须同步扩本接口与 [findReplayBars]。
+     */
+    interface ReplayBarProjection {
+        /** 证券代码 */
+        val code: String
+
+        /** 交易日 */
+        val tradeDate: LocalDate
+
+        /** 收盘价（qfq） */
+        val close: BigDecimal?
+
+        /** 涨跌幅%（不复权口径） */
+        val changePct: BigDecimal?
+
+        /** 涨停（按原始 change_pct + board 阈值判定） */
+        val isLimitUp: Boolean
+
+        /** 跌停 */
+        val isLimitDown: Boolean
+
+        /** 连板数（首板=1） */
+        val limitUpStreak: Short
+
+        /** 跌停连板 */
+        val limitDownStreak: Short
     }
 }

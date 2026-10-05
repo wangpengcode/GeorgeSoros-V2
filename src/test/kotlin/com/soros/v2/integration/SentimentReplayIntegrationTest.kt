@@ -89,37 +89,40 @@ class SentimentReplayIntegrationTest {
 
     @BeforeEach
     fun setUp() {
+        // 隔离：三个用例共享同一 PG 容器且顺序执行，先清两表——§19.12 增量语义下「已有行跳过」，
+        // 前序用例残留行会把本用例的补算日全部判为已有，filledDays=0 导致断言失真
+        sentimentRepo.deleteAll()
+        dragonRepo.deleteAll()
         // 种子：2 个交易日（trading_calendar @Id=trade_date，重复 save 为 merge，不累积）
         calendarRepo.saveAll(listOf(TradingCalendar(day1), TradingCalendar(day2)))
         // 确定性 compute：d1 选龙头 RISING；d2 同周期阵亡 DEAD（end_date=d2，cycle_type=SMALL）
+        // §19.12 决策 3：day1/day2 复用同一 DragonCycle 对象引用（模拟真实状态机就地 mutate——
+        // 状态机跨日推进即同一对象引用，d2 阵亡行由 d1 同一对象 update 而非新插行）
+        val leader = DragonCycle().apply {
+            code = "600000"
+            startDate = day1
+            maxStreak = 5
+            status = CycleStatus.RISING
+        }
         Mockito.`when`(compute.computeFor(anyDate(), anyCtx())).thenAnswer { inv ->
             val date: LocalDate = inv.getArgument(0)
             if (date == day1) {
+                // 复位（重跑幂等：force=true 重建 / force=false 续跑均回到初始态）
+                leader.endDate = null
+                leader.status = CycleStatus.RISING
+                leader.cycleType = null
                 SentimentComputeResult(
                     sentiment = SentimentCycle().apply { tradeDate = day1 },
-                    dragonUpdates = listOf(
-                        DragonCycle().apply {
-                            code = "600000"
-                            startDate = day1
-                            maxStreak = 5
-                            status = CycleStatus.RISING
-                        },
-                    ),
+                    dragonUpdates = listOf(leader),
                     deadDragonCodes = emptyList(),
                 )
             } else {
+                leader.endDate = day2
+                leader.status = CycleStatus.DEAD
+                leader.cycleType = CycleType.SMALL
                 SentimentComputeResult(
                     sentiment = SentimentCycle().apply { tradeDate = day2 },
-                    dragonUpdates = listOf(
-                        DragonCycle().apply {
-                            code = "600000"
-                            startDate = day1
-                            endDate = day2
-                            maxStreak = 5
-                            status = CycleStatus.DEAD
-                            cycleType = CycleType.SMALL
-                        },
-                    ),
+                    dragonUpdates = listOf(leader),
                     deadDragonCodes = listOf("600000"),
                 )
             }
@@ -150,22 +153,40 @@ class SentimentReplayIntegrationTest {
         assertEquals(day1, dead.startDate, "阵亡行 start_date=反包周期起点 d1")
     }
 
-    // ==================== 删段重建幂等 ====================
+    // ==================== 删段重建幂等（force=true 全量重建） ====================
 
     @Test
     fun `testReplay rerunDeletesThenRebuildsNoDuplicate`() {
         // given: 首次回放落库
         replayService.replay(day1, day2)
 
-        // when: 同区间重复回放（删段重建，§13.5 重放语义）
-        val summary = replayService.replay(day1, day2)
+        // when: 同区间重跑 force=true（§19.12 决策 4：事务0 预清理后全量重建，BackfillJob §13.5 钩子传 true）
+        val summary = replayService.replay(day1, day2, force = true)
 
         // then: 不撞 trade_date 唯一约束，行数不变（幂等）
         assertEquals(2, summary.sentimentRows, "重跑摘要 sentimentRows=2")
         assertEquals(1, summary.dragonRows, "重跑摘要 dragonRows=1")
+        assertEquals(true, summary.force, "重跑摘要 force=true")
         assertEquals(2, sentimentRepo.findByTradeDateBetweenOrderByTradeDateAsc(day1, day2).size, "sentiment_cycle 仍 2 行")
         assertEquals(1, dragonRepo.findAll().size, "dragon_cycle 仍 1 行")
         val dead = dragonRepo.findAll().single()
         assertEquals(day2, dead.endDate, "重跑后阵亡行 end_date 仍=d2")
+    }
+
+    // ==================== force=false 续跑幂等（§19.12 决策 4 增量补缺） ====================
+
+    @Test
+    fun `testReplay rerunForceFalseIdempotentNoDuplicateRows`() {
+        // given: 首次 force=false 增量回放落库
+        replayService.replay(day1, day2)
+
+        // when: 同区间 force=false 二次调用（续跑）→ 无缺日不写
+        val summary = replayService.replay(day1, day2)
+
+        // then: 行数不变（幂等）
+        assertEquals(0, summary.filledDays, "续跑无缺日 filledDays=0（§19.12 决策 4）")
+        assertEquals(2, summary.skippedDays, "已有 2 日行跳过 skippedDays=2")
+        assertEquals(2, sentimentRepo.findByTradeDateBetweenOrderByTradeDateAsc(day1, day2).size, "sentiment_cycle 仍 2 行")
+        assertEquals(1, dragonRepo.findAll().size, "dragon_cycle 仍 1 行")
     }
 }

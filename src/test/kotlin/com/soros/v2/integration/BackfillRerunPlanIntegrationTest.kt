@@ -338,7 +338,7 @@ class BackfillRerunPlanIntegrationTest {
         val notifier = Mockito.mock(DingTalkNotifier::class.java)
         val metrics = Mockito.mock(CollectMetrics::class.java)
         val replayService = Mockito.mock(SentimentReplayService::class.java)
-        Mockito.`when`(replayService.replay(d1, d4)).thenReturn(null)
+        Mockito.`when`(replayService.replay(d1, d4, true)).thenReturn(null)
 
         val job = BackfillJob(
             pythonClient = python,

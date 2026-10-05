@@ -1,6 +1,7 @@
 package com.soros.v2.job
 
 import com.soros.v2.domain.DataCoverage
+import com.soros.v2.domain.DingTalkEvent
 import com.soros.v2.entity.MarketDaily
 import com.soros.v2.notification.DingTalkNotifier
 import com.soros.v2.repository.MarketDailyRepository
@@ -53,6 +54,8 @@ class SignalPrecomputeJobTest {
             calendarService = calendar,
             notifier = notifier,
         )
+        // §19.12 空库守卫默认：有前置历史（guard 不触发）；空库用例显式 stub false
+        Mockito.`when`(signalDailyRepo.existsByTradeDateLessThan(anyDate())).thenReturn(true)
     }
 
     private val today = LocalDate.of(2026, 9, 30)
@@ -64,6 +67,18 @@ class SignalPrecomputeJobTest {
     private fun anyDate(): LocalDate {
         Mockito.any(LocalDate::class.java)
         return today
+    }
+
+    /** Mockito.eq() 的 Kotlin 非空参数安全 matcher（同 anyDate() 模式：注册 matcher，返回非空占位） */
+    private fun eqEvent(event: DingTalkEvent): DingTalkEvent {
+        Mockito.eq(event)
+        return event
+    }
+
+    /** Mockito.any() 的 Kotlin 非空参数安全 matcher（同 anyDate() 模式） */
+    private fun anyEvent(): DingTalkEvent {
+        Mockito.any(DingTalkEvent::class.java)
+        return DingTalkEvent.SENTIMENT_DERIVE_FAILED
     }
 
     // ==================== 增量事件：onSentimentCycleCompleted ====================
@@ -190,5 +205,96 @@ class SignalPrecomputeJobTest {
 
         // then: 对缺失日补算 replayDay(d2)
         Mockito.verify(replayService).replayDay(d2)
+    }
+
+    // ==================== 空库守卫（§19.12：signal_daily 无前置历史 → 逐日补算不适用填空库） ====================
+
+    @Test
+    fun `testStartupReconciliation emptyLibrarySkipsAndAlerts`() {
+        // given: 最近 2 日全缺 signal_daily 行；signal_daily 无早于缺失窗口首日(d1)的历史行（空库）
+        val d1 = today.minusDays(2)
+        val d2 = today.minusDays(1)
+        Mockito.`when`(calendar.recentTradingDays(anyDate(), Mockito.anyInt())).thenReturn(listOf(d1, d2))
+        Mockito.`when`(signalDailyRepo.countByTradeDate(d1)).thenReturn(0L)
+        Mockito.`when`(signalDailyRepo.countByTradeDate(d2)).thenReturn(0L)
+        listOf(d1, d2).forEach { day ->
+            Mockito.`when`(marketDailyRepo.existsByTradeDate(day)).thenReturn(false)
+            Mockito.`when`(sectorDailyRepo.existsByTradeDate(day)).thenReturn(false)
+        }
+        Mockito.`when`(signalDailyRepo.existsByTradeDateLessThan(d1)).thenReturn(false)
+
+        // when
+        job.startupReconciliation()
+
+        // then: 空库守卫触发 → 零 replayDay（不做逐日补算）+ 钉钉 SIGNAL_DERIVE_FAILED 告警（复用既有告警通道）
+        Mockito.verify(replayService, Mockito.never()).replayDay(anyDate())
+        Mockito.verify(notifier).notify(
+            eqEvent(DingTalkEvent.SIGNAL_DERIVE_FAILED),
+            Mockito.anyString(),
+            Mockito.anyString(),
+        )
+    }
+
+    @Test
+    fun `testStartupReconciliation priorHistoryPreservesDayByDayCompute`() {
+        // given: 单日(d2)缺 signal_daily 行；signal_daily 有早于 d2 的历史行（有前置历史 → 现行为保持）
+        val d1 = today.minusDays(2)
+        val d2 = today.minusDays(1)
+        Mockito.`when`(calendar.recentTradingDays(anyDate(), Mockito.anyInt())).thenReturn(listOf(d1, d2))
+        Mockito.`when`(signalDailyRepo.countByTradeDate(d1)).thenReturn(50L)
+        Mockito.`when`(signalDailyRepo.countByTradeDate(d2)).thenReturn(0L)
+        listOf(d1, d2).forEach { day ->
+            Mockito.`when`(marketDailyRepo.existsByTradeDate(day)).thenReturn(true)
+            Mockito.`when`(sectorDailyRepo.existsByTradeDate(day)).thenReturn(true)
+        }
+        Mockito.`when`(signalDailyRepo.existsByTradeDateLessThan(d2)).thenReturn(true)
+
+        // when
+        job.startupReconciliation()
+
+        // then: 对缺失日补算 replayDay(d2)（现有逐日补算行为不变）
+        Mockito.verify(replayService).replayDay(d2)
+        Mockito.verify(notifier, Mockito.never()).notify(anyEvent(), Mockito.anyString(), Mockito.anyString())
+    }
+
+    @Test
+    fun `testStartupReconciliation partialPriorHistoryComputesMissingDays`() {
+        // given: d1/d2 均缺；signal_daily 有早于缺失窗口首日(d1)的历史行（部分前置 → 正常逐日补算）
+        val d1 = today.minusDays(2)
+        val d2 = today.minusDays(1)
+        Mockito.`when`(calendar.recentTradingDays(anyDate(), Mockito.anyInt())).thenReturn(listOf(d1, d2))
+        Mockito.`when`(signalDailyRepo.countByTradeDate(d1)).thenReturn(0L)
+        Mockito.`when`(signalDailyRepo.countByTradeDate(d2)).thenReturn(0L)
+        listOf(d1, d2).forEach { day ->
+            Mockito.`when`(marketDailyRepo.existsByTradeDate(day)).thenReturn(false)
+            Mockito.`when`(sectorDailyRepo.existsByTradeDate(day)).thenReturn(false)
+        }
+        Mockito.`when`(signalDailyRepo.existsByTradeDateLessThan(d1)).thenReturn(true)
+
+        // when
+        job.startupReconciliation()
+
+        // then: 逐日补算（每缺失日 replayDay，窗口首日前有行 → 不做空库守卫）
+        Mockito.verify(replayService).replayDay(d1)
+        Mockito.verify(replayService).replayDay(d2)
+    }
+
+    @Test
+    fun `testFallbackCron emptyLibrarySkipsReplayAndAlerts`() {
+        // given: 交易日 + signal_daily 当日无行 + 无早于当日的前置历史行（空库守卫触发）
+        Mockito.`when`(calendar.isTradingDay(anyDate())).thenReturn(true)
+        Mockito.`when`(signalDailyRepo.countByTradeDate(anyDate())).thenReturn(0L)
+        Mockito.`when`(signalDailyRepo.existsByTradeDateLessThan(anyDate())).thenReturn(false)
+
+        // when
+        job.fallbackCron()
+
+        // then: 跳过补算（不 replayDay）+ 钉钉 SIGNAL_DERIVE_FAILED 告警（请触发全历史回放）
+        Mockito.verify(replayService, Mockito.never()).replayDay(anyDate())
+        Mockito.verify(notifier).notify(
+            eqEvent(DingTalkEvent.SIGNAL_DERIVE_FAILED),
+            Mockito.anyString(),
+            Mockito.anyString(),
+        )
     }
 }

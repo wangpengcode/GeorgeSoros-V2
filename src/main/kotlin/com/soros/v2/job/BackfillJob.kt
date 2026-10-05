@@ -835,10 +835,10 @@ class BackfillJob(
         return (0 until count).map { sorted[it * (sorted.size - 1) / (count - 1)] }
     }
 
-    /** 情绪回放串接（§13.5）：失败不阻塞回填结果，只告警留人工补触发 */
+    /** 情绪回放串接（§13.5）：失败不阻塞回填结果，只告警留人工补触发；force=true 全量重建（§19.12 决策 4） */
     private fun replaySentiment(from: LocalDate, to: LocalDate): SentimentReplaySummary? = try {
-        logger.info("[backfill] 触发情绪回放：from={} to={}", from, to)
-        replayService.replay(from, to)
+        logger.info("[backfill] 触发情绪回放：from={} to={} force=true（全量重建）", from, to)
+        replayService.replay(from, to, true)
     } catch (e: Exception) {
         logger.error("[backfill] 情绪回放失败（回填已完成，人工补触发）：{}", e.message)
         notifier.notifyDailyDigest("情绪回放失败（回填已完成，人工 POST /jobs/sentiment-replay 补触发）：$from~$to，${e.message}")

@@ -26,6 +26,9 @@ interface SignalDailyRepository : JpaRepository<SignalDaily, SignalDailyId> {
     /** 该交易日行数（§19.11.1 完成标记：signal_daily 按当日行数判存在；兜底 cron 跳过条件） */
     fun countByTradeDate(tradeDate: LocalDate): Long
 
+    /** 是否已存在早于该交易日的行（§19.12 空库守卫：无前置历史 → 逐日补算不适用填空库，须全历史回放） */
+    fun existsByTradeDateLessThan(tradeDate: LocalDate): Boolean
+
     /** 区间内最小交易日（全历史回放删除区间行的水位） */
     @Query("SELECT MIN(s.tradeDate) FROM SignalDaily s WHERE s.tradeDate BETWEEN :from AND :to")
     fun findMinTradeDateInRange(@Param("from") from: LocalDate, @Param("to") to: LocalDate): LocalDate?
