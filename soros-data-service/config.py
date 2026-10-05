@@ -69,6 +69,10 @@ class Settings:
     rate_intraday: float = field(default_factory=lambda: _env_float("SOROS_RATE_INTRADAY", 0.05))
     intraday_jitter_seconds: float = field(default_factory=lambda: _env_float("SOROS_INTRADAY_JITTER", 0.5))
 
+    # 新浪备用源独立桶（东财拒连兜底）：0.5 rps + 抖动，56 页全量 sweep ≈ 2 分钟
+    rate_intraday_sina: float = field(default_factory=lambda: _env_float("SOROS_RATE_INTRADAY_SINA", 0.5))
+    intraday_sina_jitter_seconds: float = field(default_factory=lambda: _env_float("SOROS_INTRADAY_SINA_JITTER", 0.2))
+
     # ── Router（PLAN §11.1：baostock → akshare → mootdx）──
     router_order: tuple = field(
         default_factory=lambda: tuple(

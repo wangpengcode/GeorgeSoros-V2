@@ -202,6 +202,118 @@ def test_rate_limiter_exhaustion_raises(monkeypatch):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# 新浪备用源（2026-10-05 转发商出口 IP 被东财 push2 拒连事故：spot/bid-ask 单源必须降级备源）
+# ──────────────────────────────────────────────────────────────────────────────
+
+class _FakeSinaResponse:
+    def __init__(self, payload: bytes, status=200):
+        self._payload = payload
+        self.status_code = status
+
+    @property
+    def content(self):
+        return self._payload
+
+    @property
+    def text(self):
+        return self._payload.decode("gbk")
+
+
+def test_fetch_spot_falls_back_to_sina(monkeypatch):
+    """东财 spot 故障 → 新浪 Market_Center 分页兜底；每页恰一次新浪桶 acquire。"""
+    import adapters.intraday_source as mod
+
+    em_limiter = RecordingLimiter()
+    sina_limiter = RecordingLimiter()
+    src = mod.IntradaySource(rate_limiter=em_limiter, sina_rate_limiter=sina_limiter)
+
+    def _em_fail():
+        raise RuntimeError("em down")
+
+    page1 = [
+        {"code": "600519", "name": "贵州茅台", "trade": "1500.000", "changepercent": 1.25,
+         "volume": 2000000, "amount": 3000000000, "turnoverratio": 0.31},
+    ]
+    page2 = []  # 空页终止
+    calls = {"n": 0}
+
+    def _fake_get(url, timeout=0, headers=None):
+        calls["n"] += 1
+        return _FakeSinaResponse(__import__("json").dumps(page1 if calls["n"] == 1 else page2).encode("utf-8"))
+
+    monkeypatch.setattr(mod.ak, "stock_zh_a_spot_em", _em_fail)
+    monkeypatch.setattr(mod.requests, "get", _fake_get)
+
+    stocks = src.fetch_spot()
+
+    assert em_limiter.calls == 1, "先取东财桶一次（失败后走备源）"
+    assert sina_limiter.calls == 2, "新浪两页（含终止空页）各一次 acquire"
+    assert len(stocks) == 1
+    assert set(stocks[0]) == SPOT_ITEM_KEYS, "备源输出与主源同键契约"
+    assert stocks[0]["code"] == "600519" and stocks[0]["latest_price"] == 1500.0
+    assert stocks[0]["volume"] == 2000000, "新浪成交量已是股口径，不乘乘子"
+
+
+def test_fetch_bid_ask_falls_back_to_sina(monkeypatch):
+    """东财五档故障 → 新浪 hq.sinajs.cn 单票兜底（GBK 解码，买1→买5/卖1→卖5）。"""
+    import adapters.intraday_source as mod
+
+    em_limiter = RecordingLimiter()
+    sina_limiter = RecordingLimiter()
+    src = mod.IntradaySource(rate_limiter=em_limiter, sina_rate_limiter=sina_limiter)
+
+    # 真实字段序：0名称..8成交量,9成交额, 10买一量,11买一价,...,20卖一量,21卖一价,...
+    fields = ["贵州茅台", "1500.000", "1490.000", "1495.000", "1510.000", "1480.000",
+              "1494.990", "1495.010", "3833098", "4797246636.000"]
+    for i in range(1, 6):
+        fields += [str(200 * i), f"{1495.0 - i * 0.01:.3f}"]   # 买i量,买i价
+    for i in range(1, 6):
+        fields += [str(100 * i), f"{1495.0 + i * 0.01:.3f}"]   # 卖i量,卖i价
+    fields += ["2026-09-30", "15:00:00", "00"]
+    payload = ('var hq_str_sh600519="' + ",".join(fields) + '";').encode("gbk")
+
+    def _em_fail(symbol):
+        raise RuntimeError("em down")
+
+    def _fake_get(url, timeout=0, headers=None):
+        assert "Referer" in headers, "新浪必须带 Referer（否则 401）"
+        assert "sh600519" in url, "代码→sh/sz 前缀映射"
+        return _FakeSinaResponse(payload)
+
+    monkeypatch.setattr(mod.ak, "stock_bid_ask_em", _em_fail)
+    monkeypatch.setattr(mod.requests, "get", _fake_get)
+
+    out = src.fetch_bid_ask("600519")
+
+    assert em_limiter.calls == 1 and sina_limiter.calls == 1, "东财一attempt+新浪一请求各一次 acquire"
+    assert BID_ASK_KEYS <= set(out)
+    assert out["bids"][0] == [1494.99, 200], "买一 [价,量]"
+    assert out["asks"][0] == [1495.01, 100], "卖一 [价,量]"
+    assert len(out["bids"]) == 5 and len(out["asks"]) == 5
+
+
+def test_sina_spot_page_cap_safety(monkeypatch):
+    """新浪分页死循环防线：页数超上限强制终止（空页判定失效也不猛打）。"""
+    import adapters.intraday_source as mod
+
+    sina_limiter = RecordingLimiter()
+    src = mod.IntradaySource(rate_limiter=RecordingLimiter(), sina_rate_limiter=sina_limiter)
+
+    def _em_fail():
+        raise RuntimeError("em down")
+
+    monkeypatch.setattr(mod.ak, "stock_zh_a_spot_em", _em_fail)
+    monkeypatch.setattr(
+        mod.requests, "get",
+        lambda url, timeout=0, headers=None: _FakeSinaResponse('[{"code":"600519","name":"x","trade":"1","changepercent":0,"volume":1,"amount":1,"turnoverratio":0}]'.encode("utf-8")),
+    )
+
+    stocks = src.fetch_spot()
+    assert sina_limiter.calls <= mod.MAX_SINA_SPOT_PAGES, "页数硬上限内终止"
+    assert len(stocks) == mod.MAX_SINA_SPOT_PAGES
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # 路由端点（注入桩源，零网络）
 # ──────────────────────────────────────────────────────────────────────────────
 
