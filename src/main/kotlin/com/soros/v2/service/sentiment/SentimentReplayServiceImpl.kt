@@ -6,6 +6,7 @@ import com.soros.v2.entity.StockHistory
 import com.soros.v2.exception.BusinessException
 import com.soros.v2.notification.DingTalkNotifier
 import com.soros.v2.repository.DragonCycleRepository
+import com.soros.v2.repository.ReplayBar
 import com.soros.v2.repository.SentimentCycleRepository
 import com.soros.v2.repository.StockHistoryRepository
 import com.soros.v2.repository.StockInfoRepository
@@ -245,16 +246,16 @@ class SentimentReplayServiceImpl(
             .mapValues { (_, bars) -> bars.sortedBy { it.tradeDate } }
 
     /** 投影物化为瘦身 StockHistory（id=0，仅 8 字段；computeFor 签名零改动，barsByCode 仍 Map<String, List<StockHistory>>） */
-    private fun StockHistoryRepository.ReplayBarProjection.toReplayBar(): StockHistory = StockHistory(
+    private fun ReplayBar.toReplayBar(): StockHistory = StockHistory(
         id = 0L,
         code = code,
         tradeDate = tradeDate,
         close = close,
         changePct = changePct,
-        isLimitUp = isLimitUp,
-        isLimitDown = isLimitDown,
-        limitUpStreak = limitUpStreak,
-        limitDownStreak = limitDownStreak,
+        isLimitUp = isLimitUp ?: false,
+        isLimitDown = isLimitDown ?: false,
+        limitUpStreak = limitUpStreak ?: 0,
+        limitDownStreak = limitDownStreak ?: 0,
     )
 
     /** 6 日窗子列表（[day−6, day]，与原逐日 findByTradeDateBetween(day-6, day) 同口径） */

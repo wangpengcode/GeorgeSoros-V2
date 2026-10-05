@@ -9,6 +9,7 @@ import com.soros.v2.entity.TradingCalendar
 import com.soros.v2.exception.BusinessException
 import com.soros.v2.notification.DingTalkNotifier
 import com.soros.v2.repository.DragonCycleRepository
+import com.soros.v2.repository.ReplayBar
 import com.soros.v2.repository.SentimentCycleRepository
 import com.soros.v2.repository.StockHistoryRepository
 import com.soros.v2.repository.StockInfoRepository
@@ -72,17 +73,26 @@ class SentimentReplayServiceImplTest {
         }
     }
 
-    /** §19.12 决策 1 瘦身投影假实现（findReplayBars 8 字段：code/tradeDate/close/changePct/isLimitUp/isLimitDown/limitUpStreak/limitDownStreak） */
-    private class FakeReplayBar(
-        override val code: String,
-        override val tradeDate: LocalDate,
-        override val close: BigDecimal? = BigDecimal.ZERO,
-        override val changePct: BigDecimal? = BigDecimal.ZERO,
-        override val isLimitUp: Boolean = false,
-        override val isLimitDown: Boolean = false,
-        override val limitUpStreak: Short = 0,
-        override val limitDownStreak: Short = 0,
-    ) : StockHistoryRepository.ReplayBarProjection
+    /** §19.12 决策 1 瘦身投影 DTO（findReplayBars 8 字段：code/tradeDate/close/changePct/isLimitUp/isLimitDown/limitUpStreak/limitDownStreak）；直接用数据类构造，与生产物化路径同源 */
+    private fun replayBar(
+        code: String,
+        tradeDate: LocalDate,
+        close: BigDecimal? = BigDecimal.ZERO,
+        changePct: BigDecimal? = BigDecimal.ZERO,
+        isLimitUp: Boolean = false,
+        isLimitDown: Boolean = false,
+        limitUpStreak: Short = 0,
+        limitDownStreak: Short = 0,
+    ): ReplayBar = ReplayBar(
+        code = code,
+        tradeDate = tradeDate,
+        close = close,
+        changePct = changePct,
+        isLimitUp = isLimitUp,
+        isLimitDown = isLimitDown,
+        limitUpStreak = limitUpStreak,
+        limitDownStreak = limitDownStreak,
+    )
 
     private lateinit var compute: FakeComputeService
     private lateinit var sentimentRepo: SentimentCycleRepository
@@ -267,9 +277,9 @@ class SentimentReplayServiceImplTest {
         val d3 = day2.plusDays(1)
         Mockito.`when`(calendarRepo.findByTradeDateBetweenOrderByTradeDateAsc(day1, d3)).thenReturn(calendar(day1, day2, d3))
         Mockito.`when`(stockInfoRepo.countByIsStFalseAndDelistedFalse()).thenReturn(100L)
-        val bars = (1..100).map { FakeReplayBar("000$it", day1) } +
-            FakeReplayBar("000001", day2) +
-            (1..100).map { FakeReplayBar("100$it", d3) }
+        val bars = (1..100).map { replayBar("000$it", day1) } +
+            replayBar("000001", day2) +
+            (1..100).map { replayBar("100$it", d3) }
         Mockito.`when`(stockHistoryRepo.findReplayBars(anyDate(), anyDate())).thenReturn(bars)
         compute.results.add(SentimentComputeResult(sentimentRow(day1), emptyList(), emptyList()))
 

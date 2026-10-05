@@ -4,14 +4,17 @@ import com.soros.v2.domain.CycleStatus
 import com.soros.v2.domain.CycleType
 import com.soros.v2.entity.DragonCycle
 import com.soros.v2.entity.SentimentCycle
+import com.soros.v2.entity.StockHistory
 import com.soros.v2.entity.TradingCalendar
 import com.soros.v2.repository.DragonCycleRepository
 import com.soros.v2.repository.SentimentCycleRepository
+import com.soros.v2.repository.StockHistoryRepository
 import com.soros.v2.repository.TradingCalendarRepository
 import com.soros.v2.service.sentiment.SentimentComputeContext
 import com.soros.v2.service.sentiment.SentimentComputeResult
 import com.soros.v2.service.sentiment.SentimentComputeService
 import com.soros.v2.service.sentiment.SentimentReplayService
+import java.math.BigDecimal
 import java.time.LocalDate
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.BeforeEach
@@ -65,6 +68,9 @@ class SentimentReplayIntegrationTest {
     @Autowired
     private lateinit var dragonRepo: DragonCycleRepository
 
+    @Autowired
+    private lateinit var stockHistoryRepo: StockHistoryRepository
+
     /**
      * Mockito.any() 的 Kotlin 非空参数安全 matcher：注册 `any(LocalDate)` matcher，返回非空占位值。
      */
@@ -93,6 +99,8 @@ class SentimentReplayIntegrationTest {
         // 前序用例残留行会把本用例的补算日全部判为已有，filledDays=0 导致断言失真
         sentimentRepo.deleteAll()
         dragonRepo.deleteAll()
+        // 投影直查用例会插真实 stock_history 行，先清表防残留影响其余回放用例（compute 已 mock，空表不影响回放）
+        stockHistoryRepo.deleteAll()
         // 种子：2 个交易日（trading_calendar @Id=trade_date，重复 save 为 merge，不累积）
         calendarRepo.saveAll(listOf(TradingCalendar(day1), TradingCalendar(day2)))
         // 确定性 compute：d1 选龙头 RISING；d2 同周期阵亡 DEAD（end_date=d2，cycle_type=SMALL）
@@ -188,5 +196,64 @@ class SentimentReplayIntegrationTest {
         assertEquals(2, summary.skippedDays, "已有 2 日行跳过 skippedDays=2")
         assertEquals(2, sentimentRepo.findByTradeDateBetweenOrderByTradeDateAsc(day1, day2).size, "sentiment_cycle 仍 2 行")
         assertEquals(1, dragonRepo.findAll().size, "dragon_cycle 仍 1 行")
+    }
+
+    // ==================== 瘦身投影直查（生产事故：Null return value from advice ... isLimitUp()） ====================
+
+    @Test
+    fun `testFindReplayBars projectionReturnsAllEightFields`() {
+        // given: 真实 stock_history 行（8 个投影字段各异），直查 findReplayBars
+        // 生产事故：force=true 回放抛 500 "Null return value from advice does not match primitive return type
+        // for: public abstract boolean ...ReplayBarProjection.isLimitUp()"——Spring Data 接口投影从 getter
+        // isLimitUp() 按 JavaBean 规范剥离 is → limitUp 推导属性名，与元组别名 isLimitUp 不匹配 → primitive
+        // boolean 拿到 null → 代理抛错。本用例在 TestContainers 下用真实行复现（若未复现也保留：断言 8 字段契约）。
+        stockHistoryRepo.saveAll(
+            listOf(
+                StockHistory().apply {
+                    code = "600000"
+                    tradeDate = day1
+                    close = BigDecimal("10.5000")
+                    changePct = BigDecimal("2.5000")
+                    isLimitUp = true
+                    isLimitDown = false
+                    limitUpStreak = 3
+                    limitDownStreak = 0
+                },
+                StockHistory().apply {
+                    code = "600001"
+                    tradeDate = day2
+                    close = BigDecimal("9.9000")
+                    changePct = BigDecimal("-1.2000")
+                    isLimitUp = false
+                    isLimitDown = true
+                    limitUpStreak = 0
+                    limitDownStreak = 2
+                },
+            ),
+        )
+
+        // when
+        val bars = stockHistoryRepo.findReplayBars(day1, day2)
+
+        // then: 8 字段逐字段值正确（ORDER BY code, tradeDate → 600000/day1 在前）
+        assertEquals(2, bars.size, "投影 2 行")
+        val first = bars[0]
+        assertEquals("600000", first.code, "first.code")
+        assertEquals(day1, first.tradeDate, "first.tradeDate")
+        assertEquals(BigDecimal("10.5000"), first.close, "first.close")
+        assertEquals(BigDecimal("2.5000"), first.changePct, "first.changePct")
+        assertEquals(true, first.isLimitUp, "first.isLimitUp")
+        assertEquals(false, first.isLimitDown, "first.isLimitDown")
+        assertEquals(3, first.limitUpStreak?.toInt() ?: 0, "first.limitUpStreak")
+        assertEquals(0, first.limitDownStreak?.toInt() ?: 0, "first.limitDownStreak")
+        val second = bars[1]
+        assertEquals("600001", second.code, "second.code")
+        assertEquals(day2, second.tradeDate, "second.tradeDate")
+        assertEquals(BigDecimal("9.9000"), second.close, "second.close")
+        assertEquals(BigDecimal("-1.2000"), second.changePct, "second.changePct")
+        assertEquals(false, second.isLimitUp, "second.isLimitUp")
+        assertEquals(true, second.isLimitDown, "second.isLimitDown")
+        assertEquals(0, second.limitUpStreak?.toInt() ?: 0, "second.limitUpStreak")
+        assertEquals(2, second.limitDownStreak?.toInt() ?: 0, "second.limitDownStreak")
     }
 }
