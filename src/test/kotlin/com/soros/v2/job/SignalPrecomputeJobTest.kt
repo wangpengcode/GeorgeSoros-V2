@@ -81,6 +81,17 @@ class SignalPrecomputeJobTest {
         return DingTalkEvent.SENTIMENT_DERIVE_FAILED
     }
 
+    /** 构造 job 的辅助（开关参数可选，缺省=启用，与既有用例零改动兼容） */
+    private fun makeJob(enabled: Boolean = true): SignalPrecomputeJob = SignalPrecomputeJob(
+        replayService = replayService,
+        signalDailyRepository = signalDailyRepo,
+        marketDailyRepository = marketDailyRepo,
+        sectorDailyRepository = sectorDailyRepo,
+        calendarService = calendar,
+        notifier = notifier,
+        startupReconciliationEnabled = enabled,
+    )
+
     // ==================== 增量事件：onSentimentCycleCompleted ====================
 
     @Test
@@ -296,5 +307,25 @@ class SignalPrecomputeJobTest {
             Mockito.anyString(),
             Mockito.anyString(),
         )
+    }
+
+    // ==================== 启动对账开关（运维：全历史回放期间关闭，防并发写死锁空转） ====================
+
+    @Test
+    fun `testStartupReconciliation disabledSwitchZeroAction`() {
+        // given: 开关关闭（soros.signal.startupReconciliationEnabled=false）+ 近期日全缺（正常会触发补算）
+        val d1 = today.minusDays(2)
+        Mockito.`when`(calendar.recentTradingDays(anyDate(), Mockito.anyInt())).thenReturn(listOf(d1))
+        Mockito.`when`(signalDailyRepo.countByTradeDate(d1)).thenReturn(0L)
+        Mockito.`when`(marketDailyRepo.existsByTradeDate(d1)).thenReturn(false)
+        Mockito.`when`(sectorDailyRepo.existsByTradeDate(d1)).thenReturn(false)
+        val disabledJob = makeJob(enabled = false)
+
+        // when
+        disabledJob.startupReconciliation()
+
+        // then: 零动作（不补算、不告警）——全历史回放独占窗口
+        Mockito.verify(replayService, Mockito.never()).replayDay(anyDate())
+        Mockito.verify(notifier, Mockito.never()).notify(anyEvent(), Mockito.anyString(), Mockito.anyString())
     }
 }

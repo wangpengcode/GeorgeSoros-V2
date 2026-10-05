@@ -1,0 +1,851 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>策略控制台</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="策略控制台 a 期：策略 CRUD（结构化条件 → 服务端生成 YAML）+ 版本历史/回滚（G3）+ 回测提交占位（G4，is_dry 显式必填）。策略信号展示，非自动交易。">
+<style>
+  /* 设计基调：与 sentiment.html / kline.html 同一深色单主题；配色变量与版式沿用，保持整站一致。 */
+  :root {
+    --bg: #0e1218;
+    --panel: #161c25;
+    --panel-2: #1c2431;
+    --line: #26303f;
+    --fg: #dde4ee;
+    --muted: #8593a8;
+    --faint: #5a6678;
+    --up: #e5484d;
+    --down: #2fbf71;
+    --gold: #e2b13c;
+    --up-soft: rgba(229,72,77,.16);
+    --down-soft: rgba(47,191,113,.16);
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 400 14px/1.6 -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    padding: 20px 16px 40px;
+    padding-inline: max(16px, env(safe-area-inset-left));
+  }
+  .wrap { max-width: 1200px; margin: 0 auto; }
+  h1 { font-size: 20px; font-weight: 700; margin: 0 0 4px; letter-spacing: .02em; }
+  .sub { color: var(--muted); font-size: 12.5px; margin: 0 0 14px; }
+  .sub b { color: var(--gold); font-weight: 500; }
+  .banner { background: var(--panel); border: 1px solid var(--gold); border-radius: 8px; padding: 9px 14px; color: var(--gold); font-size: 12.5px; margin-bottom: 14px; }
+  .banner b { font-weight: 700; }
+  .errbar { background: var(--panel); border: 1px solid var(--up); border-radius: 8px; padding: 9px 14px; color: var(--up); font-size: 12.5px; margin-bottom: 14px; display: none; white-space: pre-wrap; }
+  .errbar.on { display: block; }
+  .okbar { background: var(--panel); border: 1px solid var(--down); border-radius: 8px; padding: 9px 14px; color: var(--down); font-size: 12.5px; margin-bottom: 14px; display: none; }
+  .okbar.on { display: block; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; margin-bottom: 14px; }
+  .panel h3 { margin: 0 0 10px; font-size: 12px; color: var(--muted); font-weight: 500; letter-spacing: .08em; display: flex; align-items: center; gap: 8px; }
+  .panel h3 .hintsm { font-weight: 400; color: var(--faint); letter-spacing: 0; }
+  .toolbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 14px; }
+  .btn { background: var(--panel-2); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 12px; cursor: pointer; font-size: 12.5px; font-weight: 500; font-family: inherit; }
+  .btn:hover { border-color: var(--gold); color: var(--gold); }
+  .btn.primary { border-color: var(--gold); color: var(--gold); background: rgba(226,177,60,.1); }
+  .btn.primary:hover { background: rgba(226,177,60,.18); }
+  .btn.danger { border-color: var(--up); color: var(--up); }
+  .btn.danger:hover { background: var(--up-soft); }
+  .btn:disabled { opacity: .4; cursor: not-allowed; border-color: var(--line) !important; color: var(--faint) !important; background: none !important; }
+  .btn.sm { padding: 3px 9px; font-size: 11.5px; }
+  .scroller { overflow-x: auto; border: 1px solid var(--line); border-radius: 6px; }
+  table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+  th, td { padding: 7px 10px; text-align: left; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 500; background: var(--panel-2); font-size: 11.5px; letter-spacing: .04em; }
+  tbody tr:hover { background: rgba(255,255,255,.02); }
+  tbody tr:last-child td { border-bottom: none; }
+  .chip { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 11.5px; font-weight: 600; line-height: 1.6; }
+  .chip.draft { background: rgba(226,177,60,.14); color: var(--gold); }
+  .chip.active { background: var(--down-soft); color: var(--down); }
+  .chip.retired { background: rgba(133,147,168,.14); color: var(--muted); }
+  .chip.on { background: var(--down-soft); color: var(--down); }
+  .chip.off { background: rgba(133,147,168,.14); color: var(--faint); }
+  .vernum { font-family: "SF Mono", Menlo, Consolas, monospace; font-variant-numeric: tabular-nums; color: var(--fg); }
+  .note-td { color: var(--muted); max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .actions { display: flex; gap: 6px; flex-wrap: wrap; }
+  .emptyrow td { color: var(--faint); text-align: center; padding: 20px; }
+
+  /* 抽屉（创建/编辑表单） */
+  .backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.55); z-index: 40; display: none; }
+  .backdrop.on { display: block; }
+  .drawer {
+    position: fixed; top: 0; right: 0; bottom: 0; width: min(460px, 94vw);
+    background: var(--panel-2); border-left: 1px solid var(--line); z-index: 41;
+    transform: translateX(100%); transition: transform .18s ease; overflow-y: auto; padding: 16px 16px 24px;
+  }
+  .drawer.on { transform: translateX(0); }
+  .drawer h2 { font-size: 15px; margin: 0 0 4px; }
+  .drawer .close { position: absolute; top: 14px; right: 14px; background: none; border: none; color: var(--muted); font-size: 16px; cursor: pointer; }
+  .drawer .close:hover { color: var(--fg); }
+  .field { margin-bottom: 12px; }
+  .field label { display: block; font-size: 11.5px; color: var(--muted); margin-bottom: 4px; letter-spacing: .03em; }
+  .field input[type=text], .field input[type=number], .field input[type=date], .field textarea, .field select {
+    width: 100%; background: var(--panel); border: 1px solid var(--line); color: var(--fg);
+    border-radius: 6px; padding: 7px 9px; font-size: 13px; font-family: inherit;
+  }
+  .field textarea { resize: vertical; min-height: 52px; }
+  .field .req { color: var(--up); margin-left: 2px; }
+  .fieldrow { display: flex; gap: 8px; align-items: center; }
+  .switch { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; font-size: 12.5px; color: var(--fg); }
+  .switch input { width: 16px; height: 16px; accent-color: var(--gold); cursor: pointer; }
+  .condhdr { display: flex; justify-content: space-between; align-items: center; margin: 14px 0 6px; }
+  .condhdr span { font-size: 11.5px; color: var(--muted); letter-spacing: .04em; }
+  .condrow { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 8px; margin-bottom: 8px; display: grid; grid-template-columns: 1fr 1fr; gap: 6px; position: relative; }
+  .condrow .cf { display: flex; flex-direction: column; gap: 3px; }
+  .condrow .cf label { font-size: 10px; color: var(--faint); letter-spacing: .03em; }
+  .condrow .cf input { background: var(--panel-2); border: 1px solid var(--line); color: var(--fg); border-radius: 5px; padding: 5px 7px; font-size: 12px; font-family: inherit; width: 100%; }
+  .condrow .rm { position: absolute; top: 4px; right: 6px; background: none; border: none; color: var(--faint); cursor: pointer; font-size: 13px; padding: 0 3px; }
+  .condrow .rm:hover { color: var(--up); }
+  .condhint { color: var(--faint); font-size: 10.5px; margin-top: -2px; margin-bottom: 10px; }
+  .formerr { color: var(--up); font-size: 12px; margin: 8px 0; display: none; }
+  .formerr.on { display: block; }
+  .drawerfoot { display: flex; gap: 8px; margin-top: 14px; position: sticky; bottom: 0; background: var(--panel-2); padding-top: 10px; }
+
+  /* YAML 面板 */
+  pre.yamlbox { background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; padding: 12px; font: 12px/1.6 "SF Mono", Menlo, Consolas, monospace; white-space: pre-wrap; word-break: break-all; max-height: 360px; overflow-y: auto; margin: 0; }
+  .yamlhead { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+  .copytip { color: var(--down); font-size: 11px; margin-left: 8px; display: none; }
+  .copytip.on { display: inline; }
+
+  /* 历史面板 */
+  .histrow { display: flex; gap: 10px; align-items: flex-start; padding: 9px 0; border-bottom: 1px solid var(--line); }
+  .histrow:last-child { border-bottom: none; }
+  .histrow .hv { font-family: "SF Mono", Menlo, monospace; color: var(--gold); font-weight: 700; font-size: 13px; min-width: 42px; }
+  .histrow .hbody { flex: 1; min-width: 0; }
+  .histrow .ht { color: var(--faint); font-size: 11px; margin-bottom: 3px; }
+  .histrow details summary { cursor: pointer; color: var(--muted); font-size: 11.5px; }
+  .histrow pre { margin: 6px 0 0; background: var(--panel-2); border: 1px solid var(--line); border-radius: 5px; padding: 8px; font: 11.5px/1.5 "SF Mono", Menlo, monospace; white-space: pre-wrap; word-break: break-all; }
+  .confirm2 { display: inline-flex; gap: 6px; align-items: center; }
+  .confirm2 .ask { color: var(--up); font-size: 11.5px; }
+
+  /* 回测表单 */
+  .btgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; margin-bottom: 10px; }
+  .bthint { color: var(--muted); font-size: 11.5px; margin-top: 2px; }
+  .bthint.warn { color: var(--gold); }
+  .btresult { background: var(--panel-2); border: 1px solid var(--down); border-radius: 6px; padding: 10px 12px; margin-top: 10px; font-size: 12.5px; display: none; }
+  .btresult.on { display: block; }
+  .btresult .k { color: var(--muted); }
+  .btresult .row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
+  .btresult .row span { background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 2px 8px; font-family: "SF Mono", Menlo, monospace; font-size: 11.5px; }
+
+  @media (max-width: 560px) {
+    .condrow { grid-template-columns: 1fr; }
+    th, td { white-space: normal; }
+  }
+</style>
+<style id="gs-navcss">
+.gs-nav{position:fixed;left:0;top:0;bottom:0;width:176px;background:#10151d;border-right:1px solid #263140;display:flex;flex-direction:column;z-index:50}
+.gs-brand{padding:16px 14px 12px;border-bottom:1px solid #263140}
+.gs-brand b{color:#e2b13c;font-size:14px;letter-spacing:.5px}
+.gs-brand span{display:block;color:#7d8b9e;font-size:10.5px;margin-top:2px}
+.gs-nav a{display:flex;flex-direction:column;gap:1px;padding:11px 14px;color:#aeb9c9;text-decoration:none;border-left:3px solid transparent;font-size:13px}
+.gs-nav a b{font-weight:600;color:inherit}
+.gs-nav a i{font-style:normal;color:#525f70;font-size:10.5px}
+.gs-nav a:hover{background:#161c25;color:#e8edf4}
+.gs-nav a.on{background:#161c25;border-left-color:#e2b13c;color:#e8edf4}
+.gs-nav a.on i{color:#7d8b9e}
+.gs-foot{margin-top:auto;padding:12px 14px;color:#525f70;font-size:10px;border-top:1px solid #263140;line-height:1.6}
+body{padding-left:176px!important}
+@media(max-width:900px){
+  body{padding-left:0!important;padding-top:58px!important}
+  .gs-nav{left:0;right:0;top:0;bottom:auto;width:auto;flex-direction:row;align-items:stretch;overflow-x:auto}
+  .gs-brand{border-bottom:none;border-right:1px solid #263140;display:flex;flex-direction:column;justify-content:center;white-space:nowrap;padding:8px 12px}
+  .gs-brand span{display:none}
+  .gs-nav a{border-left:none;border-bottom:3px solid transparent;padding:10px 12px;white-space:nowrap}
+  .gs-nav a b{font-size:12.5px}
+  .gs-nav a i{display:none}
+  .gs-nav a.on{border-bottom-color:#e2b13c}
+  .gs-foot{display:none}
+}
+</style>
+</head>
+<body>
+<nav class="gs-nav">
+  <div class="gs-brand"><b>GeorgeSoros V2</b><span>策略控制台</span></div>
+  <a href="sentiment.html"><b>情绪周期表</b><i>全市场温度 · 背景层</i></a>
+  <a href="strategy-console.html" class="on"><b>策略控制台</b><i>策略 · 回测 · 自选股</i></a>
+  <a href="intraday.html"><b>盘中监控</b><i>实时盘面 · 开仓预警</i></a>
+  <a href="kline.html"><b>K线复盘</b><i>个股下钻 · 指标</i></a>
+  <a href="notes.html"><b>笔记本</b><i>按天汇总 · 跨页记录</i></a>
+  <div class="gs-foot">同一 qfq 数据底座<br>情绪 → 决策 → 执行 → 复盘</div>
+</nav>
+
+<div class="wrap">
+  <h1>策略控制台</h1>
+  <p class="sub">策略 CRUD（结构化条件 → 服务端生成 YAML）· 版本历史 / 回滚（<b>G3</b>）· 回测提交占位（<b>G4</b>，回测引擎 b 期上线）</p>
+  <div class="banner">⚠ 本页仅做<b>策略信号展示</b>，<b>非自动交易</b>——所有条件/回测仅用于观察与复盘，不触发任何下单动作。</div>
+
+  <div id="errbar" class="errbar"></div>
+  <div id="okbar" class="okbar"></div>
+
+  <div class="toolbar">
+    <button class="btn primary" id="btnNew">+ 新建策略</button>
+    <button class="btn" id="btnReload">刷新列表</button>
+    <button class="btn" id="btnDemo">演示模式：关</button>
+    <span style="color:var(--faint);font-size:11.5px">后端 :19890 当前停着时可开启演示模式，用内置 mock 数据自检本页渲染逻辑（不发真实请求）</span>
+  </div>
+
+  <div class="panel">
+    <h3>策略列表 <span class="hintsm">GET /api/v1/strategies</span></h3>
+    <div class="scroller">
+      <table id="tblStrategies">
+        <thead>
+          <tr><th>name</th><th>status</th><th>version</th><th>alert_enabled</th><th>note</th><th>操作</th></tr>
+        </thead>
+        <tbody id="tbodyStrategies"><tr class="emptyrow"><td colspan="6">加载中…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="panel" id="yamlPanel" style="display:none">
+    <div class="yamlhead">
+      <h3 style="margin:0">YAML 全文 <span class="hintsm" id="yamlWho"></span></h3>
+      <span>
+        <button class="btn sm" id="btnCopyYaml">复制</button>
+        <span class="copytip" id="copytip">已复制 ✓</span>
+        <button class="btn sm" id="btnCloseYaml">关闭</button>
+      </span>
+    </div>
+    <pre class="yamlbox" id="yamlText"></pre>
+  </div>
+
+  <div class="panel" id="histPanel" style="display:none">
+    <div class="yamlhead">
+      <h3 style="margin:0">版本历史 <span class="hintsm" id="histWho">GET /api/v1/strategies/{id}/history（升序）</span></h3>
+      <button class="btn sm" id="btnCloseHist">关闭</button>
+    </div>
+    <div id="histList"></div>
+  </div>
+
+  <div class="panel">
+    <h3>回测提交（占位，b 期上线后执行） <span class="hintsm">POST /api/v1/backtests</span></h3>
+    <div class="btgrid">
+      <div class="field" style="margin-bottom:0">
+        <label>strategy_name <span class="req">*</span></label>
+        <select id="btStrategy"><option value="">（请选择已有策略）</option></select>
+      </div>
+      <div class="field" style="margin-bottom:0">
+        <label>config_id（可选）</label>
+        <input type="number" id="btConfigId" placeholder="留空=使用策略当前配置">
+      </div>
+      <div class="field" style="margin-bottom:0">
+        <label>start_date <span class="req">*</span></label>
+        <input type="date" id="btStart">
+      </div>
+      <div class="field" style="margin-bottom:0">
+        <label>end_date <span class="req">*</span></label>
+        <input type="date" id="btEnd">
+      </div>
+    </div>
+    <div class="field">
+      <label>is_dry <span class="req">*</span>（<b>G4：is_dry 必须显式指定，禁止静默兜底</b>）</label>
+      <div class="switch" style="display:flex;gap:16px;align-items:center">
+        <label style="display:flex;gap:6px;align-items:center;margin:0"><input type="radio" name="btIsDry" value="dry"> 试跑（is_dry=true）</label>
+        <label style="display:flex;gap:6px;align-items:center;margin:0"><input type="radio" name="btIsDry" value="formal"> 正式（is_dry=false）</label>
+      </div>
+    </div>
+    <div class="bthint warn" id="btHint">未选择 is_dry：按钮禁用。试跑/正式必须二选一（G4）。</div>
+    <div class="formerr" id="btFormErr"></div>
+    <div style="margin-top:10px">
+      <button class="btn primary" id="btnSubmitBt" disabled>提交回测（202 受理排队）</button>
+    </div>
+    <div class="btresult" id="btResult"></div>
+  </div>
+</div>
+
+<div class="backdrop" id="backdrop"></div>
+<div class="drawer" id="drawer">
+  <button class="close" id="btnDrawerClose">✕</button>
+  <h2 id="drawerTitle">新建策略</h2>
+  <p class="sub" id="drawerSub" style="margin-bottom:14px">结构化条件 → 服务端生成 YAML（无自由文本）</p>
+
+  <div class="field">
+    <label>name（策略名）<span class="req">*</span></label>
+    <input type="text" id="fName" placeholder="如：打龙头回调">
+  </div>
+
+  <div class="condhdr">
+    <span>conditions（条件行）</span>
+    <button class="btn sm" id="btnAddCond">+ 添加条件行</button>
+  </div>
+  <div class="condhint">source/side/op 为自由文本（带输入建议，非强制枚举）；value：between 用逗号分隔两个数值如 <code>3,7</code>，数值类直填数字，标签类填标签名</div>
+  <div id="condRows"></div>
+
+  <div class="field" style="margin-top:14px">
+    <label class="switch"><input type="checkbox" id="fAlertEnabled"> alert_enabled（开启提醒）</label>
+  </div>
+  <div class="field">
+    <label>note（备注，可选）</label>
+    <textarea id="fNote" placeholder="备注说明"></textarea>
+  </div>
+
+  <div class="formerr" id="formErr"></div>
+  <div class="drawerfoot">
+    <button class="btn primary" id="btnSubmitForm">提交</button>
+    <button class="btn" id="btnCancelForm">取消</button>
+  </div>
+</div>
+
+<datalist id="dlSide"><option value="BUY"></option><option value="SELL"></option></datalist>
+<datalist id="dlSource">
+  <option value="limit_up_streak"></option>
+  <option value="ladder_rank"></option>
+  <option value="is_zhaban"></option>
+  <option value="sector_ladder_rank"></option>
+  <option value="adv"></option>
+  <option value="dec"></option>
+  <option value="yst_limit_premium"></option>
+  <option value="yst_face_count"></option>
+  <option value="limit_up_count"></option>
+  <option value="avg_chg_pct_all"></option>
+</datalist>
+<datalist id="dlOp">
+  <option value="equals"></option>
+  <option value="between"></option>
+  <option value="gte"></option>
+  <option value="lte"></option>
+  <option value="label"></option>
+</datalist>
+
+<script>
+/* ================= 基础工具 ================= */
+var API_BASE = '/api/v1';
+var strategies = [];      /* StrategySummaryDto[] */
+var demoMode = false;
+var editingId = null;     /* null=新建；非 null=编辑中的策略 id */
+var condSeq = 0;
+
+function $(id) { return document.getElementById(id); }
+function esc(s) { return String(s == null ? '' : s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+
+function showError(msg) {
+  var e = $('errbar');
+  e.textContent = msg;
+  e.classList.add('on');
+  $('okbar').classList.remove('on');
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+function hideError() { $('errbar').classList.remove('on'); }
+function showOk(msg) {
+  var o = $('okbar');
+  o.textContent = msg;
+  o.classList.add('on');
+  hideError();
+  setTimeout(function(){ o.classList.remove('on'); }, 4000);
+}
+
+/* 统一错误信封处理：{status:"error",error:{code,message}}（§11.1 契约） */
+function apiFetch(url, opts) {
+  return fetch(url, opts).then(function(res) {
+    return res.text().then(function(text) {
+      var body = null;
+      if (text) { try { body = JSON.parse(text); } catch (e) { body = null; } }
+      if (!res.ok) {
+        var code = (body && body.error && body.error.code) ? body.error.code : ('HTTP_' + res.status);
+        var message = (body && body.error && body.error.message) ? body.error.message : ('请求失败（HTTP ' + res.status + '）');
+        var err = new Error('[' + code + '] ' + message);
+        err.httpStatus = res.status;
+        err.code = code;
+        throw err;
+      }
+      return body;
+    });
+  });
+}
+
+/* ================= Mock 数据（演示模式，自检渲染逻辑，不发真实请求） ================= */
+var MOCK_STRATEGIES = [
+  { id: 1001, name: '打龙头回调', version: 3, status: 'ACTIVE', alert_enabled: true, note: '打龙头回调策略 · 演示数据' },
+  { id: 1002, name: '连板首阴', version: 1, status: 'DRAFT', alert_enabled: false, note: null },
+  { id: 1003, name: '退潮期退出', version: 5, status: 'RETIRED', alert_enabled: false, note: '已停用，仅留档' },
+];
+var MOCK_YAML = {
+  1001: 'strategy: 打龙头回调\nsignals:\n  BUY:\n    - cond_id: buy_0\n      source: limit_up_streak\n      op: between\n      value: [3, 7]\n  SELL:\n    - cond_id: sell_0\n      source: is_zhaban\n      op: equals\n      value: true\n',
+  1002: 'strategy: 连板首阴\nsignals:\n  BUY:\n    - cond_id: buy_0\n      source: ladder_rank\n      op: gte\n      value: 2\n',
+  1003: 'strategy: 退潮期退出\nsignals:\n  SELL:\n    - cond_id: sell_0\n      source: avg_chg_pct_all\n      op: lte\n      value: -2\n',
+};
+var MOCK_HISTORY = {
+  1001: [
+    { version: 1, yaml: 'strategy: 打龙头回调\nsignals:\n  BUY:\n    - cond_id: buy_0\n      source: limit_up_streak\n      op: between\n      value: [2, 6]\n', created_at: '2026-09-01T10:00:00' },
+    { version: 2, yaml: 'strategy: 打龙头回调\nsignals:\n  BUY:\n    - cond_id: buy_0\n      source: limit_up_streak\n      op: between\n      value: [3, 7]\n', created_at: '2026-09-15T11:30:00' },
+    { version: 3, yaml: MOCK_YAML[1001], created_at: '2026-10-01T09:12:00' },
+  ],
+};
+
+/* ================= 策略列表 ================= */
+function loadStrategies() {
+  hideError();
+  var p = demoMode
+    ? Promise.resolve(MOCK_STRATEGIES.slice())
+    : apiFetch(API_BASE + '/strategies');
+  return p.then(function(list) {
+    strategies = list || [];
+    renderStrategyTable();
+    renderBtStrategyOptions();
+  }).catch(function(e) {
+    showError('加载策略列表失败：' + e.message);
+    strategies = [];
+    renderStrategyTable();
+  });
+}
+
+function statusChipClass(s) {
+  if (s === 'ACTIVE') return 'active';
+  if (s === 'RETIRED') return 'retired';
+  return 'draft';
+}
+
+function renderStrategyTable() {
+  var tb = $('tbodyStrategies');
+  if (!strategies.length) {
+    tb.innerHTML = '<tr class="emptyrow"><td colspan="6">暂无策略，点击「+ 新建策略」创建</td></tr>';
+    return;
+  }
+  tb.innerHTML = strategies.map(function(s) {
+    return '<tr>'
+      + '<td>' + esc(s.name) + '</td>'
+      + '<td><span class="chip ' + statusChipClass(s.status) + '">' + esc(s.status) + '</span></td>'
+      + '<td class="vernum">v' + s.version + '</td>'
+      + '<td><span class="chip ' + (s.alert_enabled ? 'on' : 'off') + '">' + (s.alert_enabled ? '开' : '关') + '</span></td>'
+      + '<td class="note-td" title="' + esc(s.note || '') + '">' + esc(s.note || '—') + '</td>'
+      + '<td><div class="actions">'
+      + '<button class="btn sm" data-act="yaml" data-id="' + s.id + '" data-name="' + esc(s.name) + '">查看YAML</button>'
+      + '<button class="btn sm" data-act="hist" data-id="' + s.id + '" data-name="' + esc(s.name) + '">历史</button>'
+      + '<button class="btn sm" data-act="rollback" data-id="' + s.id + '" data-name="' + esc(s.name) + '">回滚</button>'
+      + '<button class="btn sm" data-act="edit" data-id="' + s.id + '">编辑</button>'
+      + '</div></td>'
+      + '</tr>';
+  }).join('');
+  tb.querySelectorAll('button[data-act]').forEach(function(btn) {
+    btn.onclick = function() {
+      var act = btn.dataset.act, id = +btn.dataset.id;
+      if (act === 'yaml') openYamlPanel(id, btn.dataset.name);
+      else if (act === 'hist' || act === 'rollback') openHistoryPanel(id, btn.dataset.name);
+      else if (act === 'edit') openEditDrawer(id);
+    };
+  });
+}
+
+/* ================= YAML 面板（GET /strategies/{id}/yaml） ================= */
+function openYamlPanel(id, name) {
+  hideError();
+  $('yamlPanel').style.display = 'block';
+  $('yamlWho').textContent = name ? ('· ' + name) : '';
+  $('yamlText').textContent = '加载中…';
+  $('yamlPanel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  var p = demoMode
+    ? Promise.resolve({ yaml: MOCK_YAML[id] || ('# 演示模式：策略 ' + id + ' 无 mock YAML') })
+    : apiFetch(API_BASE + '/strategies/' + id + '/yaml');
+  p.then(function(dto) {
+    $('yamlText').textContent = dto.yaml || '';
+  }).catch(function(e) {
+    $('yamlText').textContent = '';
+    showError('加载 YAML 失败：' + e.message);
+  });
+}
+$('btnCloseYaml').onclick = function() { $('yamlPanel').style.display = 'none'; };
+$('btnCopyYaml').onclick = function() {
+  var text = $('yamlText').textContent;
+  function fallbackSelect() {
+    var range = document.createRange();
+    range.selectNodeContents($('yamlText'));
+    var sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+  }
+  try {
+    navigator.clipboard.writeText(text).then(function() {
+      var tip = $('copytip'); tip.classList.add('on');
+      setTimeout(function(){ tip.classList.remove('on'); }, 1800);
+    }).catch(fallbackSelect);
+  } catch (e) {
+    fallbackSelect();
+  }
+};
+
+/* ================= 历史面板（GET /strategies/{id}/history，升序 + 回滚） ================= */
+var histCtx = { id: null, name: null };
+function openHistoryPanel(id, name) {
+  hideError();
+  histCtx = { id: id, name: name };
+  $('histPanel').style.display = 'block';
+  $('histWho').textContent = (name ? ('· ' + name + ' · ') : '· ') + 'GET /api/v1/strategies/{id}/history（升序）';
+  $('histList').innerHTML = '<p style="color:var(--muted)">加载中…</p>';
+  $('histPanel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  var p = demoMode
+    ? Promise.resolve((MOCK_HISTORY[id] || []).slice())
+    : apiFetch(API_BASE + '/strategies/' + id + '/history');
+  p.then(function(list) {
+    renderHistoryList(list || []);
+  }).catch(function(e) {
+    $('histList').innerHTML = '';
+    showError('加载历史失败：' + e.message);
+  });
+}
+$('btnCloseHist').onclick = function() { $('histPanel').style.display = 'none'; };
+
+function renderHistoryList(list) {
+  if (!list.length) {
+    $('histList').innerHTML = '<p style="color:var(--faint)">暂无版本历史</p>';
+    return;
+  }
+  $('histList').innerHTML = list.map(function(h) {
+    return '<div class="histrow" data-version="' + h.version + '">'
+      + '<div class="hv">v' + h.version + '</div>'
+      + '<div class="hbody">'
+      + '<div class="ht">' + esc(h.created_at || '（无时间戳）') + '</div>'
+      + '<details><summary>查看该版本 YAML</summary><pre>' + esc(h.yaml) + '</pre></details>'
+      + '<div class="rollbackzone" style="margin-top:6px"><button class="btn sm" data-rollback="' + h.version + '">回滚到该版本</button></div>'
+      + '</div>'
+      + '</div>';
+  }).join('');
+  $('histList').querySelectorAll('button[data-rollback]').forEach(function(btn) {
+    btn.onclick = function() { askRollbackConfirm(btn); };
+  });
+}
+
+/* 页面内二次确认（不用 confirm()）：点击后原按钮替换为「确认/取消」两步 */
+function askRollbackConfirm(btn) {
+  var version = +btn.dataset.rollback;
+  var zone = btn.parentNode;
+  zone.innerHTML = '<span class="confirm2"><span class="ask">确认回滚到 v' + version + '？新版本将复制该内容（当前版本号+1）</span>'
+    + '<button class="btn sm danger" id="rbYes">确认回滚</button>'
+    + '<button class="btn sm" id="rbNo">取消</button></span>';
+  $('rbYes').onclick = function() { doRollback(version); };
+  $('rbNo').onclick = function() {
+    zone.innerHTML = '<button class="btn sm" data-rollback="' + version + '">回滚到该版本</button>';
+    zone.querySelector('button').onclick = function() { askRollbackConfirm(zone.querySelector('button')); };
+  };
+}
+
+function doRollback(version) {
+  var id = histCtx.id;
+  hideError();
+  if (demoMode) {
+    var hist = MOCK_HISTORY[id] || [];
+    var target = hist.filter(function(h){ return h.version === version; })[0];
+    var strat = strategies.filter(function(s){ return s.id === id; })[0];
+    if (target && strat) {
+      var newVersion = strat.version + 1;
+      strat.version = newVersion;
+      MOCK_YAML[id] = target.yaml;
+      hist.push({ version: newVersion, yaml: target.yaml, created_at: new Date().toISOString() });
+    }
+    showOk('（演示模式）已回滚到 v' + version + '，新版本 v' + (strat ? strat.version : '?'));
+    renderStrategyTable();
+    openHistoryPanel(id, histCtx.name);
+    return;
+  }
+  apiFetch(API_BASE + '/strategies/' + id + '/rollback?version=' + version, { method: 'POST' })
+    .then(function(detail) {
+      showOk('已回滚：策略 ' + detail.name + ' → 新版本 v' + detail.version + '（内容取自 v' + version + '）');
+      return loadStrategies();
+    })
+    .then(function() { openHistoryPanel(id, histCtx.name); })
+    .catch(function(e) { showError('回滚失败：' + e.message); });
+}
+
+/* ================= 创建/编辑抽屉 ================= */
+function newCondRow(data) {
+  data = data || { condId: '', side: '', source: '', op: '', value: '' };
+  var rowId = 'cr' + (++condSeq);
+  var html = '<div class="condrow" data-rowid="' + rowId + '">'
+    + '<button class="rm" title="删除此行">✕</button>'
+    + '<div class="cf"><label>cond_id <span class="req">*</span></label><input type="text" data-f="condId" value="' + esc(data.condId) + '" placeholder="如 buy_0"></div>'
+    + '<div class="cf"><label>side <span class="req">*</span></label><input type="text" list="dlSide" data-f="side" value="' + esc(data.side) + '" placeholder="BUY/SELL"></div>'
+    + '<div class="cf"><label>source <span class="req">*</span></label><input type="text" list="dlSource" data-f="source" value="' + esc(data.source) + '" placeholder="如 limit_up_streak"></div>'
+    + '<div class="cf"><label>op <span class="req">*</span></label><input type="text" list="dlOp" data-f="op" value="' + esc(data.op) + '" placeholder="如 between/gte/equals"></div>'
+    + '<div class="cf" style="grid-column:1 / -1"><label>value（可选，between 用逗号分隔如 3,7）</label><input type="text" data-f="value" value="' + esc(data.value) + '" placeholder="如 3,7 或 5 或 true"></div>'
+    + '</div>';
+  var wrap = document.createElement('div');
+  wrap.innerHTML = html;
+  var el = wrap.firstChild;
+  el.querySelector('.rm').onclick = function() { el.remove(); };
+  return el;
+}
+
+function openCreateDrawer() {
+  editingId = null;
+  $('drawerTitle').textContent = '新建策略';
+  $('drawerSub').textContent = '结构化条件 → 服务端生成 YAML（无自由文本）';
+  $('fName').value = '';
+  $('fName').disabled = false;
+  $('fAlertEnabled').checked = false;
+  $('fNote').value = '';
+  $('formErr').classList.remove('on');
+  $('condRows').innerHTML = '';
+  $('condRows').appendChild(newCondRow());
+  openDrawer();
+}
+
+/* 编辑：name 不可改（PUT 请求体不含 name），conditions 由当前 YAML best-effort 解析回填（无结构化条件读取端点） */
+function openEditDrawer(id) {
+  hideError();
+  var strat = strategies.filter(function(s){ return s.id === id; })[0];
+  if (!strat) return;
+  editingId = id;
+  $('drawerTitle').textContent = '编辑策略 · ' + strat.name;
+  $('drawerSub').textContent = 'conditions 由当前 YAML 尽力解析回填（无结构化条件读取端点，若解析异常请核对「查看YAML」原文后手动修正）';
+  $('fName').value = strat.name;
+  $('fName').disabled = true;
+  $('fAlertEnabled').checked = !!strat.alert_enabled;
+  $('fNote').value = strat.note || '';
+  $('formErr').classList.remove('on');
+  $('condRows').innerHTML = '<p style="color:var(--muted);font-size:12px">加载当前 YAML 并解析条件…</p>';
+  openDrawer();
+
+  var p = demoMode
+    ? Promise.resolve({ yaml: MOCK_YAML[id] || '' })
+    : apiFetch(API_BASE + '/strategies/' + id + '/yaml');
+  p.then(function(dto) {
+    var rows = parseYamlConditions(dto.yaml || '');
+    $('condRows').innerHTML = '';
+    if (!rows.length) { $('condRows').appendChild(newCondRow()); return; }
+    rows.forEach(function(r) { $('condRows').appendChild(newCondRow(r)); });
+  }).catch(function(e) {
+    $('condRows').innerHTML = '';
+    $('condRows').appendChild(newCondRow());
+    showError('加载当前 YAML 失败，条件行已置空，请手动填写：' + e.message);
+  });
+}
+
+/* best-effort 解析 YamlGenerator.generate() 产出的固定格式（仅用于编辑回填，非权威来源） */
+function parseYamlConditions(yaml) {
+  var lines = String(yaml).split('\n');
+  var rows = [];
+  var side = null, cur = null;
+  lines.forEach(function(line) {
+    var mSide = line.match(/^  (\S+):\s*$/);
+    var mCond = line.match(/^\s{4}- cond_id:\s*(.+)$/);
+    var mSource = line.match(/^\s{6}source:\s*(.+)$/);
+    var mOp = line.match(/^\s{6}op:\s*(.+)$/);
+    var mValue = line.match(/^\s{6}value:\s*(.+)$/);
+    if (mSide && line.indexOf('signals:') === -1) { side = mSide[1]; return; }
+    if (mCond) {
+      if (cur) rows.push(cur);
+      cur = { condId: mCond[1].trim(), side: side || '', source: '', op: '', value: '' };
+      return;
+    }
+    if (cur && mSource) { cur.source = mSource[1].trim(); return; }
+    if (cur && mOp) { cur.op = mOp[1].trim(); return; }
+    if (cur && mValue) {
+      var v = mValue[1].trim();
+      var mArr = v.match(/^\[(.*)\]$/);
+      if (mArr) { cur.value = mArr[1].split(',').map(function(x){ return x.trim(); }).join(','); }
+      else { cur.value = v.replace(/^"(.*)"$/, '$1'); }
+      return;
+    }
+  });
+  if (cur) rows.push(cur);
+  return rows;
+}
+
+function openDrawer() {
+  $('backdrop').classList.add('on');
+  $('drawer').classList.add('on');
+}
+function closeDrawer() {
+  $('backdrop').classList.remove('on');
+  $('drawer').classList.remove('on');
+}
+$('btnNew').onclick = openCreateDrawer;
+$('btnDrawerClose').onclick = closeDrawer;
+$('btnCancelForm').onclick = closeDrawer;
+$('backdrop').onclick = closeDrawer;
+$('btnAddCond').onclick = function() { $('condRows').appendChild(newCondRow()); };
+
+/* 提交前前端校验：name 必填（新建）；每行 cond_id/side/source/op 非空（允许 0 行，但已添加的行必须完整） */
+function collectConditions() {
+  var rows = Array.prototype.slice.call($('condRows').querySelectorAll('.condrow'));
+  var result = [];
+  for (var i = 0; i < rows.length; i++) {
+    var row = rows[i];
+    var get = function(f) { return row.querySelector('[data-f="' + f + '"]').value.trim(); };
+    var condId = get('condId'), side = get('side'), source = get('source'), op = get('op'), rawVal = get('value');
+    if (!condId || !side || !source || !op) {
+      return { error: '第 ' + (i + 1) + ' 行条件缺必填字段（cond_id/side/source/op）' };
+    }
+    var value = null;
+    if (rawVal) {
+      if (op === 'between' || rawVal.indexOf(',') > -1) {
+        var parts = rawVal.split(',').map(function(x){ return x.trim(); }).filter(function(x){ return x.length; });
+        var nums = parts.map(function(x){ return isFinite(+x) ? +x : x; });
+        value = nums;
+      } else if (rawVal === 'true' || rawVal === 'false') {
+        value = (rawVal === 'true');
+      } else if (isFinite(+rawVal) && rawVal !== '') {
+        value = +rawVal;
+      } else {
+        value = rawVal;
+      }
+    }
+    result.push({ cond_id: condId, side: side, source: source, op: op, value: value });
+  }
+  return { conditions: result };
+}
+
+$('btnSubmitForm').onclick = function() {
+  var errEl = $('formErr');
+  errEl.classList.remove('on');
+  var name = $('fName').value.trim();
+  if (!editingId && !name) {
+    errEl.textContent = 'name 不能为空';
+    errEl.classList.add('on');
+    return;
+  }
+  var collected = collectConditions();
+  if (collected.error) {
+    errEl.textContent = collected.error;
+    errEl.classList.add('on');
+    return;
+  }
+  var alertEnabled = $('fAlertEnabled').checked;
+  var note = $('fNote').value.trim() || null;
+  hideError();
+
+  if (demoMode) {
+    if (editingId) {
+      var strat = strategies.filter(function(s){ return s.id === editingId; })[0];
+      if (strat) {
+        strat.version += 1;
+        strat.alert_enabled = alertEnabled;
+        strat.note = note;
+      }
+      showOk('（演示模式）已更新策略，新版本 v' + (strat ? strat.version : '?'));
+    } else {
+      var newId = Math.max.apply(null, strategies.map(function(s){ return s.id; }).concat([1000])) + 1;
+      strategies.push({ id: newId, name: name, version: 1, status: 'DRAFT', alert_enabled: alertEnabled, note: note });
+      showOk('（演示模式）已创建策略 ' + name + '（v1 DRAFT）');
+    }
+    renderStrategyTable();
+    renderBtStrategyOptions();
+    closeDrawer();
+    return;
+  }
+
+  var body, url, method;
+  if (editingId) {
+    body = { conditions: collected.conditions, alert_enabled: alertEnabled, note: note };
+    url = API_BASE + '/strategies/' + editingId;
+    method = 'PUT';
+  } else {
+    body = { name: name, conditions: collected.conditions, alert_enabled: alertEnabled, note: note };
+    url = API_BASE + '/strategies';
+    method = 'POST';
+  }
+  apiFetch(url, { method: method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    .then(function(detail) {
+      showOk((editingId ? '已更新策略 ' : '已创建策略 ') + detail.name + '（v' + detail.version + ' ' + detail.status + '）');
+      closeDrawer();
+      return loadStrategies();
+    })
+    .catch(function(e) {
+      errEl.textContent = '提交失败：' + e.message;
+      errEl.classList.add('on');
+    });
+};
+
+/* ================= 回测提交表单（POST /api/v1/backtests，is_dry 显式必填 G4） ================= */
+function renderBtStrategyOptions() {
+  var sel = $('btStrategy');
+  var cur = sel.value;
+  sel.innerHTML = '<option value="">（请选择已有策略）</option>' + strategies.map(function(s) {
+    return '<option value="' + esc(s.name) + '">' + esc(s.name) + ' (v' + s.version + ' ' + esc(s.status) + ')</option>';
+  }).join('');
+  if (cur) sel.value = cur;
+}
+
+function getIsDrySelection() {
+  var v = document.querySelector('input[name="btIsDry"]:checked');
+  return v ? v.value : null; // null=未选择（G4：不兜底）
+}
+
+function updateBtSubmitState() {
+  var strategyName = $('btStrategy').value;
+  var start = $('btStart').value;
+  var end = $('btEnd').value;
+  var isDry = getIsDrySelection() !== null;
+  var ok = !!strategyName && !!start && !!end && isDry;
+  $('btnSubmitBt').disabled = !ok;
+  $('btHint').style.display = isDry ? 'none' : 'block';
+}
+['btStrategy', 'btStart', 'btEnd'].forEach(function(id) {
+  $(id).addEventListener('input', updateBtSubmitState);
+  $(id).addEventListener('change', updateBtSubmitState);
+});
+Array.prototype.forEach.call(document.querySelectorAll('input[name="btIsDry"]'), function(r) {
+  r.addEventListener('change', updateBtSubmitState);
+});
+
+$('btnSubmitBt').onclick = function() {
+  var errEl = $('btFormErr');
+  errEl.classList.remove('on');
+  var strategyName = $('btStrategy').value;
+  var configIdRaw = $('btConfigId').value.trim();
+  var start = $('btStart').value;
+  var end = $('btEnd').value;
+  var isDrySel = getIsDrySelection();
+  if (!strategyName || !start || !end || isDrySel === null) {
+    errEl.textContent = '请完整填写 strategy_name / start_date / end_date，并显式选择试跑或正式（G4）';
+    errEl.classList.add('on');
+    return;
+  }
+  var isDry = isDrySel === 'dry';
+  if (start > end) {
+    errEl.textContent = 'start_date 不能大于 end_date';
+    errEl.classList.add('on');
+    return;
+  }
+  var configId = configIdRaw ? +configIdRaw : null;
+  hideError();
+  $('btResult').classList.remove('on');
+
+  if (demoMode) {
+    var dto = { id: Math.floor(Math.random() * 9000) + 100, strategy_name: strategyName, config_id: configId, start_date: start, end_date: end, is_dry: isDry };
+    renderBtResult(dto, true);
+    return;
+  }
+
+  var body = { strategy_name: strategyName, config_id: configId, start_date: start, end_date: end, is_dry: isDry };
+  apiFetch(API_BASE + '/backtests', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    .then(function(dto) { renderBtResult(dto, false); })
+    .catch(function(e) {
+      errEl.textContent = '提交失败：' + e.message;
+      errEl.classList.add('on');
+    });
+};
+
+function renderBtResult(dto, isDemo) {
+  var el = $('btResult');
+  el.classList.add('on');
+  el.innerHTML = '<div><span class="k">' + (isDemo ? '（演示模式）' : '') + '202 已受理排队 —— 回测引擎 b 期上线后执行</span></div>'
+    + '<div class="row">'
+    + '<span>id=' + dto.id + '</span>'
+    + '<span>strategy_name=' + esc(dto.strategy_name) + '</span>'
+    + '<span>config_id=' + (dto.config_id == null ? 'null' : dto.config_id) + '</span>'
+    + '<span>start_date=' + esc(dto.start_date) + '</span>'
+    + '<span>end_date=' + esc(dto.end_date) + '</span>'
+    + '<span>is_dry=' + dto.is_dry + '</span>'
+    + '</div>';
+}
+
+/* ================= 演示模式开关 ================= */
+$('btnDemo').onclick = function() {
+  demoMode = !demoMode;
+  $('btnDemo').textContent = '演示模式：' + (demoMode ? '开' : '关');
+  $('btnDemo').classList.toggle('primary', demoMode);
+  $('yamlPanel').style.display = 'none';
+  $('histPanel').style.display = 'none';
+  loadStrategies();
+};
+$('btnReload').onclick = loadStrategies;
+
+/* ================= 初始化 ================= */
+updateBtSubmitState();
+loadStrategies();
+</script>
+</body>
+</html>

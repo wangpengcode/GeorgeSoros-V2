@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>盘中监控</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="盘中实时监控：涨停/跌停/炸板三池 + 全市场 spot 快照 + 个股五档盘口 + 涨幅/成交额榜；Kotlin 盘中服务未上线时自动降级该区块">
+<style>
+  /* 设计基调：与 sentiment.html / kline.html 同一深色单主题；红涨绿跌（A股惯例）。配色变量与版式沿用，保持整站一致。 */
+  :root {
+    --bg: #0e1218;
+    --panel: #161c25;
+    --panel-2: #1c2431;
+    --line: #26303f;
+    --fg: #dde4ee;
+    --muted: #8593a8;
+    --faint: #5a6678;
+    --up: #e5484d;
+    --down: #2fbf71;
+    --gold: #e2b13c;
+    --up-soft: rgba(229,72,77,.16);
+    --down-soft: rgba(47,191,113,.16);
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 400 14px/1.6 -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    padding: 20px 16px 40px;
+    padding-inline: max(16px, env(safe-area-inset-left));
+  }
+  .wrap { max-width: 1200px; margin: 0 auto; }
+  h1 { font-size: 20px; font-weight: 700; margin: 0 0 4px; letter-spacing: .02em; }
+  .sub { color: var(--muted); font-size: 12.5px; margin: 0 0 18px; }
+  .sub b { color: var(--gold); font-weight: 500; }
+  .up { color: var(--up); } .down { color: var(--down); }
+  .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 14px; }
+  .kpi { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px; }
+  .kpi .lab { color: var(--muted); font-size: 11.5px; letter-spacing: .08em; }
+  .kpi .val { font: 600 22px/1.3 "SF Mono", Menlo, Consolas, monospace; margin-top: 2px; font-variant-numeric: tabular-nums; }
+  .kpi .val small { font-size: 12px; color: var(--muted); font-weight: 400; }
+  .kpi .val.dim { color: var(--faint); cursor: help; }
+
+  .toolbar { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; margin-bottom: 14px; display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  .toolbar input[type=date] { background: var(--panel-2); border: 1px solid var(--line); color: var(--fg); border-radius: 6px; padding: 6px 10px; font-size: 13px; font-family: "SF Mono", Menlo, monospace; }
+  .toolbar .btn { background: var(--panel-2); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 12px; cursor: pointer; font-size: 12.5px; font-weight: 500; }
+  .toolbar .btn:hover { border-color: var(--gold); color: var(--gold); }
+  .toolbar label.auto { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12.5px; cursor: pointer; user-select: none; }
+  .toolbar label.auto input { accent-color: var(--gold); }
+  .toolbar .stamp { color: var(--faint); font-size: 11.5px; margin-left: auto; font-family: "SF Mono", Menlo, monospace; }
+
+  .hint { background: var(--panel); border: 1px dashed var(--gold); border-radius: 8px; padding: 10px 14px; color: var(--muted); font-size: 12.5px; }
+  .hint b { color: var(--gold); font-weight: 500; }
+
+  .tablebox { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; margin-bottom: 14px; }
+  .tablebox h3 { margin: 0 0 10px; font-size: 12px; color: var(--muted); font-weight: 500; letter-spacing: .08em; }
+  .scroller { overflow-x: auto; border: 1px solid var(--line); border-radius: 6px; }
+  table { width: 100%; border-collapse: collapse; font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 12px; font-variant-numeric: tabular-nums; }
+  th, td { padding: 6px 9px; text-align: right; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 500; background: var(--panel-2); position: sticky; top: 0; text-align: right; }
+  th:first-child, td:first-child, th:nth-child(2), td:nth-child(2) { text-align: left; }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody tr.clk { cursor: pointer; }
+  tbody tr.clk:hover { background: var(--panel-2); }
+  tbody tr.sel { background: rgba(226,177,60,.1); outline: 1px solid var(--gold); outline-offset: -1px; }
+  td.name { font-family: -apple-system, "PingFang SC", sans-serif; font-weight: 500; }
+  .empty-row td { text-align: center; color: var(--faint); padding: 16px 0; }
+
+  .tabs { display: flex; gap: 6px; margin-bottom: 10px; flex-wrap: wrap; }
+  .tab { background: var(--panel-2); border: 1px solid var(--line); color: var(--muted); border-radius: 6px; padding: 6px 14px; cursor: pointer; font-size: 12.5px; font-weight: 500; }
+  .tab b { font-family: "SF Mono", Menlo, monospace; margin-left: 4px; }
+  .tab.on { border-color: var(--gold); color: var(--gold); background: rgba(226,177,60,.08); }
+
+  .mainrow { display: flex; gap: 14px; flex-wrap: wrap; }
+  .poolswrap { flex: 3 1 480px; min-width: 0; }
+  .bidask { flex: 1 1 280px; min-width: 260px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; align-self: flex-start; }
+  .bidask h3 { margin: 0 0 8px; font-size: 12px; color: var(--muted); font-weight: 500; letter-spacing: .08em; }
+  .bidask .bacode { font-size: 13.5px; font-weight: 600; margin-bottom: 8px; min-height: 18px; }
+  .bidask .bacode .c { color: var(--faint); font-size: 11px; font-family: "SF Mono", Menlo, monospace; margin-left: 6px; }
+  #depthchart { width: 100%; height: 300px; }
+  .danone { color: var(--faint); font-size: 12.5px; padding: 60px 0; text-align: center; }
+
+  .ranklists { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 10px; margin-bottom: 14px; }
+  .rankcard { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; min-width: 0; }
+  .rankcard h3 { margin: 0 0 10px; font-size: 12px; color: var(--muted); font-weight: 500; letter-spacing: .08em; }
+
+  @media (max-width: 500px) { .kpi .val { font-size: 19px; } .toolbar .stamp { margin-left: 0; width: 100%; } }
+</style>
+<style id="gs-navcss">
+.gs-nav{position:fixed;left:0;top:0;bottom:0;width:176px;background:#10151d;border-right:1px solid #263140;display:flex;flex-direction:column;z-index:50}
+.gs-brand{padding:16px 14px 12px;border-bottom:1px solid #263140}
+.gs-brand b{color:#e2b13c;font-size:14px;letter-spacing:.5px}
+.gs-brand span{display:block;color:#7d8b9e;font-size:10.5px;margin-top:2px}
+.gs-nav a{display:flex;flex-direction:column;gap:1px;padding:11px 14px;color:#aeb9c9;text-decoration:none;border-left:3px solid transparent;font-size:13px}
+.gs-nav a b{font-weight:600;color:inherit}
+.gs-nav a i{font-style:normal;color:#525f70;font-size:10.5px}
+.gs-nav a:hover{background:#161c25;color:#e8edf4}
+.gs-nav a.on{background:#161c25;border-left-color:#e2b13c;color:#e8edf4}
+.gs-nav a.on i{color:#7d8b9e}
+.gs-foot{margin-top:auto;padding:12px 14px;color:#525f70;font-size:10px;border-top:1px solid #263140;line-height:1.6}
+body{padding-left:176px!important}
+@media(max-width:900px){
+  body{padding-left:0!important;padding-top:58px!important}
+  .gs-nav{left:0;right:0;top:0;bottom:auto;width:auto;flex-direction:row;align-items:stretch;overflow-x:auto}
+  .gs-brand{border-bottom:none;border-right:1px solid #263140;display:flex;flex-direction:column;justify-content:center;white-space:nowrap;padding:8px 12px}
+  .gs-brand span{display:none}
+  .gs-nav a{border-left:none;border-bottom:3px solid transparent;padding:10px 12px;white-space:nowrap}
+  .gs-nav a b{font-size:12.5px}
+  .gs-nav a i{display:none}
+  .gs-nav a.on{border-bottom-color:#e2b13c}
+  .gs-foot{display:none}
+}
+</style>
+</head>
+<body>
+<nav class="gs-nav">
+  <div class="gs-brand"><b>GeorgeSoros V2</b><span>盘中监控</span></div>
+  <a href="sentiment.html"><b>情绪周期表</b><i>全市场温度 · 背景层</i></a>
+  <a href="strategy-console.html"><b>策略控制台</b><i>策略 · 回测 · 自选股</i></a>
+  <a href="intraday.html" class="on"><b>盘中监控</b><i>实时盘面 · 开仓预警</i></a>
+  <a href="kline.html"><b>K线复盘</b><i>个股下钻 · 指标</i></a>
+  <a href="notes.html"><b>笔记本</b><i>按天汇总 · 跨页记录</i></a>
+  <div class="gs-foot">同一 qfq 数据底座<br>情绪 → 决策 → 执行 → 复盘</div>
+</nav>
+
+<div class="wrap">
+  <h1>盘中监控</h1>
+  <p class="sub">涨停/跌停/炸板三池 · 全市场 spot 快照 · 个股五档盘口 · <b>数据日期 <span id="dateLabel">—</span></b></p>
+
+  <div class="toolbar">
+    <input type="date" id="dateInput" title="池子查询日期（spot/盘口始终取实时最新快照，与此日期无关）">
+    <button class="btn" id="btnRefresh">立即刷新</button>
+    <label class="auto"><input type="checkbox" id="autoToggle" checked>自动轮询（60s，页面隐藏时暂停）</label>
+    <span class="stamp" id="stamp">尚未加载</span>
+  </div>
+
+  <div class="kpis" id="kpis">
+    <div class="kpi"><div class="lab">涨停数</div><div class="val" id="kpiUp">—</div></div>
+    <div class="kpi"><div class="lab">跌停数</div><div class="val" id="kpiDown">—</div></div>
+    <div class="kpi"><div class="lab">炸板数</div><div class="val" id="kpiBroken">—</div></div>
+    <div class="kpi"><div class="lab">全市场成交额合计</div><div class="val" id="kpiAmount">—</div></div>
+  </div>
+
+  <div class="mainrow">
+    <div class="poolswrap">
+      <div class="tablebox">
+        <div class="tabs" id="poolTabs">
+          <div class="tab on" data-k="limit_up">涨停 <b id="tabCountUp">0</b></div>
+          <div class="tab" data-k="limit_down">跌停 <b id="tabCountDown">0</b></div>
+          <div class="tab" data-k="broken">炸板 <b id="tabCountBroken">0</b></div>
+        </div>
+        <div class="scroller">
+          <table id="poolTable">
+            <thead><tr>
+              <th>代码</th><th>名称</th><th>最新价</th><th>涨跌幅</th><th>成交额</th><th>换手</th><th>连板</th><th>炸板次数</th><th>首次封板</th><th>行业</th>
+            </tr></thead>
+            <tbody id="poolBody"><tr class="empty-row"><td colspan="10">加载中…</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <div class="bidask">
+      <h3>五档盘口</h3>
+      <div class="bacode" id="baCode">点击左侧个股或下方榜单任意一行查看五档</div>
+      <div id="depthchart" style="display:none"></div>
+      <div class="danone" id="baEmpty">暂无选中个股</div>
+    </div>
+  </div>
+
+  <div class="ranklists">
+    <div class="rankcard">
+      <h3>涨幅榜 Top 20（spot 排序）</h3>
+      <div class="scroller">
+        <table id="rankGainTable">
+          <thead><tr><th>代码</th><th>名称</th><th>最新价</th><th>涨跌幅</th><th>成交额</th><th>换手</th></tr></thead>
+          <tbody id="rankGainBody"><tr class="empty-row"><td colspan="6">加载中…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="rankcard">
+      <h3>成交额榜 Top 20（spot 排序）</h3>
+      <div class="scroller">
+        <table id="rankAmtTable">
+          <thead><tr><th>代码</th><th>名称</th><th>最新价</th><th>涨跌幅</th><th>成交额</th><th>换手</th></tr></thead>
+          <tbody id="rankAmtBody"><tr class="empty-row"><td colspan="6">加载中…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="tablebox">
+    <h3>Kotlin 盘中服务（GET /api/v1/intraday/overview）</h3>
+    <div id="overviewBox"><div class="hint">加载中…</div></div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/echarts/5.5.1/echarts.min.js"></script>
+<script>
+/* ================= 常量 / 工具 ================= */
+var PY_BASE = 'http://localhost:8000/api/v1';   /* Python 盘中数据源（:8000，CORS 全开，直连） */
+var KT_BASE = '/api/v1';                        /* Kotlin 侧（Spring，相对路径；盘中 overview 端点尚未实现 → 预期降级 */
+
+var pools = { limit_up: [], limit_down: [], broken: [] };
+var spot = [];
+var curTab = 'limit_up';
+var selCode = null, selName = null;
+var depthChart = null;
+var autoTimer = null;
+
+function pad(n){ return (n < 10 ? '0' : '') + n; }
+function todayStr(){ var d = new Date(); return d.getFullYear() + '-' + pad(d.getMonth()+1) + '-' + pad(d.getDate()); }
+function nowClock(){ var d = new Date(); return pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds()); }
+function esc(s){ return String(s == null ? '' : s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+function numOr0(v){ return (v == null || isNaN(v)) ? 0 : v; }
+
+/* 金额格式化：元 → 万亿 / 亿 / 万（A股盘面惯用单位） */
+function fmtAmt(v) {
+  v = numOr0(v);
+  var neg = v < 0; v = Math.abs(v);
+  var s;
+  if (v >= 1e12) s = (v / 1e12).toFixed(2) + '万亿';
+  else if (v >= 1e8) s = (v / 1e8).toFixed(2) + '亿';
+  else if (v >= 1e4) s = (v / 1e4).toFixed(1) + '万';
+  else s = v.toFixed(0);
+  return (neg ? '-' : '') + s;
+}
+/* 涨跌幅：带符号 + 红涨绿跌 */
+function fmtPctSpan(v) {
+  if (v == null || isNaN(v)) return '<span style="color:var(--faint)">—</span>';
+  var cls = v > 0 ? 'up' : (v < 0 ? 'down' : '');
+  return '<span class="' + cls + '">' + (v > 0 ? '+' : '') + v.toFixed(2) + '%</span>';
+}
+function fmtPrice(v) { return (v == null || isNaN(v)) ? '—' : v.toFixed(2); }
+function fmtPct2(v) { return (v == null || isNaN(v)) ? '—' : v.toFixed(2) + '%'; }
+
+/* 统一取 JSON：无论 HTTP 状态如何，服务端始终返回 JSON 信封（{status:'ok'|'error', ...}） */
+function fetchEnvelope(url) {
+  return fetch(url).then(function(r) {
+    return r.json().catch(function(){ throw new Error('响应非 JSON（HTTP ' + r.status + '）'); });
+  });
+}
+
+/* ================= 池子（涨停/跌停/炸板） ================= */
+function loadPools() {
+  var date = document.getElementById('dateInput').value || todayStr();
+  document.getElementById('dateLabel').textContent = date;
+  return fetchEnvelope(PY_BASE + '/intraday/pools?date=' + encodeURIComponent(date))
+    .then(function(j) {
+      if (j.status !== 'ok') throw new Error((j.error && j.error.message) || 'pools 返回异常');
+      pools.limit_up = j.limit_up || [];
+      pools.limit_down = j.limit_down || [];
+      pools.broken = j.broken || [];
+      renderPoolTabs();
+      renderPoolTable();
+      renderKpiPools();
+    })
+    .catch(function(e) {
+      pools = { limit_up: [], limit_down: [], broken: [] };
+      renderPoolTabs();
+      document.getElementById('poolBody').innerHTML = '<tr class="empty-row"><td colspan="10">池子加载失败：' + esc(e.message) + '</td></tr>';
+      renderKpiPools();
+      throw e;
+    });
+}
+function renderKpiPools() {
+  document.getElementById('kpiUp').textContent = pools.limit_up.length;
+  document.getElementById('kpiDown').textContent = pools.limit_down.length;
+  document.getElementById('kpiBroken').textContent = pools.broken.length;
+}
+function renderPoolTabs() {
+  document.getElementById('tabCountUp').textContent = pools.limit_up.length;
+  document.getElementById('tabCountDown').textContent = pools.limit_down.length;
+  document.getElementById('tabCountBroken').textContent = pools.broken.length;
+}
+function poolRowHtml(row) {
+  var sel = (row.code === selCode) ? ' sel' : '';
+  return '<tr class="clk' + sel + '" data-code="' + esc(row.code) + '" data-name="' + esc(row.name) + '">'
+    + '<td>' + esc(row.code) + '</td>'
+    + '<td class="name">' + esc(row.name) + '</td>'
+    + '<td>' + fmtPrice(row.latest_price) + '</td>'
+    + '<td>' + fmtPctSpan(row.change_pct) + '</td>'
+    + '<td>' + fmtAmt(row.amount) + '</td>'
+    + '<td>' + fmtPct2(row.turnover_rate) + '</td>'
+    + '<td>' + (row.lianban || 0) + '板</td>'
+    + '<td>' + (row.broken_count || 0) + '</td>'
+    + '<td>' + esc(row.first_time || '—') + '</td>'
+    + '<td>' + esc(row.industry || '—') + '</td>'
+    + '</tr>';
+}
+function renderPoolTable() {
+  var rows = pools[curTab] || [];
+  document.querySelectorAll('#poolTabs .tab').forEach(function(t) { t.classList.toggle('on', t.dataset.k === curTab); });
+  document.getElementById('poolBody').innerHTML = rows.length
+    ? rows.map(poolRowHtml).join('')
+    : '<tr class="empty-row"><td colspan="10">该池暂无个股</td></tr>';
+}
+document.getElementById('poolTabs').addEventListener('click', function(ev) {
+  var t = ev.target.closest('.tab');
+  if (!t) return;
+  curTab = t.dataset.k;
+  renderPoolTable();
+});
+
+/* ================= 全市场 spot 快照：KPI 成交额 + 涨幅/成交额榜 ================= */
+function loadSpot() {
+  return fetchEnvelope(PY_BASE + '/intraday/spot')
+    .then(function(j) {
+      if (j.status !== 'ok') throw new Error((j.error && j.error.message) || 'spot 返回异常');
+      spot = j.stocks || [];
+      renderKpiAmount();
+      renderRanks();
+    })
+    .catch(function(e) {
+      spot = [];
+      document.getElementById('kpiAmount').innerHTML = '<span class="dim" title="' + esc(e.message) + '">—</span>';
+      document.getElementById('rankGainBody').innerHTML = '<tr class="empty-row"><td colspan="6">spot 加载失败：' + esc(e.message) + '</td></tr>';
+      document.getElementById('rankAmtBody').innerHTML = '<tr class="empty-row"><td colspan="6">spot 加载失败：' + esc(e.message) + '</td></tr>';
+      throw e;
+    });
+}
+function renderKpiAmount() {
+  var sum = spot.reduce(function(s, r) { return s + numOr0(r.amount); }, 0);
+  document.getElementById('kpiAmount').textContent = spot.length ? fmtAmt(sum) : '—';
+}
+function rankRowHtml(row) {
+  var sel = (row.code === selCode) ? ' sel' : '';
+  return '<tr class="clk' + sel + '" data-code="' + esc(row.code) + '" data-name="' + esc(row.name) + '">'
+    + '<td>' + esc(row.code) + '</td>'
+    + '<td class="name">' + esc(row.name) + '</td>'
+    + '<td>' + fmtPrice(row.latest_price) + '</td>'
+    + '<td>' + fmtPctSpan(row.change_pct) + '</td>'
+    + '<td>' + fmtAmt(row.amount) + '</td>'
+    + '<td>' + fmtPct2(row.turnover_rate) + '</td>'
+    + '</tr>';
+}
+function renderRanks() {
+  if (!spot.length) {
+    document.getElementById('rankGainBody').innerHTML = '<tr class="empty-row"><td colspan="6">暂无数据</td></tr>';
+    document.getElementById('rankAmtBody').innerHTML = '<tr class="empty-row"><td colspan="6">暂无数据</td></tr>';
+    return;
+  }
+  var byGain = spot.slice().sort(function(a, b) { return numOr0(b.change_pct) - numOr0(a.change_pct); }).slice(0, 20);
+  var byAmt = spot.slice().sort(function(a, b) { return numOr0(b.amount) - numOr0(a.amount); }).slice(0, 20);
+  document.getElementById('rankGainBody').innerHTML = byGain.map(rankRowHtml).join('');
+  document.getElementById('rankAmtBody').innerHTML = byAmt.map(rankRowHtml).join('');
+}
+
+/* ================= 五档盘口（点击任意行加载）================= */
+function selectCode(code, name) {
+  selCode = code; selName = name || code;
+  document.getElementById('baCode').innerHTML = esc(selName) + '<span class="c">' + esc(code) + '</span>';
+  renderPoolTable();
+  renderRanks();
+  loadBidAsk();
+}
+document.addEventListener('click', function(ev) {
+  var tr = ev.target.closest('tr.clk');
+  if (!tr) return;
+  selectCode(tr.dataset.code, tr.dataset.name);
+});
+
+function loadBidAsk() {
+  if (!selCode) return;
+  document.getElementById('baEmpty').textContent = '加载中…';
+  document.getElementById('baEmpty').style.display = 'block';
+  document.getElementById('depthchart').style.display = 'none';
+  return fetchEnvelope(PY_BASE + '/intraday/bid-ask?code=' + encodeURIComponent(selCode))
+    .then(function(j) {
+      if (j.status !== 'ok') throw new Error((j.error && j.error.message) || 'bid-ask 返回异常');
+      renderDepth(j.bids || [], j.asks || []);
+    })
+    .catch(function(e) {
+      document.getElementById('baEmpty').textContent = '五档加载失败：' + e.message;
+      document.getElementById('baEmpty').style.display = 'block';
+      document.getElementById('depthchart').style.display = 'none';
+    });
+}
+/* 深度条按量比例：卖上买下（A股惯例，红卖绿买）；asks 入参买1→买5 顺序需反转为 卖5…卖1 置于上方 */
+function renderDepth(bids, asks) {
+  var allZero = bids.concat(asks).every(function(p) { return !p || (!p[0] && !p[1]); });
+  if (allZero) {
+    document.getElementById('baEmpty').textContent = '该股暂无盘口数据（停牌/未开盘/非交易日）';
+    document.getElementById('baEmpty').style.display = 'block';
+    document.getElementById('depthchart').style.display = 'none';
+    return;
+  }
+  document.getElementById('baEmpty').style.display = 'none';
+  document.getElementById('depthchart').style.display = 'block';
+  var cats = [];
+  var vals = [];
+  var prices = [];
+  for (var i = 4; i >= 0; i--) { cats.push('卖' + (i + 1)); vals.push(numOr0(asks[i] && asks[i][1])); prices.push(asks[i] ? asks[i][0] : null); }
+  for (var j = 0; j < 5; j++) { cats.push('买' + (j + 1)); vals.push(numOr0(bids[j] && bids[j][1])); prices.push(bids[j] ? bids[j][0] : null); }
+  var colors = cats.map(function(c) { return c.charAt(0) === '卖' ? '#e5484d' : '#2fbf71'; });
+  if (!depthChart) {
+    depthChart = echarts.init(document.getElementById('depthchart'));
+    window.addEventListener('resize', function() { depthChart.resize(); });
+  }
+  depthChart.setOption({
+    backgroundColor: 'transparent',
+    animation: false,
+    textStyle: { color: '#dde4ee', fontFamily: '-apple-system, "PingFang SC", sans-serif' },
+    grid: { left: 42, right: 16, top: 8, bottom: 8 },
+    xAxis: { type: 'value', axisLabel: { color: '#8593a8', fontSize: 10 }, splitLine: { lineStyle: { color: '#1c2431' } } },
+    yAxis: { type: 'category', data: cats, inverse: true, axisLine: { lineStyle: { color: '#26303f' } }, axisLabel: { color: '#8593a8', fontSize: 11 } },
+    tooltip: {
+      trigger: 'axis', axisPointer: { type: 'shadow' },
+      backgroundColor: '#1c2431', borderColor: '#26303f', textStyle: { color: '#dde4ee', fontSize: 12 },
+      formatter: function(params) {
+        var i = params[0].dataIndex;
+        var p = prices[i];
+        return cats[i] + '　价 ' + (p != null ? p.toFixed(2) : '—') + '　量 ' + vals[i].toLocaleString() + ' 手';
+      }
+    },
+    series: [{
+      type: 'bar', data: vals.map(function(v, i) { return { value: v, itemStyle: { color: colors[i] } }; }),
+      barWidth: '62%',
+      label: { show: true, position: 'right', color: '#8593a8', fontSize: 10, formatter: function(p) { return p.value ? p.value.toLocaleString() : ''; } }
+    }]
+  }, true);
+}
+
+/* ================= Kotlin 盘中服务（overview；未上线 → 404/网络失败降级） ================= */
+function loadOverview() {
+  return fetch(KT_BASE + '/intraday/overview')
+    .then(function(r) {
+      if (r.status === 404) throw new Error('404');
+      return r.json().catch(function(){ throw new Error('非 JSON 响应'); });
+    })
+    .then(function(j) {
+      if (j.status !== 'ok') throw new Error((j.error && j.error.message) || 'overview 返回异常');
+      var sources = Array.isArray(j.sources) ? j.sources.join(' / ') : (j.sources || '—');
+      document.getElementById('overviewBox').innerHTML =
+        '<div class="kpis" style="margin-bottom:0">'
+        + '<div class="kpi"><div class="lab">轮询时间</div><div class="val">' + esc(j.poll_time || '—') + '</div></div>'
+        + '<div class="kpi"><div class="lab">预警数</div><div class="val">' + (j.alert_count != null ? j.alert_count : '—') + '</div></div>'
+        + '<div class="kpi"><div class="lab">最后轮询</div><div class="val">' + esc(j.last_poll_at || '—') + '</div></div>'
+        + '<div class="kpi"><div class="lab">数据源</div><div class="val" style="font-size:14px">' + esc(sources) + '</div></div>'
+        + '</div>';
+    })
+    .catch(function() {
+      document.getElementById('overviewBox').innerHTML = '<div class="hint"><b>Kotlin 盘中服务未上线</b> —— GET /api/v1/intraday/overview 暂不可用（设计中的轮询状态/预警数端点），其余区块数据来自 Python :8000，不受影响。</div>';
+    });
+}
+
+/* ================= 刷新总入口 ================= */
+function refreshAll(isManual) {
+  var tasks = [loadPools(), loadSpot(), loadOverview()];
+  if (selCode) tasks.push(loadBidAsk());
+  Promise.allSettled ? Promise.allSettled(tasks) : Promise.all(tasks.map(function(p){ return p.catch(function(e){ return e; }); }));
+  document.getElementById('stamp').textContent = '更新于 ' + nowClock() + (isManual ? '（手动）' : '（自动）');
+}
+
+document.getElementById('btnRefresh').onclick = function() { refreshAll(true); };
+document.getElementById('dateInput').onchange = function() { refreshAll(true); };
+
+/* 自动轮询 60s；页面隐藏时暂停（tick 内跳过，而非销毁定时器，避免可见后错过首次刷新） */
+function tick() {
+  if (document.hidden) return;
+  if (!document.getElementById('autoToggle').checked) return;
+  refreshAll(false);
+}
+autoTimer = setInterval(tick, 60000);
+
+/* ================= 初始化：支持 ?date= 深链 ================= */
+(function init() {
+  var q = new URLSearchParams(location.search);
+  var qDate = q.get('date');
+  document.getElementById('dateInput').value = qDate || todayStr();
+  refreshAll(true);
+})();
+</script>
+</body>
+</html>

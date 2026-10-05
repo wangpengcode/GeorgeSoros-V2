@@ -40,6 +40,10 @@ class SignalPrecomputeJob(
     private val sectorDailyRepository: SectorDailyRepository,
     private val calendarService: TradingCalendarService,
     private val notifier: DingTalkNotifier,
+    // 启动对账开关（运维开关：全历史回放期间关闭，避免逐日补算与全量回放并发写 signal_daily 死锁空转；
+    // 环境变量 SOROS_SIGNAL_STARTUPRECONCILIATIONENABLED=false 关闭，缺省启用）
+    @org.springframework.beans.factory.annotation.Value("\${soros.signal.startupReconciliationEnabled:true}")
+    private val startupReconciliationEnabled: Boolean = true,
 ) {
     private val logger = LoggerFactory.getLogger(SignalPrecomputeJob::class.java)
 
@@ -102,6 +106,10 @@ class SignalPrecomputeJob(
     /** §17.2 启动对账：最近 N 交易日三表齐全性检查，缺则对缺失日补算（§19.12 空库守卫前置） */
     @EventListener(ApplicationReadyEvent::class)
     fun startupReconciliation() {
+        if (!startupReconciliationEnabled) {
+            logger.info("[Step Signal] 启动对账已关闭（soros.signal.startupReconciliationEnabled=false），跳过缺口补算")
+            return
+        }
         val today = LocalDate.now()
         val recentDays = calendarService.recentTradingDays(today, RECONCILE_WINDOW)
         logger.info("[Step Signal] 启动对账：最近 {} 交易日三表齐全性检查", RECONCILE_WINDOW)
