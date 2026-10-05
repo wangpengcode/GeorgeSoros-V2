@@ -274,3 +274,36 @@
 | `chip` | 筹码对象（signal_daily 8 列，键名=§五 DDL 一字不差：profit_ratio/cost_dev/c90_low/c90_high/c90_conc/c70_low/c70_high/c70_conc；无行=null） | GET /api/v1/kline 响应 bars[] 元素 |
 | `q` | stock-search 查询词（请求参数；code 前缀 OR name 小写包含，拼音挂账不做，§19.13.1） | GET /api/v1/stock-search |
 | `limit` | stock-search 结果上限（请求参数；kline 页传 8，默认 10） | GET /api/v1/stock-search |
+| `strategy` | 条件诊断策略对象 {id,name,version,status} | GET /api/v1/strategies/{id}/conditions |
+| `conditions` | 条件表数组（元素含 cond_id/side/source/op/value/class/ready/last_fired/fired_30d/data_state） | GET /api/v1/strategies/{id}/conditions |
+| `cond_id` | 条件 ID（buy_0/sell_0，策略内唯一） | GET /api/v1/strategies/{id}/conditions、flow |
+| `side` | 条件买卖侧 BUY/SELL（§11.1 lists 请求体 side=MEAT/FACE 同名字典留痕） | GET /api/v1/strategies/{id}/conditions、flow |
+| `source` | 条件信号源（§12.7.1 白名单：limit_up_streak/limit_ecology/sentiment_cycle…；响应键复用 §五 source 列语义） | GET /api/v1/strategies/{id}/conditions、flow |
+| `op` | 条件运算符（equals/between/gte/lte/within_days/label…） | GET /api/v1/strategies/{id}/conditions、flow |
+| `value` | 条件值（数值/区间/标签，Any 语义随 source/op） | GET /api/v1/strategies/{id}/conditions、flow |
+| `class` | 条件类别 A/L/B/C（A=聚合表直查 / L=标签候选池扫描现算 / B=单股现算挂b期 / C=跨股聚合挂b期；响应键，Kotlin DTO 字段名不可为 class，用 @JsonProperty("class")） | GET /api/v1/strategies/{id}/conditions |
+| `ready` | 条件就绪态 READY=数据齐可求值 / PARTIAL=表缺行 / PENDING=挂b期只标记 | GET /api/v1/strategies/{id}/conditions |
+| `last_fired` | 最近触发日（ISO 日期；C/B 类 null） | GET /api/v1/strategies/{id}/conditions |
+| `fired_30d` | 近 30 交易日触发次数（A/L 类真实求值；C/B 类 0） | GET /api/v1/strategies/{id}/conditions |
+| `data_state` | 条件数据就绪度对象（C 类本期唯一有意义输出；含各依赖表 latest/coverage） | GET /api/v1/strategies/{id}/conditions |
+| `as_of` | 条件诊断数据时点（ISO 日期） | GET /api/v1/strategies/{id}/conditions |
+| `flow` | 触发流水数组（近 30 交易日升序逐条命中；C/B 类不产行） | GET /api/v1/strategies/{id}/flow |
+| `summary` | flow 命中摘要（如「连板数 5 在 [3,7]」「反包: 000905 平潭发展 6/20」） | GET /api/v1/strategies/{id}/flow flow[] 元素 |
+| `strategy_id` | flow 响应策略 id | GET /api/v1/strategies/{id}/flow |
+| `scan_scope` | L 类扫描范围描述（五池并集∪进行中龙头，G5 定稿） | data_state（L 类） |
+| `candidate_count` | L 类候选集数量（五池并集∪龙头，典型 50-150 只，极端高潮日≈300） | data_state（L 类） |
+| `covered_days` | L 类候选集覆盖交易日数（L1 分段口径：盘中上线日后=五池并集；上线日前=日线涨停池∪龙头近似） | data_state（L 类） |
+| `archive_since` | 盘中上线日（L1 分段口径边界标注，ISO 日期） | data_state（L 类） |
+| `candidate_cover` | L 类候选集覆盖说明（universe 候选集外票该条件 ready=READY 但永不触发，L5 不误导文案） | data_state（L 类） |
+| `latest` | data_state 内各依赖表最新日（ISO 日期） | data_state 内 signal_daily/market_daily/sector_daily |
+| `days` | data_state 内 signal_daily 覆盖交易日数 | data_state.signal_daily |
+| `coverage` | data_state 内数据覆盖率 FULL/PARTIAL（复用 §五 market_daily.data_coverage 列语义） | data_state 内 signal_daily/market_daily |
+| `board_rows` | data_state 内 sector_daily 板块行数 | data_state.sector_daily |
+| `yaml` | 策略 YAML 全文（响应键复用 §五 strategy_config.yaml 列语义；导出/详情/历史） | GET /api/v1/strategies/{id}/yaml、GET /api/v1/strategies/{id}、history |
+| `alert_enabled` | 策略盘中开仓预警开关（响应键复用 §五 strategy_config.alert_enabled 列语义） | GET /api/v1/strategies 列表、/strategies/{id} |
+| `version` | 策略版本号（保存/回滚即 +1，响应键复用 §五 strategy_config.version 列语义） | GET /api/v1/strategies 列表、/strategies/{id}、history |
+| `strategy_name` | 回测策略名（响应/请求键复用 §五 backtest_result.strategy_name 列语义） | POST /api/v1/backtests 请求体、响应 |
+| `config_id` | 回测绑定的策略配置 id（响应/请求键复用 §五 列语义；null=未绑定） | POST /api/v1/backtests 请求体、响应 |
+| `start_date` | 回测起始日（ISO 日期；响应/请求键复用 §五 backtest_result.start_date 列语义） | POST /api/v1/backtests 请求体、响应 |
+| `end_date` | 回测结束日（ISO 日期；响应/请求键复用 §五 backtest_result.end_date 列语义） | POST /api/v1/backtests 请求体、响应 |
+| `is_dry` | 试跑标记（显式必填、无默认值兜底，缺 → 422，G4 定稿；响应/请求键复用 §五 backtest_result.is_dry 列语义） | POST /api/v1/backtests 请求体、响应 |

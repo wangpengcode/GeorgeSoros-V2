@@ -24,11 +24,13 @@ from fastapi import APIRouter, Query
 from fastapi.responses import JSONResponse
 
 from adapters.base import DataRouter
+from adapters.intraday_source import IntradaySource
 from config import settings
 from constants import (
     ERROR_BOARD_MEMBERS_FAILED,
     ERROR_CROSS_VALIDATE_FAILED,
     ERROR_FUNDAMENTALS_FAILED,
+    ERROR_INTRADAY_FAILED,
     ERROR_PARAM_INVALID,
     ERROR_STOCK_LIST_FAILED,
     ERROR_TRADING_CALENDAR_FAILED,
@@ -54,8 +56,11 @@ from models import (
 logger = logging.getLogger(__name__)
 
 
-def create_router(data_router: DataRouter) -> APIRouter:
+def create_router(data_router: DataRouter, intraday: IntradaySource | None = None) -> APIRouter:
     router = APIRouter()
+    # 盘中源（§19.13.2）：缺省自建（生产 main.py 显式注入共享实例；测试注入桩）
+    if intraday is None:
+        intraday = IntradaySource()
 
     @router.get("/health", response_model=HealthResponse)
     def health():
@@ -299,6 +304,62 @@ def create_router(data_router: DataRouter) -> APIRouter:
                     error={"code": ERROR_BOARD_MEMBERS_FAILED, "message": str(exc)}
                 ).model_dump(),
             )
+        return {"status": "ok", **payload}
+
+    # ── 盘中端点（§19.13.2 盘中监控页数据面；akshare 单源，独立限流桶） ──────
+
+    _DATE_FORMATS = ("%Y-%m-%d", "%Y%m%d")
+
+    def _normalize_intraday_date(raw: str | None) -> str:
+        """YYYY-MM-DD 或 YYYYMMDD → YYYYMMDD（akshare 池子接口格式）；非法返回空串。"""
+        from datetime import datetime as _dt
+        raw = (raw or "").strip()
+        if not raw:
+            return _dt.now().strftime("%Y%m%d")  # 缺省=今天
+        for fmt in _DATE_FORMATS:
+            try:
+                return _dt.strptime(raw, fmt).strftime("%Y%m%d")
+            except ValueError:
+                continue
+        return ""
+
+    def _intraday_error(exc: Exception, what: str) -> JSONResponse:
+        logger.error("intraday %s 失败: %s", what, exc)
+        return JSONResponse(
+            status_code=503,
+            content=ErrorEnvelope(
+                error={"code": ERROR_INTRADAY_FAILED, "message": str(exc)}
+            ).model_dump(),
+        )
+
+    @router.get("/intraday/pools")
+    def intraday_pools(date: str = Query(None, description="YYYY-MM-DD 或 YYYYMMDD，缺省=今天")):
+        """涨停/跌停/炸板三池快照（{limit_up, limit_down, broken}）。"""
+        date_yyyymmdd = _normalize_intraday_date(date)
+        if not date_yyyymmdd:
+            return _param_invalid(f"非法日期格式: {date}（应为 YYYY-MM-DD 或 YYYYMMDD）")
+        try:
+            payload = intraday.fetch_pools(date_yyyymmdd)
+        except Exception as exc:  # noqa: BLE001
+            return _intraday_error(exc, f"pools({date_yyyymmdd})")
+        return {"status": "ok", "date": date_yyyymmdd, **payload}
+
+    @router.get("/intraday/spot")
+    def intraday_spot():
+        """全市场实时快照（code/name/latest_price/change_pct/volume/amount/turnover_rate）。"""
+        try:
+            stocks = intraday.fetch_spot()
+        except Exception as exc:  # noqa: BLE001
+            return _intraday_error(exc, "spot")
+        return {"status": "ok", "count": len(stocks), "stocks": stocks}
+
+    @router.get("/intraday/bid-ask")
+    def intraday_bid_ask(code: str = Query(..., min_length=1, description="证券代码，如 600519")):
+        """单票五档盘口（bids/asks 各 5 档 [价, 量]，买1→买5 / 卖1→卖5）。"""
+        try:
+            payload = intraday.fetch_bid_ask(code.strip())
+        except Exception as exc:  # noqa: BLE001
+            return _intraday_error(exc, f"bid-ask({code})")
         return {"status": "ok", **payload}
 
     @router.post("/daily-bars/cross-validate", response_model=CrossValidateResponse)

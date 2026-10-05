@@ -175,7 +175,7 @@ class StockInfoServiceImpl(
         /** 可采集市场板（§4.4：MAIN 主板/GEM 创业板/STAR 科创板；北交所/B 股不采集） */
         val COLLECTIBLE_BOARDS = setOf(Board.MAIN, Board.GEM, Board.STAR)
 
-        /** /stock-search 结果上限（§11.1：limit 10） */
-        const val SEARCH_LIMIT = 10
+        /** /stock-search 结果上限（§19.13.1 协调方裁决：上限 20 契约对齐） */
+        const val SEARCH_LIMIT = 20
     }
 }

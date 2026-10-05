@@ -11,7 +11,7 @@ import org.springframework.web.bind.annotation.RestController
  * §11.1 StockSearchController：股票模糊搜索（GET /api/v1/stock-search）。
  *
  * 前端 sentiment.html 名单添加浮层消费（GET /stock-search?q=&limit=8，防御性兼容数组/stocks/items）。
- * 一期口径：code 前缀 OR name 小写包含；排除 is_st=true / delisted=true；limit 默认 10 上限 10。
+ * 一期口径：code 前缀 OR name 小写包含；排除 is_st=true / delisted=true；limit 默认 10 上限 20。
  * 响应 [{code,name,industry}]（键过命名字典 §17.6）。
  */
 @RestController

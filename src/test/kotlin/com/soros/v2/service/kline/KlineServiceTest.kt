@@ -237,8 +237,13 @@ class KlineServiceTest {
     @Test
     fun `testGetKline unknownCodeThrowsBusinessException404`() {
         // given: stock_info 无此码（stock_history 也无行）→ 404 语义
+        // 防御：无论实现先查存在性还是先算窗口，日历桩都不致 NPE（findByCode 为 null 才是 404 主判定）
         Mockito.`when`(stockInfoRepository.findByCode("999999")).thenReturn(null)
         Mockito.`when`(stockHistoryRepository.findTopByCodeOrderByTradeDateDesc("999999")).thenReturn(null)
+        Mockito.`when`(tradingCalendarRepository.findFirstByTradeDateLessThanEqualOrderByTradeDateDesc(Mockito.any()))
+            .thenReturn(TradingCalendar(LocalDate.of(2026, 9, 30)))
+        Mockito.`when`(tradingCalendarRepository.findByTradeDateBetweenOrderByTradeDateAsc(Mockito.any(), Mockito.any()))
+            .thenReturn(listOf(TradingCalendar(LocalDate.of(2026, 9, 30))))
 
         // when & then: BusinessException 含"不存在"（GlobalExceptionHandler → 404）
         val ex = assertThrows(BusinessException::class.java) {
@@ -249,9 +254,11 @@ class KlineServiceTest {
 
     @Test
     fun `testGetKline fromGreaterThanToThrowsBusinessException422`() {
-        // given: 显式 from>to
+        // given: 显式 from>to；防御：实现若先吸附 to 再校验，日历桩不致 NPE
         Mockito.`when`(stockInfoRepository.findByCode("600000"))
             .thenReturn(stockInfo("600000", "浦发银行"))
+        Mockito.`when`(tradingCalendarRepository.findFirstByTradeDateLessThanEqualOrderByTradeDateDesc(Mockito.any()))
+            .thenReturn(TradingCalendar(LocalDate.of(2026, 9, 1)))
 
         // when & then: BusinessException（不含"不存在"→ GlobalExceptionHandler → 422）
         val ex = assertThrows(BusinessException::class.java) {

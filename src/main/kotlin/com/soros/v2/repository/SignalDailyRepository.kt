@@ -17,8 +17,8 @@ interface SignalDailyRepository : JpaRepository<SignalDaily, SignalDailyId> {
     /** 按 代码+交易日 查单行（PK 至多 1 行；K线 chip 聚合 / 增量幂等判重） */
     fun findByCodeAndTradeDate(code: String, tradeDate: LocalDate): SignalDaily?
 
-    /** 按 代码+交易日区间 查序列（升序；K线页 OHLC∘筹码 8 列一次聚合） */
-    fun findByCodeAndTradeDateBetween(code: String, from: LocalDate, to: LocalDate): List<SignalDaily>
+    /** 按 代码+交易日区间 查序列（升序；K线页 OHLC∘筹码 8 列一次聚合；code/from/to 可空——Mockito 5.14.2 `eq()/any()` 返回默认值 null，Kotlin 非空参数字节码检查兼容） */
+    fun findByCodeAndTradeDateBetween(code: String?, from: LocalDate?, to: LocalDate?): List<SignalDaily>
 
     /** 是否已存在 代码+交易日 行（增量 upsert 幂等判重） */
     fun existsByCodeAndTradeDate(code: String, tradeDate: LocalDate): Boolean

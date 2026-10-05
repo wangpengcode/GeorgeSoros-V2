@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>K线复盘</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="个股K线复盘：qfq蜡烛图 + 筹码分布带（c90/c70集中度）+ 获利盘/成本偏离数字卡，支持模糊搜索与按日截断复盘">
+<style>
+  /* 设计基调：与 sentiment.html 同一深色单主题；红涨绿跌（A股惯例）。配色变量与版式沿用，保持整站一致。 */
+  :root {
+    --bg: #0e1218;
+    --panel: #161c25;
+    --panel-2: #1c2431;
+    --line: #26303f;
+    --fg: #dde4ee;
+    --muted: #8593a8;
+    --faint: #5a6678;
+    --up: #e5484d;
+    --down: #2fbf71;
+    --gold: #e2b13c;
+    --up-soft: rgba(229,72,77,.16);
+    --down-soft: rgba(47,191,113,.16);
+    --chip90: #3d7bd9;
+    --chip70: #8fb8e8;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 400 14px/1.6 -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    padding: 20px 16px 40px;
+    padding-inline: max(16px, env(safe-area-inset-left));
+  }
+  .wrap { max-width: 1200px; margin: 0 auto; }
+  h1 { font-size: 20px; font-weight: 700; margin: 0 0 4px; letter-spacing: .02em; }
+  .sub { color: var(--muted); font-size: 12.5px; margin: 0 0 18px; }
+  .sub b { color: var(--gold); font-weight: 500; }
+  .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 14px; }
+  .kpi { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px; }
+  .kpi .lab { color: var(--muted); font-size: 11.5px; letter-spacing: .08em; }
+  .kpi .val { font: 600 22px/1.3 "SF Mono", Menlo, Consolas, monospace; margin-top: 2px; font-variant-numeric: tabular-nums; }
+  .kpi .val small { font-size: 12px; color: var(--muted); font-weight: 400; }
+  .kpi .val.dim { color: var(--faint); cursor: help; }
+  .up { color: var(--up); } .down { color: var(--down); }
+  .toolbar { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; margin-bottom: 14px; display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  .relwrap { position: relative; }
+  .toolbar input[type=text], .toolbar input[type=date] {
+    background: var(--panel-2); border: 1px solid var(--line); color: var(--fg); border-radius: 6px;
+    padding: 6px 10px; font-size: 13px; font-family: "SF Mono", Menlo, monospace;
+  }
+  .toolbar input[type=text] { width: 180px; }
+  .toolbar input[type=text]::placeholder { color: var(--faint); font-family: inherit; }
+  .toolbar .btn { background: var(--panel-2); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 12px; cursor: pointer; font-size: 12.5px; font-weight: 500; }
+  .toolbar .btn:hover { border-color: var(--gold); color: var(--gold); }
+  .toolbar .btn.on { border-color: var(--gold); color: var(--gold); background: rgba(226,177,60,.1); }
+  .toolbar .cur { color: var(--muted); font-size: 12.5px; margin-left: auto; }
+  .toolbar .cur b { color: var(--fg); font-weight: 600; }
+  .toolbar .cur span.code { color: var(--faint); font-family: "SF Mono", Menlo, monospace; font-size: 11.5px; }
+  .sug { position: absolute; top: calc(100% + 4px); left: 0; z-index: 10; min-width: 220px; background: var(--panel-2); border: 1px solid var(--gold); border-radius: 6px; max-height: 260px; overflow-y: auto; box-shadow: 0 6px 24px rgba(0,0,0,.5); }
+  .sug:empty { display: none; }
+  .sug .si { display: flex; gap: 8px; align-items: baseline; padding: 6px 10px; cursor: pointer; font-size: 12.5px; }
+  .sug .si:hover, .sug .si.on { background: var(--panel); }
+  .sug .si .c { color: var(--muted); font-family: "SF Mono", Menlo, monospace; font-size: 11px; margin-left: auto; }
+  .sug .si .none { color: var(--faint); font-size: 12px; }
+  .errbar { background: var(--panel); border: 1px solid var(--up); border-radius: 8px; padding: 9px 14px; color: var(--up); font-size: 12.5px; margin-bottom: 14px; display: none; }
+  .errbar.on { display: block; }
+  .hint { background: var(--panel); border: 1px dashed var(--gold); border-radius: 8px; padding: 10px 14px; color: var(--muted); font-size: 12.5px; margin-bottom: 14px; display: none; }
+  .hint.on { display: block; }
+  .chartbox { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; margin-bottom: 14px; }
+  .chartbox h3 { margin: 0 0 8px; font-size: 12px; color: var(--muted); font-weight: 500; letter-spacing: .08em; }
+  .chartlegend { display: flex; flex-wrap: wrap; gap: 14px; color: var(--muted); font-size: 11.5px; margin-bottom: 6px; }
+  .chartlegend i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; margin-right: 5px; vertical-align: -1px; }
+  #klinechart { width: 100%; height: 620px; }
+  @media (max-width: 700px) { #klinechart { height: 460px; } }
+  @media (max-width: 500px) { .kpi .val { font-size: 19px; } .toolbar .cur { margin-left: 0; width: 100%; } }
+</style>
+<style id="gs-navcss">
+.gs-nav{position:fixed;left:0;top:0;bottom:0;width:176px;background:#10151d;border-right:1px solid #263140;display:flex;flex-direction:column;z-index:50}
+.gs-brand{padding:16px 14px 12px;border-bottom:1px solid #263140}
+.gs-brand b{color:#e2b13c;font-size:14px;letter-spacing:.5px}
+.gs-brand span{display:block;color:#7d8b9e;font-size:10.5px;margin-top:2px}
+.gs-nav a{display:flex;flex-direction:column;gap:1px;padding:11px 14px;color:#aeb9c9;text-decoration:none;border-left:3px solid transparent;font-size:13px}
+.gs-nav a b{font-weight:600;color:inherit}
+.gs-nav a i{font-style:normal;color:#525f70;font-size:10.5px}
+.gs-nav a:hover{background:#161c25;color:#e8edf4}
+.gs-nav a.on{background:#161c25;border-left-color:#e2b13c;color:#e8edf4}
+.gs-nav a.on i{color:#7d8b9e}
+.gs-foot{margin-top:auto;padding:12px 14px;color:#525f70;font-size:10px;border-top:1px solid #263140;line-height:1.6}
+body{padding-left:176px!important}
+@media(max-width:900px){
+  body{padding-left:0!important;padding-top:58px!important}
+  .gs-nav{left:0;right:0;top:0;bottom:auto;width:auto;flex-direction:row;align-items:stretch;overflow-x:auto}
+  .gs-brand{border-bottom:none;border-right:1px solid #263140;display:flex;flex-direction:column;justify-content:center;white-space:nowrap;padding:8px 12px}
+  .gs-brand span{display:none}
+  .gs-nav a{border-left:none;border-bottom:3px solid transparent;padding:10px 12px;white-space:nowrap}
+  .gs-nav a b{font-size:12.5px}
+  .gs-nav a i{display:none}
+  .gs-nav a.on{border-bottom-color:#e2b13c}
+  .gs-foot{display:none}
+}
+</style>
+</head>
+<body>
+<nav class="gs-nav">
+  <div class="gs-brand"><b>GeorgeSoros V2</b><span>K线复盘</span></div>
+  <a href="sentiment.html"><b>情绪周期表</b><i>全市场温度 · 背景层</i></a>
+  <a href="strategy-console.html"><b>策略控制台</b><i>策略 · 回测 · 自选股</i></a>
+  <a href="intraday.html"><b>盘中监控</b><i>实时盘面 · 开仓预警</i></a>
+  <a href="kline.html" class="on"><b>K线复盘</b><i>个股下钻 · 指标</i></a>
+  <a href="notes.html"><b>笔记本</b><i>按天汇总 · 跨页记录</i></a>
+  <div class="gs-foot">同一 qfq 数据底座<br>情绪 → 决策 → 执行 → 复盘</div>
+</nav>
+
+<div class="wrap">
+  <h1>K线复盘</h1>
+  <p class="sub">个股下钻 · <b>qfq 蜡烛图 + 筹码分布带</b> · 搜索代码/名称加载，日期截断看历史某天状态</p>
+
+  <div class="toolbar">
+    <span class="relwrap">
+      <input type="text" id="search" placeholder="代码或名称，如 600000 / 浦发" autocomplete="off">
+      <div id="sug" class="sug"></div>
+    </span>
+    <input type="date" id="dateInput" title="选某日 → 截断到该日复盘">
+    <button class="btn on" id="btn250">近 250 日</button>
+    <button class="btn" id="btnFull">全量</button>
+    <span class="cur" id="curLabel">未选择股票</span>
+  </div>
+
+  <div class="errbar" id="errbar"></div>
+  <div class="hint" id="emptyhint">该股暂无K线数据（可能未上市、代码错误或区间内无交易日）</div>
+
+  <div class="kpis" id="kpis" style="display:none"></div>
+
+  <div class="chartbox">
+    <h3>K线 + 筹码分布带（90% / 70% 集中区间）</h3>
+    <div class="chartlegend">
+      <span><i style="background:var(--up)"></i>阳线（涨）</span>
+      <span><i style="background:var(--down)"></i>阴线（跌）</span>
+      <span><i style="background:var(--chip90)"></i>c90 带（90% 筹码集中区间）</span>
+      <span><i style="background:var(--chip70)"></i>c70 带（70% 筹码集中区间，叠加于 c90 内）</span>
+    </div>
+    <div id="klinechart"></div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/echarts/5.5.1/echarts.min.js"></script>
+<script>
+/* ================= 数据层 ================= */
+var API_BASE = '/api/v1';
+var FULL_FROM = '2021-01-01';
+var curCode = null, curName = null, curDate = null, fullMode = false;
+var curBars = [];
+var chart = null;
+var searchTimer = null;
+var sugItems = [], sugIndex = -1;
+
+function pad(n){ return (n < 10 ? '0' : '') + n; }
+function esc(s){ return String(s == null ? '' : s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+function fmtPct(v, digits){ return (v == null ? '—' : (v > 0 ? '+' : '') + v.toFixed(digits == null ? 1 : digits) + '%'); }
+
+function showError(msg) {
+  var e = document.getElementById('errbar');
+  e.textContent = '加载失败：' + msg;
+  e.classList.add('on');
+}
+function hideError() { document.getElementById('errbar').classList.remove('on'); }
+function showEmpty(on) { document.getElementById('emptyhint').classList.toggle('on', !!on); }
+
+/* ================= 搜索联想（防抖 300ms） ================= */
+var searchInput = document.getElementById('search');
+var sugBox = document.getElementById('sug');
+
+searchInput.addEventListener('input', function() {
+  var q = searchInput.value.trim();
+  clearTimeout(searchTimer);
+  if (!q) { closeSug(); return; }
+  searchTimer = setTimeout(function() { runSearch(q); }, 300);
+});
+searchInput.addEventListener('keydown', function(ev) {
+  if (ev.key === 'ArrowDown') { ev.preventDefault(); moveSug(1); return; }
+  if (ev.key === 'ArrowUp') { ev.preventDefault(); moveSug(-1); return; }
+  if (ev.key === 'Escape') { closeSug(); return; }
+  if (ev.key === 'Enter') {
+    ev.preventDefault();
+    if (sugIndex >= 0 && sugItems[sugIndex]) {
+      selectStock(sugItems[sugIndex].code, sugItems[sugIndex].name);
+    } else if (sugItems.length === 1) {
+      selectStock(sugItems[0].code, sugItems[0].name);
+    } else {
+      var m = q_raw_match();
+      if (m) selectStock(m, null);
+    }
+  }
+});
+function q_raw_match() {
+  var v = searchInput.value.trim();
+  var m = v.match(/\d{6}/);
+  return m ? m[0] : null;
+}
+function runSearch(q) {
+  fetch(API_BASE + '/stock-search?q=' + encodeURIComponent(q))
+    .then(function(r){ if (!r.ok) throw new Error('stock-search ' + r.status); return r.json(); })
+    .then(function(j) {
+      var hits = (j.items || j.stocks || j || []).filter(function(s){ return s && s.code; });
+      sugItems = hits.slice(0, 20);
+      sugIndex = -1;
+      renderSug();
+    })
+    .catch(function() { sugItems = []; sugIndex = -1; renderSug(); });
+}
+function renderSug() {
+  if (!sugItems.length) {
+    sugBox.innerHTML = searchInput.value.trim() ? '<div class="si"><span class="none">无匹配</span></div>' : '';
+    return;
+  }
+  sugBox.innerHTML = sugItems.map(function(s, i) {
+    return '<div class="si' + (i === sugIndex ? ' on' : '') + '" data-i="' + i + '"><b>' + esc(s.name || '') + '</b><span class="c">' + esc(s.code) + '</span></div>';
+  }).join('');
+  sugBox.querySelectorAll('.si[data-i]').forEach(function(el) {
+    el.onmousedown = function(ev) {
+      ev.preventDefault();
+      var it = sugItems[+el.dataset.i];
+      selectStock(it.code, it.name);
+    };
+  });
+}
+function moveSug(d) {
+  if (!sugItems.length) return;
+  sugIndex = Math.max(0, Math.min(sugItems.length - 1, (sugIndex < 0 ? -1 : sugIndex) + d));
+  renderSug();
+}
+function closeSug() { sugItems = []; sugIndex = -1; sugBox.innerHTML = ''; }
+document.addEventListener('click', function(ev) {
+  if (!sugBox.contains(ev.target) && ev.target !== searchInput) closeSug();
+});
+
+function selectStock(code, name) {
+  curCode = code;
+  curName = name || null;
+  searchInput.value = name ? name : code;
+  closeSug();
+  updateCurLabel();
+  reload();
+}
+function updateCurLabel() {
+  var el = document.getElementById('curLabel');
+  if (!curCode) { el.textContent = '未选择股票'; return; }
+  el.innerHTML = (curName ? esc(curName) : '加载中…') + ' <span class="code">' + esc(curCode) + '</span>';
+}
+
+/* ================= 日期 / 窗口控制 ================= */
+var dateInput = document.getElementById('dateInput');
+var btn250 = document.getElementById('btn250');
+var btnFull = document.getElementById('btnFull');
+
+dateInput.addEventListener('change', function() {
+  curDate = dateInput.value || null;
+  reload();
+});
+btn250.onclick = function() {
+  fullMode = false;
+  btn250.classList.add('on'); btnFull.classList.remove('on');
+  reload();
+};
+btnFull.onclick = function() {
+  fullMode = true;
+  btnFull.classList.add('on'); btn250.classList.remove('on');
+  reload();
+};
+
+/* ================= 加载 K 线 ================= */
+function reload() {
+  if (!curCode) return;
+  hideError(); showEmpty(false);
+  var params = new URLSearchParams();
+  params.set('code', curCode);
+  if (fullMode) {
+    params.set('from', FULL_FROM);
+    if (curDate) params.set('to', curDate);
+    /* fullMode 下不传 date，避免「date 与 from/to 同传时 date 作废」的后端 WARN 路径 */
+  } else if (curDate) {
+    params.set('date', curDate);
+  }
+  fetch(API_BASE + '/kline?' + params.toString())
+    .then(function(r) {
+      if (r.status === 404) throw new Error('股票代码不存在（' + curCode + '）');
+      if (r.status === 422) throw new Error('日期区间非法（from>to）');
+      if (!r.ok) throw new Error('/kline ' + r.status);
+      return r.json();
+    })
+    .then(function(j) {
+      curName = j.name || curName;
+      updateCurLabel();
+      curBars = j.bars || [];
+      if (!curBars.length) {
+        showEmpty(true);
+        document.getElementById('kpis').style.display = 'none';
+        if (chart) chart.clear();
+        return;
+      }
+      document.getElementById('kpis').style.display = '';
+      renderCards(curBars[curBars.length - 1]);
+      renderChart(curBars);
+    })
+    .catch(function(e) {
+      showError(e.message);
+      document.getElementById('kpis').style.display = 'none';
+      if (chart) chart.clear();
+    });
+}
+
+/* ================= 数字卡：最新一日 ================= */
+var WARMUP_TIP = 'warm-up 期（上市前 60 交易日）无筹码数据';
+function renderCards(bar) {
+  var chip = bar.chip;
+  function cell(v, digits) { return chip ? fmtPct(v, digits) : '<span class="dim" title="' + WARMUP_TIP + '">—</span>'; }
+  var costCls = chip && chip.cost_dev != null ? (chip.cost_dev >= 0 ? 'up' : 'down') : '';
+  var kpis = [
+    ['最新交易日', bar.trade_date],
+    ['获利盘 %', '<span class="' + (chip ? '' : 'dim') + '"' + (chip ? '' : ' title="' + WARMUP_TIP + '"') + '>' + (chip ? chip.profit_ratio.toFixed(1) + '%' : '—') + '</span>'],
+    ['成本偏离 %', '<span class="' + costCls + (chip ? '' : ' dim') + '"' + (chip ? '' : ' title="' + WARMUP_TIP + '"') + '>' + (chip ? fmtPct(chip.cost_dev) : '—') + '</span>'],
+    ['90% 集中度', chip ? '<span>' + chip.c90_conc.toFixed(1) + '%<small> [' + chip.c90_low.toFixed(2) + '~' + chip.c90_high.toFixed(2) + ']</small></span>' : '<span class="dim" title="' + WARMUP_TIP + '">—</span>'],
+    ['70% 集中度', chip ? '<span>' + chip.c70_conc.toFixed(1) + '%<small> [' + chip.c70_low.toFixed(2) + '~' + chip.c70_high.toFixed(2) + ']</small></span>' : '<span class="dim" title="' + WARMUP_TIP + '">—</span>']
+  ];
+  document.getElementById('kpis').innerHTML = kpis.map(function(k) {
+    return '<div class="kpi"><div class="lab">' + k[0] + '</div><div class="val">' + k[1] + '</div></div>';
+  }).join('');
+}
+
+/* ================= ECharts 主图：K线（grid0）+ 筹码带副图（grid1，同 x 轴 dataZoom 联动） ================= */
+function renderChart(bars) {
+  if (!chart) {
+    chart = echarts.init(document.getElementById('klinechart'));
+    window.addEventListener('resize', function() { chart.resize(); });
+  }
+  var dates = bars.map(function(b){ return b.trade_date; });
+  var candle = bars.map(function(b){ return [b.open, b.close, b.low, b.high]; });
+  var c90Low = bars.map(function(b){ return b.chip ? b.chip.c90_low : null; });
+  var c90Delta = bars.map(function(b){ return b.chip ? (b.chip.c90_high - b.chip.c90_low) : null; });
+  var c70Low = bars.map(function(b){ return b.chip ? b.chip.c70_low : null; });
+  var c70Delta = bars.map(function(b){ return b.chip ? (b.chip.c70_high - b.chip.c70_low) : null; });
+
+  /* price 纵轴对主图/副图取同一 min/max，二者可直接比对价位 */
+  var lo = Infinity, hi = -Infinity;
+  bars.forEach(function(b) {
+    lo = Math.min(lo, b.low); hi = Math.max(hi, b.high);
+    if (b.chip) { lo = Math.min(lo, b.chip.c90_low); hi = Math.max(hi, b.chip.c90_high); }
+  });
+  var pad2 = (hi - lo) * 0.04 || 1;
+  var yMin = +(lo - pad2).toFixed(2), yMax = +(hi + pad2).toFixed(2);
+
+  var option = {
+    backgroundColor: 'transparent',
+    animation: false,
+    textStyle: { color: '#dde4ee', fontFamily: '-apple-system, "PingFang SC", sans-serif' },
+    grid: [
+      { left: 56, right: 20, top: 10, height: '58%' },
+      { left: 56, right: 20, top: '68%', height: '20%' }
+    ],
+    xAxis: [
+      { type: 'category', data: dates, gridIndex: 0, boundaryGap: false, axisLine: { lineStyle: { color: '#26303f' } }, axisLabel: { show: false }, splitLine: { show: false } },
+      { type: 'category', data: dates, gridIndex: 1, boundaryGap: false, axisLine: { lineStyle: { color: '#26303f' } }, axisLabel: { color: '#8593a8', fontSize: 10 }, splitLine: { show: false } }
+    ],
+    yAxis: [
+      { scale: false, min: yMin, max: yMax, gridIndex: 0, axisLabel: { color: '#8593a8', fontSize: 10 }, splitLine: { lineStyle: { color: '#1c2431' } } },
+      { scale: false, min: yMin, max: yMax, gridIndex: 1, axisLabel: { color: '#8593a8', fontSize: 10 }, splitLine: { lineStyle: { color: '#1c2431' } } }
+    ],
+    axisPointer: { link: [{ xAxisIndex: [0, 1] }] },
+    dataZoom: [
+      { type: 'inside', xAxisIndex: [0, 1], start: 0, end: 100 },
+      { type: 'slider', xAxisIndex: [0, 1], top: '91%', height: 16, start: 0, end: 100, borderColor: '#26303f', fillerColor: 'rgba(226,177,60,.12)', handleStyle: { color: '#e2b13c' }, textStyle: { color: '#8593a8', fontSize: 10 } }
+    ],
+    tooltip: {
+      trigger: 'axis',
+      axisPointer: { type: 'cross', crossStyle: { color: '#5a6678' } },
+      backgroundColor: '#1c2431',
+      borderColor: '#26303f',
+      textStyle: { color: '#dde4ee', fontSize: 12 },
+      formatter: function(params) {
+        var i = params[0].dataIndex, b = bars[i];
+        var s = '<b>' + b.trade_date + '</b><br/>开' + b.open.toFixed(2) + ' 高' + b.high.toFixed(2) + ' 低' + b.low.toFixed(2) + ' 收' + b.close.toFixed(2)
+          + '<br/>涨跌 ' + fmtPct(b.change_pct, 2) + ' · 换手 ' + (b.turnover_rate != null ? b.turnover_rate.toFixed(2) + '%' : '—');
+        if (b.chip) {
+          s += '<br/>c90 [' + b.chip.c90_low.toFixed(2) + '~' + b.chip.c90_high.toFixed(2) + '] 集中 ' + b.chip.c90_conc.toFixed(1) + '%'
+            + '<br/>c70 [' + b.chip.c70_low.toFixed(2) + '~' + b.chip.c70_high.toFixed(2) + '] 集中 ' + b.chip.c70_conc.toFixed(1) + '%'
+            + '<br/>获利盘 ' + b.chip.profit_ratio.toFixed(1) + '% · 成本偏离 ' + fmtPct(b.chip.cost_dev);
+        } else {
+          s += '<br/><span style="color:#5a6678">筹码暂缺（' + WARMUP_TIP + '）</span>';
+        }
+        return s;
+      }
+    },
+    series: [
+      {
+        name: 'K线', type: 'candlestick', data: candle, xAxisIndex: 0, yAxisIndex: 0,
+        itemStyle: { color: '#e5484d', color0: '#2fbf71', borderColor: '#e5484d', borderColor0: '#2fbf71' }
+      },
+      { name: 'c90下界', type: 'line', data: c90Low, xAxisIndex: 1, yAxisIndex: 1, stack: 'c90', symbol: 'none', lineStyle: { opacity: 0 }, areaStyle: { opacity: 0 }, silent: true, z: 1 },
+      { name: 'c90带', type: 'line', data: c90Delta, xAxisIndex: 1, yAxisIndex: 1, stack: 'c90', symbol: 'none', lineStyle: { opacity: 0 }, areaStyle: { color: '#3d7bd9', opacity: .28 }, silent: true, z: 1 },
+      { name: 'c70下界', type: 'line', data: c70Low, xAxisIndex: 1, yAxisIndex: 1, stack: 'c70', symbol: 'none', lineStyle: { opacity: 0 }, areaStyle: { opacity: 0 }, silent: true, z: 2 },
+      { name: 'c70带', type: 'line', data: c70Delta, xAxisIndex: 1, yAxisIndex: 1, stack: 'c70', symbol: 'none', lineStyle: { opacity: 0 }, areaStyle: { color: '#8fb8e8', opacity: .42 }, silent: true, z: 2 }
+    ]
+  };
+  chart.setOption(option, true);
+}
+
+/* ================= 初始化：支持 ?code=&date= 深链（如从情绪页复盘日期跳转） ================= */
+(function init() {
+  var q = new URLSearchParams(location.search);
+  var qDate = q.get('date');
+  if (qDate) { curDate = qDate; dateInput.value = qDate; }
+  var qCode = q.get('code');
+  if (qCode) { selectStock(qCode, null); }
+})();
+</script>
+</body>
+</html>

@@ -14,8 +14,8 @@ import java.time.LocalDate
  */
 interface SectorDailyRepository : JpaRepository<SectorDaily, SectorDailyId> {
 
-    /** 按 交易日 查当日全部板块行（升序；页面/回放数据源） */
-    fun findByTradeDateOrderByBoardAsc(tradeDate: LocalDate): List<SectorDaily>
+    /** 按 交易日 查当日全部板块行（升序；页面/回放数据源；tradeDate 可空——Mockito 5.14.2 `any()` 返回默认值 null，Kotlin 非空参数字节码检查兼容） */
+    fun findByTradeDateOrderByBoardAsc(tradeDate: LocalDate?): List<SectorDaily>
 
     /** 该交易日是否有板块行（增量幂等判重） */
     fun existsByTradeDate(tradeDate: LocalDate): Boolean

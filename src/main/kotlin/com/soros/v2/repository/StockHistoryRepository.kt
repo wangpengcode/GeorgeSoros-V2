@@ -15,8 +15,8 @@ interface StockHistoryRepository : JpaRepository<StockHistory, Long> {
     /** 按 代码+交易日 查单行（UNIQUE(code, trade_date) 至多 1 行） */
     fun findByCodeAndTradeDate(code: String, tradeDate: LocalDate): StockHistory?
 
-    /** 按 代码+交易日区间 查列表（升序） */
-    fun findByCodeAndTradeDateBetween(code: String, start: LocalDate, end: LocalDate): List<StockHistory>
+    /** 按 代码+交易日区间 查列表（升序；code/start/end 可空——Mockito 5.14.2 `eq()/any()` 返回默认值 null，Kotlin 非空参数字节码检查兼容） */
+    fun findByCodeAndTradeDateBetween(code: String?, start: LocalDate?, end: LocalDate?): List<StockHistory>
 
     /** 按 交易日区间 查全部行情（升序；§13.4 情绪派生窗口 / §13.5 回放 barsByCode 数据源） */
     fun findByTradeDateBetween(start: LocalDate, end: LocalDate): List<StockHistory>

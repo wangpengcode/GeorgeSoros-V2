@@ -38,7 +38,7 @@ interface StockInfoService {
      * GET /api/v1/stock-search（§11.1）：股票模糊搜索（名单添加、梯队查询等输入场景共用）。
      *
      * 一期口径：q trim 非空，匹配 code 前缀 OR name 小写包含；排除 is_st=true / delisted=true；
-     * limit 上限 10（调用方默认 10，前端 8）。响应 [{code,name,industry}]（键过命名字典 §17.6）。
+     * limit 上限 20（调用方默认 10，前端 8；§19.13.1 协调方裁决上限 20）。响应 [{code,name,industry}]（键过命名字典 §17.6）。
      */
     fun search(query: String, limit: Int): List<StockSearchItem>
 

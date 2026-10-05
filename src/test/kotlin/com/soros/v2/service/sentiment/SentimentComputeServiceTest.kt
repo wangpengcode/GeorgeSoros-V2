@@ -169,4 +169,112 @@ class SentimentComputeServiceTest {
         assertNotNull(r.sentiment, "sentiment 产出")
         assertTrue(r.sentiment.followupJson == null, "回放首日无昨日名单，followup 空")
     }
+
+    // ==================== 当日统计四列 exact-today 口径（2026-10-05 对账修复：停牌昨日状态不延续入今日家数） ====================
+
+    private fun ctxWith(barsByCode: Map<String, List<StockHistory>>) = SentimentComputeContext(
+        date = date,
+        prevCycle = null,
+        barsByCode = barsByCode,
+        calendar = (0 until 5).map { i -> date.minusDays((4 - i).toLong()) },
+        activeDragonCycles = emptyList(),
+    )
+
+    @Test
+    fun `testComputeFor yesterdayLimitUpTodaySuspendedExcludedFromLimitUpCount`() {
+        // given: 600000 昨日涨停(streak=3)、今日停牌（无当日 bar）→ 旧 as-of 会取昨日 bar 计入今日家数，exact-today 不计
+        val r = service().computeFor(
+            date,
+            ctxWith(
+                mapOf(
+                    "600000" to listOf(
+                        bar("600000", date.minusDays(4)),
+                        bar("600000", date.minusDays(3)),
+                        bar("600000", date.minusDays(2)),
+                        bar("600000", date.minusDays(1), isLimitUp = true, limitUpStreak = 3),
+                    ),
+                ),
+            ),
+        )
+
+        // then: 昨日涨停不延续到今日家数（停牌≠涨停）
+        assertEquals(0, r.sentiment.limitUpCount, "停牌股昨日涨停不计入今日 limit_up_count")
+        assertEquals(0, r.sentiment.lianbanCount, "lianban_count 同理不计")
+        assertEquals(0, r.sentiment.limitDownCount, "limit_down_count 无")
+        assertTrue(r.sentiment.maxStreak == null, "无当日 bar → max_streak 空（无当日板高）")
+    }
+
+    @Test
+    fun `testComputeFor yesterdayLimitUpTodayNormalTradingExcluded`() {
+        // given: 600000 昨日涨停(streak=3)、今日正常交易未涨停（当日 bar 存在，isLimitUp=false）→ 不计入
+        val r = service().computeFor(
+            date,
+            ctxWith(
+                mapOf(
+                    "600000" to listOf(
+                        bar("600000", date.minusDays(4)),
+                        bar("600000", date.minusDays(3)),
+                        bar("600000", date.minusDays(2)),
+                        bar("600000", date.minusDays(1), isLimitUp = true, limitUpStreak = 3),
+                        bar("600000", date, changePct = BigDecimal("1.00")),
+                    ),
+                ),
+            ),
+        )
+
+        // then: 今日未涨停不计入家数（昨日涨停不延续）
+        assertEquals(0, r.sentiment.limitUpCount, "今日正常交易未涨停不计入 limit_up_count")
+        assertEquals(0, r.sentiment.lianbanCount, "lianban_count 不计")
+        assertEquals(0, r.sentiment.maxStreak, "今日无涨停 → max_streak=0")
+    }
+
+    @Test
+    fun `testComputeFor yesterdayLimitUpTodayStillLimitUpIncluded`() {
+        // given: 600000 昨日涨停(streak=2)、今日仍涨停(streak=3) → 含
+        val r = service().computeFor(
+            date,
+            ctxWith(
+                mapOf(
+                    "600000" to listOf(
+                        bar("600000", date.minusDays(4)),
+                        bar("600000", date.minusDays(3)),
+                        bar("600000", date.minusDays(2)),
+                        bar("600000", date.minusDays(1), isLimitUp = true, limitUpStreak = 2),
+                        bar("600000", date, isLimitUp = true, limitUpStreak = 3),
+                    ),
+                ),
+            ),
+        )
+
+        // then: 今日仍涨停 → 计入
+        assertEquals(1, r.sentiment.limitUpCount, "今日涨停计入 limit_up_count")
+        assertEquals(1, r.sentiment.lianbanCount, "streak=3 ≥2 计入 lianban_count")
+        assertEquals(3, r.sentiment.maxStreak, "max_streak=今日 3 板")
+    }
+
+    @Test
+    fun `testComputeFor maxStreakExcludesSuspendedYesterdayStreak`() {
+        // given: 600000 停牌（昨日涨停 streak=5，无今日 bar）；600001 今日涨停 streak=2
+        // → max_streak 只取当日精确 bar 的板高 = 2（停牌昨日 5 板不延续）
+        val r = service().computeFor(
+            date,
+            ctxWith(
+                mapOf(
+                    "600000" to listOf(
+                        bar("600000", date.minusDays(4)),
+                        bar("600000", date.minusDays(1), isLimitUp = true, limitUpStreak = 5),
+                    ),
+                    "600001" to listOf(
+                        bar("600001", date.minusDays(4)),
+                        bar("600001", date.minusDays(1)),
+                        bar("600001", date, isLimitUp = true, limitUpStreak = 2),
+                    ),
+                ),
+            ),
+        )
+
+        // then: max_streak 与 limit_up_count 同口径（仅当日精确 bar）
+        assertEquals(1, r.sentiment.limitUpCount, "今日涨停 1 只（600001）")
+        assertEquals(2, r.sentiment.maxStreak, "max_streak=今日最高 2 板（停牌昨日 5 板不计）")
+    }
 }

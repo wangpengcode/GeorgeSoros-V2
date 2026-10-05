@@ -17,6 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from adapters.akshare_adapter import AkshareAdapter
 from adapters.base import DataRouter
 from adapters.baostock_adapter import BaostockAdapter
+from adapters.intraday_source import IntradaySource
 from adapters.mootdx_adapter import MootdxAdapter
 from adapters.yahoo_adapter import YahooAdapter
 from adapters.tencent_adapter import TencentAdapter
@@ -85,6 +86,8 @@ def build_router() -> DataRouter:
 
 # 启动自检：构建 app 即完成 import 链 + Adapter 实例化（akshare/baostock/mootdx 全部导入）
 data_router = build_router()
+# 盘中源（§19.13.2）：单例（双挂共享同一限流桶，端点频次合并计入同一桶）
+intraday_source = IntradaySource()
 
 
 def apply_cors(app: FastAPI) -> None:
@@ -131,9 +134,9 @@ register_exception_handlers(app)
 apply_cors(app)
 
 # PLAN §11.1 统一前缀 /api/v1（Kotlin 侧 PythonDataServiceClient 调用入口）
-app.include_router(create_router(data_router), prefix="/api/v1")
+app.include_router(create_router(data_router, intraday=intraday_source), prefix="/api/v1")
 # 根路径兼容（冒烟 curl /health；与 /api/v1 路由并存，路径无冲突）
-app.include_router(create_router(data_router))
+app.include_router(create_router(data_router, intraday=intraday_source))
 
 
 # IPGuard 观测端点（独立于 /health：Kotlin strict fail-on-unknown 对健康 JSON 新增字段会炸解析，

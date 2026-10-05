@@ -28,14 +28,24 @@ class SentimentComputeServiceImpl(
 ) : SentimentComputeService {
 
     override fun computeFor(date: LocalDate, ctx: SentimentComputeContext): SentimentComputeResult {
+        // 双视图（2026-10-05 对账修复，两处语义各归各位）：
+        // - todayBars = as-of 最近 bar：供池派生列（big_meat/big_face/rebound 按池语义 N 日窗口）
+        //   与龙头上位（electLeader 候选）。停牌股取到最近交易日 bar，昨日状态不参与「当日统计」家数。
+        // - exactTodayBars = 当日精确 bar（tradeDate==date 才有；停牌/休市=null）：只供「当日统计」四列
+        //   （limit_up_count/limit_down_count/lianban_count/max_streak）——停牌不是涨停，昨日
+        //   isLimitUp/isLimitDown/limitUpStreak 不得延续计入今日家数（sentiment_cycle vs stock_history
+        //   直查 limit_up_count 偏大 +1~+4 的根因，256/1211 天）。
+        // 状态机 advance 在下方用 ctx.barsByCode[code].maxByOrNull（as-of）——状态机有自身停牌冻结规则，
+        // 今日无 bar 由 advance 判停牌，语义不变。
         val todayBars = ctx.barsByCode.mapValues { (_, bars) -> bars.maxByOrNull { it.tradeDate } }
+        val exactTodayBars = ctx.barsByCode.mapValues { (_, bars) -> bars.lastOrNull { it.tradeDate == date } }
 
         val sentiment = SentimentCycle().apply {
             tradeDate = date
-            limitUpCount = todayBars.values.count { it?.isLimitUp == true }
-            limitDownCount = todayBars.values.count { it?.isLimitDown == true }
-            lianbanCount = todayBars.values.count { it != null && it.limitUpStreak >= 2 }
-            maxStreak = todayBars.values.mapNotNull { it?.limitUpStreak?.toInt() }.maxOrNull()?.toShort()
+            limitUpCount = exactTodayBars.values.count { it?.isLimitUp == true }
+            limitDownCount = exactTodayBars.values.count { it?.isLimitDown == true }
+            lianbanCount = exactTodayBars.values.count { it != null && it.limitUpStreak >= 2 }
+            maxStreak = exactTodayBars.values.mapNotNull { it?.limitUpStreak?.toInt() }.maxOrNull()?.toShort()
         }
 
         derivePoolColumns(sentiment, ctx.barsByCode, todayBars)

@@ -11,8 +11,8 @@ import java.time.LocalDate
  */
 interface MarketDailyRepository : JpaRepository<MarketDaily, LocalDate> {
 
-    /** 按 交易日 查单日行（trade_date PRIMARY KEY，至多 1 行；21:30 兜底跳过条件依赖 dataCoverage） */
-    fun findByTradeDate(tradeDate: LocalDate): MarketDaily?
+    /** 按 交易日 查单日行（trade_date PRIMARY KEY，至多 1 行；21:30 兜底跳过条件依赖 dataCoverage；tradeDate 可空——Mockito 5.14.2 `any()` 返回默认值 null，Kotlin 非空参数字节码检查兼容） */
+    fun findByTradeDate(tradeDate: LocalDate?): MarketDaily?
 
     /** 该交易日是否已有行（增量 upsert 幂等判重 / 对账） */
     fun existsByTradeDate(tradeDate: LocalDate): Boolean
