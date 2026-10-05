@@ -25,7 +25,8 @@ import org.springframework.transaction.support.TransactionTemplate
  * - 按天分事务：去 @Transactional，构造注入 PlatformTransactionManager（镜像 SignalReplayServiceImpl），
  *   每日 tx = delete(sentiment_cycle 当日) + delete(dragon_cycle 当日) + save + saveAll；computeFor 事务外；
  * - force=false 增量补缺：待算清单 = 交易日历∩[from,to] − 已有日期；D0 前一交易日断点热启动；
- *   空洞日内存推进状态但不落库；数据守卫（非 ST 有效股柱覆盖率 <90%）前缀截止 + deferredDates；
+ *   空洞日内存推进状态但不落库；数据守卫（当日已上市非排除股柱覆盖率 <90%，分母=firstBarByCode
+ *   当日已上市票数，未上市≠缺数据）前缀截止 + deferredDates；
  * - force=true 全量重建：事务0 预清理区间两表 + flush（防 uq_dragon_active 冲突），随后冷启动重建；
  * - 进度日志：开始/结束 + 每 50 交易日一条（[Step Replay] 前缀、{} 占位符）。
  */
@@ -84,8 +85,7 @@ class SentimentReplayServiceImpl(
             sentimentCycleRepository.flush()
             warnPreIntervalActiveDragons(from)
         }
-        val stCodes = stockInfoRepository.findByIsStTrue().map { it.code }.toSet()
-        val totalValid = stockInfoRepository.countByIsStFalseAndDelistedFalse()
+        val guardCtx = loadGuardContext()
         var prevCycle: SentimentCycle? = null
         var activeDragon: MutableList<DragonCycle> = mutableListOf()
         val savedDragons = LinkedHashMap<Pair<String, LocalDate>, DragonCycle>()
@@ -95,14 +95,14 @@ class SentimentReplayServiceImpl(
         var processed = 0
         var guardTriggered = false
         for (chunk in tradingDays.chunkedByYear()) {
-            val bars = loadBars(chunk.first(), chunk.last(), stCodes)
+            val bars = loadBars(chunk.first(), chunk.last(), guardCtx.excludedCodes)
             for (day in chunk) {
                 if (guardTriggered) {
                     deferred.add(day)
                     continue
                 }
-                if (!barCoveragePasses(day, bars, totalValid)) {
-                    logger.warn("[Step Replay] 数据守卫触发（柱子覆盖率不足）前缀截止：tradeDate={} totalValid={}", day, totalValid)
+                if (!barCoveragePasses(day, bars, guardCtx)) {
+                    logger.warn("[Step Replay] 数据守卫触发（当日已上市柱覆盖率不足）前缀截止：tradeDate={} expected={}", day, expectedListed(day, guardCtx))
                     guardTriggered = true
                     deferred.add(day)
                     continue
@@ -153,8 +153,7 @@ class SentimentReplayServiceImpl(
         // 断点热启动（§19.12 决策 5）：prevCycle=D0 前一交易日行；缺失 WARN（消除静默断链）
         var prevCycle = hotStartPrevCycle(d0)
         var activeDragon = initialActiveDragon.toMutableList()
-        val stCodes = stockInfoRepository.findByIsStTrue().map { it.code }.toSet()
-        val totalValid = stockInfoRepository.countByIsStFalseAndDelistedFalse()
+        val guardCtx = loadGuardContext()
         val savedDragons = LinkedHashMap<Pair<String, LocalDate>, DragonCycle>()
         val dragonCycleList = mutableListOf<String>()
         val deferred = mutableListOf<LocalDate>()
@@ -163,7 +162,7 @@ class SentimentReplayServiceImpl(
         var processed = 0
         var guardTriggered = false
         for (chunk in window.inRangeDays.chunkedByYear()) {
-            val bars = loadBars(chunk.first(), chunk.last(), stCodes)
+            val bars = loadBars(chunk.first(), chunk.last(), guardCtx.excludedCodes)
             for (day in chunk) {
                 if (day.isBefore(d0)) continue
                 if (guardTriggered) {
@@ -171,8 +170,8 @@ class SentimentReplayServiceImpl(
                     continue
                 }
                 val isMissing = day !in window.existingDates
-                if (isMissing && !barCoveragePasses(day, bars, totalValid)) {
-                    logger.warn("[Step Replay] 数据守卫触发（柱子覆盖率不足）前缀截止：tradeDate={} totalValid={}", day, totalValid)
+                if (isMissing && !barCoveragePasses(day, bars, guardCtx)) {
+                    logger.warn("[Step Replay] 数据守卫触发（当日已上市柱覆盖率不足）前缀截止：tradeDate={} expected={}", day, expectedListed(day, guardCtx))
                     guardTriggered = true
                     deferred.add(day)
                     continue
@@ -237,10 +236,10 @@ class SentimentReplayServiceImpl(
             .filter { !it.isBefore(calendarStart) && !it.isAfter(to) }
             .sorted()
 
-    /** 瘦身投影批量加载（ST 隔离 + 按 code 分组每股 tradeDate 升序；加载范围 [块首−6日, 块末]） */
-    private fun loadBars(chunkStart: LocalDate, chunkEnd: LocalDate, stCodes: Set<String>): Map<String, List<StockHistory>> =
+    /** 瘦身投影批量加载（排除集隔离 ST ∪ 退市 + 按 code 分组每股 tradeDate 升序；加载范围 [块首−6日, 块末]） */
+    private fun loadBars(chunkStart: LocalDate, chunkEnd: LocalDate, excludedCodes: Set<String>): Map<String, List<StockHistory>> =
         stockHistoryRepository.findReplayBars(chunkStart.minusDays(REPLAY_BAR_WINDOW), chunkEnd)
-            .filter { it.code !in stCodes }
+            .filter { it.code !in excludedCodes }
             .map { it.toReplayBar() }
             .groupBy { it.code }
             .mapValues { (_, bars) -> bars.sortedBy { it.tradeDate } }
@@ -264,11 +263,31 @@ class SentimentReplayServiceImpl(
         return barsByCode.mapValues { (_, bars) -> bars.filter { !it.tradeDate.isBefore(windowStart) && !it.tradeDate.isAfter(day) } }
     }
 
-    /** 数据守卫：缺日非 ST 有效股柱子覆盖率 <90%（BAR_COVERAGE_THRESHOLD）→ 前缀截止 */
-    private fun barCoveragePasses(day: LocalDate, bars: Map<String, List<StockHistory>>, totalValid: Long): Boolean {
-        if (totalValid <= 0) return true
-        val barCount = bars.values.flatten().count { it.tradeDate == day }
-        return barCount >= totalValid * BAR_COVERAGE_THRESHOLD
+    /** 守卫上下文（每回放仅构建一次；force=true 与增量两路共用同口径） */
+    private fun loadGuardContext(): GuardContext {
+        val stCodes = stockInfoRepository.findByIsStTrue().map { it.code }.toSet()
+        val delistedCodes = stockInfoRepository.findByDelisted(true).map { it.code }.toSet()
+        // 每票最早行情日（≈上市日代理；stock_info 无 list_date 列，见命名字典 first_bar_date）
+        val firstBarByCode = stockHistoryRepository.findFirstBarDatesByCode().associate { it.code to it.firstBarDate }
+        return GuardContext(firstBarByCode, stCodes + delistedCodes)
+    }
+
+    /** 当日已上市（firstBar ≤ day）非排除票数（守卫期望分母；未上市≠缺数据） */
+    private fun expectedListed(day: LocalDate, guard: GuardContext): Int =
+        guard.firstBarByCode.count { (code, firstBar) -> code !in guard.excludedCodes && !firstBar.isAfter(day) }
+
+    /**
+     * 数据守卫：当日已上市非排除股柱覆盖率 <90%（BAR_COVERAGE_THRESHOLD）→ 前缀截止。
+     * 分母=当日已上市票数（firstBarByCode 中 firstBar ≤ day 的非排除票），**不是当前全市场固定数**——
+     * 历史日期只有部分票已上市（如 2021-10-08 当前全市场 5224 只中仅 3301 只上市，63%），固定分母会
+     * 把覆盖率永远压到阈值下、误拦全部历史日；分子=当日实际有柱子的非排除票（loadBars 已排除 ST∪退市）。
+     * expected=0（当日无已上市票）→ 不拦不除零（未上市≠缺数据，跳守卫直接算）。
+     */
+    private fun barCoveragePasses(day: LocalDate, bars: Map<String, List<StockHistory>>, guard: GuardContext): Boolean {
+        val expected = expectedListed(day, guard)
+        if (expected == 0) return true
+        val withBars = bars.values.flatten().filter { it.tradeDate == day }.map { it.code }.distinct().count()
+        return withBars >= expected * BAR_COVERAGE_THRESHOLD
     }
 
     /** 单日 computeFor（事务外，纯函数零 DB 访问）；回放/增量首日新建龙头 note=BOOT（§19.12 不变式⑥） */
@@ -342,6 +361,12 @@ class SentimentReplayServiceImpl(
         val fullCalendar: List<LocalDate>,
         val existingDates: Set<LocalDate>,
         val d0: LocalDate,
+    )
+
+    /** 数据守卫上下文（首日映射 + 排除集 ST∪退市；分子分母同口径） */
+    private data class GuardContext(
+        val firstBarByCode: Map<String, LocalDate>,
+        val excludedCodes: Set<String>,
     )
 
     private companion object {

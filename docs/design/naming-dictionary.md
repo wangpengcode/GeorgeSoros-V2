@@ -9,6 +9,7 @@
 |---|---|---|
 | 证券代码 | `code` | 股票=裸数字 600000；指数=带前缀 sh000001（值口径特例，仅 stock_index/index_history） |
 | 交易日 | `trade_date` | 各表行归属交易日；trading_calendar 主键 |
+| 每票最早行情日（≈上市日代理） | `first_bar_date` | stock_info 无 list_date 列，用 stock_history MIN(trade_date) GROUP BY code 代理；情绪回放守卫分母「当日已上市」口径——未上市≠缺数据（回放 FirstBar DTO 字段 firstBarDate，不落列） |
 | 开盘价/最高价/最低价/收盘价 | `open/high/low/close` | qfq 前复权（元）；指数不除权直接点位 |
 | 成交量 | `volume` | 统一=股（AKShare 手×100，M0 探针校准） |
 | 成交额 | `amount` | 元（原 total_amount 已废） |
@@ -260,3 +261,16 @@
 | `filled_days` | 本次补算落库交易日数（force=false 增量，§19.12 决策 4） | POST /jobs/sentiment-replay 响应 SentimentReplaySummary（Kotlin 字段 filledDays） |
 | `skipped_days` | force=false 跳过日数（已有行跳过 + 空洞日不落库但状态推进 + 守卫 defer 日，§19.12 决策 4；filled+skipped=总天数不变式成立） | POST /jobs/sentiment-replay 响应 SentimentReplaySummary（Kotlin 字段 skippedDays） |
 | `deferred_dates` | 数据守卫拦下留待下次的缺日清单（覆盖率<90% 前缀截止，§19.12 决策 4） | POST /jobs/sentiment-replay 响应 SentimentReplaySummary（Kotlin 字段 deferredDates） |
+| `bars` | K线 bars 数组（升序区间，页面消费名；语义与 `items` 同族，§19.13.1 命名待增册落定） | GET /api/v1/kline 响应 |
+| `trade_date` | 交易日（K线 bars[] 元素响应键；**§19.13.1 裁定用 `trade_date`，C4 §12.4.1 旧 `date` 作废**） | GET /api/v1/kline 响应 bars[] 元素 |
+| `open` | 开盘价（元，qfq；K线 bars[] 元素响应键，复用 §五 列名语义） | GET /api/v1/kline 响应 bars[] 元素 |
+| `high` | 最高价（元，qfq） | GET /api/v1/kline 响应 bars[] 元素 |
+| `low` | 最低价（元，qfq） | GET /api/v1/kline 响应 bars[] 元素 |
+| `close` | 收盘价（元，qfq） | GET /api/v1/kline 响应 bars[] 元素 |
+| `volume` | 成交量（股） | GET /api/v1/kline 响应 bars[] 元素 |
+| `amount` | 成交额（元） | GET /api/v1/kline 响应 bars[] 元素 |
+| `change_pct` | 涨跌幅%（不复权口径） | GET /api/v1/kline 响应 bars[] 元素 |
+| `turnover_rate` | 换手率%（DB 原值透出，§19.13.1 决策 3 直读 stock_history.turnover_rate） | GET /api/v1/kline 响应 bars[] 元素 |
+| `chip` | 筹码对象（signal_daily 8 列，键名=§五 DDL 一字不差：profit_ratio/cost_dev/c90_low/c90_high/c90_conc/c70_low/c70_high/c70_conc；无行=null） | GET /api/v1/kline 响应 bars[] 元素 |
+| `q` | stock-search 查询词（请求参数；code 前缀 OR name 小写包含，拼音挂账不做，§19.13.1） | GET /api/v1/stock-search |
+| `limit` | stock-search 结果上限（请求参数；kline 页传 8，默认 10） | GET /api/v1/stock-search |

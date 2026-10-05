@@ -61,6 +61,20 @@ interface StockHistoryRepository : JpaRepository<StockHistory, Long> {
     @Query("SELECT DISTINCT h.code FROM StockHistory h WHERE h.tradeDate BETWEEN :start AND :end ORDER BY h.code")
     fun findDistinctCodesByTradeDateBetween(@Param("start") start: LocalDate, @Param("end") end: LocalDate): List<String>
 
+    /**
+     * 每票最早行情日（≈上市日代理；stock_info 无 list_date 列，见命名字典 first_bar_date）。
+     * 情绪回放守卫分母「当日已上市」口径：历史日期只有部分票已上市，固定当前全市场数会误拦全部历史日。
+     * 仅回放启动时调用一次（行数=有行情行票数，驻内存）。
+     */
+    @Query(
+        """
+        SELECT new com.soros.v2.repository.FirstBar(h.code, MIN(h.tradeDate))
+        FROM StockHistory h
+        GROUP BY h.code
+        """,
+    )
+    fun findFirstBarDatesByCode(): List<FirstBar>
+
     /** 指定交易日全部涨停行（§4.8 涨停梯队 / 最高板：is_limit_up 前置判定列） */
     fun findByTradeDateAndIsLimitUpTrue(tradeDate: LocalDate): List<StockHistory>
 
@@ -174,4 +188,15 @@ data class ReplayBar(
 
     /** 跌停连板 */
     val limitDownStreak: Short? = 0,
+)
+
+/**
+ * 每票最早行情日（≈上市日代理；stock_info 无 list_date 列，守卫分母口径，见命名字典 first_bar_date）。
+ */
+data class FirstBar(
+    /** 证券代码 */
+    val code: String,
+
+    /** 最早行情日（≈上市日；firstBarDate > day 视为当日未上市，不参与该日期望分母） */
+    val firstBarDate: LocalDate,
 )

@@ -17,6 +17,7 @@ import com.soros.v2.service.sentiment.SentimentReplayService
 import java.math.BigDecimal
 import java.time.LocalDate
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.mockito.Mockito
@@ -255,5 +256,31 @@ class SentimentReplayIntegrationTest {
         assertEquals(true, second.isLimitDown, "second.isLimitDown")
         assertEquals(0, second.limitUpStreak?.toInt() ?: 0, "second.limitUpStreak")
         assertEquals(2, second.limitDownStreak?.toInt() ?: 0, "second.limitDownStreak")
+    }
+
+    // ==================== 守卫分母「当日已上市」口径（2026-10-05 生产事故：固定全市场分母误拦全部历史日） ====================
+
+    @Test
+    fun `testReplay earlyDatePartialListingNotBlockedByGuard`() {
+        // given: 2021-10-08 回放；当前宇宙 100 只中仅 60 只该日已上市（firstBar ≤ 当日），40 只 2024 才上市；
+        // 当日 60 只全部有柱 → 新守卫分母=当日已上市 60，60/60=100% 通过
+        // （旧固定分母 countByIsStFalseAndDelistedFalse 会把 60/5224≈1% 永远压到阈值下，误拦全部历史日）
+        val early = LocalDate.of(2021, 10, 8)
+        val late = LocalDate.of(2024, 6, 3)
+        calendarRepo.save(TradingCalendar(early))
+        stockHistoryRepo.saveAll(
+            (1..60).map { StockHistory().apply { code = "600$it"; tradeDate = early } } +
+                (1..40).map { StockHistory().apply { code = "601$it"; tradeDate = late } },
+        )
+        Mockito.`when`(compute.computeFor(anyDate(), anyCtx())).thenReturn(
+            SentimentComputeResult(SentimentCycle().apply { tradeDate = early }, emptyList(), emptyList()),
+        )
+
+        // when
+        val summary = replayService.replay(early, early)
+
+        // then: 早期日期不再被误拦（分母随上市进度增长，未上市≠缺数据）
+        assertEquals(1, summary.filledDays, "2021-10-08 60/60 通过守卫 filledDays=1")
+        assertTrue(summary.deferredDates.isEmpty(), "早期日期不再被误拦 defer 空")
     }
 }

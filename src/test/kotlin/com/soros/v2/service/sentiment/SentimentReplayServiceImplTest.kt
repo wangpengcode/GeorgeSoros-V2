@@ -9,6 +9,7 @@ import com.soros.v2.entity.TradingCalendar
 import com.soros.v2.exception.BusinessException
 import com.soros.v2.notification.DingTalkNotifier
 import com.soros.v2.repository.DragonCycleRepository
+import com.soros.v2.repository.FirstBar
 import com.soros.v2.repository.ReplayBar
 import com.soros.v2.repository.SentimentCycleRepository
 import com.soros.v2.repository.StockHistoryRepository
@@ -124,11 +125,12 @@ class SentimentReplayServiceImplTest {
             notifier = notifier,
             transactionManager = transactionManager,
         )
-        // §19.12 默认依赖：无 ST（隔离铁律 is_st 仅用于排除）、无历史行、无进行中龙头、批量投影空
-        // 守卫默认 countByIsStFalseAndDelistedFalse=0 → 阈值 0 → 空柱不触发守卫（0<0 为 false）
+        // §19.12 默认依赖：无 ST（隔离铁律 is_st 仅用于排除）、无退市、无首日映射、无历史行、无进行中龙头、批量投影空
+        // 守卫默认 findFirstBarDatesByCode=空 → expected=0 → 空柱不触发守卫（未上市≠缺数据，不除零）
         Mockito.`when`(stockInfoRepo.findByIsStTrue()).thenReturn(emptyList())
+        Mockito.`when`(stockInfoRepo.findByDelisted(true)).thenReturn(emptyList())
         Mockito.`when`(stockHistoryRepo.findReplayBars(anyDate(), anyDate())).thenReturn(emptyList())
-        Mockito.`when`(stockInfoRepo.countByIsStFalseAndDelistedFalse()).thenReturn(0L)
+        Mockito.`when`(stockHistoryRepo.findFirstBarDatesByCode()).thenReturn(emptyList())
         Mockito.`when`(dragonRepo.findAllByEndDateIsNull()).thenReturn(emptyList())
         Mockito.`when`(sentimentRepo.findByTradeDateBetweenOrderByTradeDateAsc(anyDate(), anyDate())).thenReturn(emptyList())
     }
@@ -273,10 +275,10 @@ class SentimentReplayServiceImplTest {
 
     @Test
     fun `testReplay guardLowCoveragePrefixCutoffDeferredAndRetainsPrior`() {
-        // given: 3 交易日；非 ST 有效股=100（阈值=100×0.9=90）；d1 覆盖 100 柱、d2 覆盖 1 柱、d3 覆盖 100 柱
+        // given: 3 交易日；当日已上市 100 只（firstBar ≤ day1）；d1 覆盖 100 柱、d2 覆盖 1 柱、d3 覆盖 100 柱
         val d3 = day2.plusDays(1)
         Mockito.`when`(calendarRepo.findByTradeDateBetweenOrderByTradeDateAsc(day1, d3)).thenReturn(calendar(day1, day2, d3))
-        Mockito.`when`(stockInfoRepo.countByIsStFalseAndDelistedFalse()).thenReturn(100L)
+        Mockito.`when`(stockHistoryRepo.findFirstBarDatesByCode()).thenReturn((1..100).map { FirstBar("000$it", day1) })
         val bars = (1..100).map { replayBar("000$it", day1) } +
             replayBar("000001", day2) +
             (1..100).map { replayBar("100$it", d3) }
@@ -291,6 +293,79 @@ class SentimentReplayServiceImplTest {
         assertEquals(listOf(day2, d3), summary.deferredDates, "守卫拦下 d2/d3 留待下次（deferredDates 非空）")
         assertEquals(1, compute.computeCalls, "d2/d3 不硬算（守卫'不硬算'语义）")
         Mockito.verify(sentimentRepo, Mockito.times(1)).save(Mockito.any())
+    }
+
+    // ==================== 守卫分母「当日已上市」口径（未上市≠缺数据，2026-10-05 生产事故修复） ====================
+
+    @Test
+    fun `testReplay guardExpected100WithBars95Passes`() {
+        // given: 当日已上市 100 只（firstBar ≤ day1），95 只当日有柱 → 覆盖率 95% ≥90% 不拦
+        Mockito.`when`(calendarRepo.findByTradeDateBetweenOrderByTradeDateAsc(day1, day1)).thenReturn(calendar(day1))
+        Mockito.`when`(stockHistoryRepo.findFirstBarDatesByCode()).thenReturn((1..100).map { FirstBar("000$it", day1) })
+        Mockito.`when`(stockHistoryRepo.findReplayBars(anyDate(), anyDate())).thenReturn((1..95).map { replayBar("000$it", day1) })
+        compute.results.add(SentimentComputeResult(sentimentRow(day1), emptyList(), emptyList()))
+
+        // when
+        val summary = replay.replay(day1, day1)
+
+        // then: 95/100 ≥90% 通过守卫，正常落库
+        assertEquals(1, summary.filledDays, "95/100 通过守卫 filledDays=1")
+        assertTrue(summary.deferredDates.isEmpty(), "无 defer")
+        assertEquals(1, compute.computeCalls, "compute 1 次")
+    }
+
+    @Test
+    fun `testReplay guardExpected100WithBars85BlocksAndDefers`() {
+        // given: 当日已上市 100 只，仅 85 只当日有柱 → 覆盖率 85% <90% 拦截 + defer
+        Mockito.`when`(calendarRepo.findByTradeDateBetweenOrderByTradeDateAsc(day1, day1)).thenReturn(calendar(day1))
+        Mockito.`when`(stockHistoryRepo.findFirstBarDatesByCode()).thenReturn((1..100).map { FirstBar("000$it", day1) })
+        Mockito.`when`(stockHistoryRepo.findReplayBars(anyDate(), anyDate())).thenReturn((1..85).map { replayBar("000$it", day1) })
+
+        // when
+        val summary = replay.replay(day1, day1)
+
+        // then: 85/100 <90% 拦截 + 前缀截止，不硬算
+        assertEquals(0, summary.filledDays, "85/100 拦下 filledDays=0")
+        assertEquals(listOf(day1), summary.deferredDates, "deferred=[day1]")
+        assertEquals(0, compute.computeCalls, "守卫'不硬算'语义")
+    }
+
+    @Test
+    fun `testReplay guardExpectedZeroNoListedSkipsGuardNoDivZero`() {
+        // given: 当日无已上市票（findFirstBarDatesByCode 空）→ expected=0，不拦不除零（未上市≠缺数据）
+        Mockito.`when`(calendarRepo.findByTradeDateBetweenOrderByTradeDateAsc(day1, day1)).thenReturn(calendar(day1))
+        compute.results.add(SentimentComputeResult(sentimentRow(day1), emptyList(), emptyList()))
+
+        // when
+        val summary = replay.replay(day1, day1)
+
+        // then: 守卫跳过直接算（expected=0 防除零）
+        assertEquals(1, summary.filledDays, "expected=0 不拦 filledDays=1")
+        assertTrue(summary.deferredDates.isEmpty(), "无 defer")
+        assertEquals(1, compute.computeCalls, "compute 1 次")
+    }
+
+    @Test
+    fun `testReplay guardEarlyDateDenominatorGrowsNoFalseBlock`() {
+        // given: 2021-10-08 回放；当前宇宙 100 只中仅 60 只该日已上市（firstBar ≤ 当日），40 只 2024 才上市；
+        // 当日 60 只全部有柱 → 新分母=当日已上市 60，60/60=100% 通过（旧固定分母 60/100=60% <90% 会误拦全部历史日）
+        val early = LocalDate.of(2021, 10, 8)
+        val late = LocalDate.of(2024, 6, 3)
+        Mockito.`when`(calendarRepo.findByTradeDateBetweenOrderByTradeDateAsc(early, early)).thenReturn(calendar(early))
+        Mockito.`when`(stockHistoryRepo.findFirstBarDatesByCode()).thenReturn(
+            (1..60).map { FirstBar("600$it", early) } +
+                (1..40).map { FirstBar("601$it", late) },
+        )
+        Mockito.`when`(stockHistoryRepo.findReplayBars(anyDate(), anyDate())).thenReturn((1..60).map { replayBar("600$it", early) })
+        compute.results.add(SentimentComputeResult(sentimentRow(early), emptyList(), emptyList()))
+
+        // when
+        val summary = replay.replay(early, early)
+
+        // then: 早期日期不再误拦（分母随上市进度增长，未上市≠缺数据）
+        assertEquals(1, summary.filledDays, "2021-10-08 60/60 通过 filledDays=1")
+        assertTrue(summary.deferredDates.isEmpty(), "早期日期不再被误拦 defer 空")
+        assertEquals(1, compute.computeCalls, "compute 1 次")
     }
 
     // ==================== force=false 续跑幂等 ====================

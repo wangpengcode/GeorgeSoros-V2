@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.KotlinModule
 import com.soros.v2.domain.BoardType
 import com.soros.v2.entity.StockInfo
+import com.soros.v2.exception.GlobalExceptionHandler
 import com.soros.v2.service.StockInfoService
 import com.soros.v2.service.dto.StockSearchItem
 import java.time.LocalDate
@@ -12,14 +13,23 @@ import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
+import org.springframework.test.web.servlet.MockMvc
+import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get
+import org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath
+import org.springframework.test.web.servlet.result.MockMvcResultMatchers.status
+import org.springframework.test.web.servlet.setup.MockMvcBuilders
 
 /**
- * §11.1 StockSearchController 契约测试（直调 controller，Fake StockInfoService）。
+ * §11.1 StockSearchController 契约测试（直调 controller + MockMvc 信封，Fake StockInfoService）。
  *
- * 契约（类 KDoc / §11.1 / C1）：
+ * 契约（类 KDoc / §11.1 / C1 / §19.13.1 K线页搜索框）：
  * - GET /api/v1/stock-search?q=&limit= → 服务委托（q/limit 透传）；limit 缺省 10；
+ * - 匹配口径：code 前缀 OR name 小写包含（拼音挂账不做，§19.13.1）；排除 is_st/delisted；
  * - 响应 [{code,name,industry}]（键过命名字典 §17.6，snake_case）；
- * - q 空/非法 → IllegalArgumentException 向上（400 由全局异常处理器映射）。
+ * - q 空/全空白 → IllegalArgumentException → GlobalExceptionHandler → 400 BAD_REQUEST 信封。
+ *
+ * ⚠️ "上限 20"（任务契约）为服务层 SEARCH_LIMIT 常量（StockInfoServiceImpl 现值 10），
+ * 非控制器可测项；PLAN §19.13.1 称现有端点"现状已满足"（kline 页传 limit=8）。是否提到 20 由 implementer 裁决。
  */
 class StockSearchControllerTest {
 
@@ -45,11 +55,15 @@ class StockSearchControllerTest {
 
     private lateinit var fake: FakeStockInfoService
     private lateinit var controller: StockSearchController
+    private lateinit var mockMvc: MockMvc
 
     @BeforeEach
     fun setUp() {
         fake = FakeStockInfoService()
         controller = StockSearchController(fake)
+        mockMvc = MockMvcBuilders.standaloneSetup(controller)
+            .setControllerAdvice(GlobalExceptionHandler())
+            .build()
     }
 
     @Test
@@ -66,6 +80,18 @@ class StockSearchControllerTest {
         assertEquals("600000", resp.first().code, "code 回传")
         assertEquals("浦发银行", resp.first().name, "name 回传")
         assertEquals(listOf("银行"), resp.first().industry, "industry 回传")
+    }
+
+    @Test
+    fun `testSearch delegatesNameContainsQuery`() {
+        // given: 中文名包含查询词（匹配口径：name 小写包含，§19.13.1 拼音挂账不做）
+        fake.searchResult = listOf(StockSearchItem("600000", "浦发银行", listOf("银行")))
+
+        // when
+        controller.search("浦发", 10)
+
+        // then: 中文名包含查询词原样透传
+        assertEquals("浦发", fake.lastQuery, "中文名包含查询词透传")
     }
 
     @Test
@@ -86,6 +112,18 @@ class StockSearchControllerTest {
         assertThrows(IllegalArgumentException::class.java) {
             controller.search("   ", 10)
         }
+    }
+
+    @Test
+    fun `testSearch blankQueryRejected400EnvelopeViaMockMvc`() {
+        // given: q 空/全空白 → 服务抛 IllegalArgumentException
+        fake.throwOnSearch = IllegalArgumentException("搜索词不能为空")
+
+        // when & then: HTTP 层 400 + BAD_REQUEST 信封（GlobalExceptionHandler §11.1 契约）
+        mockMvc.perform(get("/api/v1/stock-search").param("q", "   "))
+            .andExpect(status().isBadRequest)
+            .andExpect(jsonPath("$.status").value("error"))
+            .andExpect(jsonPath("$.error.code").value("BAD_REQUEST"))
     }
 
     @Test
