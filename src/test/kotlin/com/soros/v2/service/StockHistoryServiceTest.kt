@@ -22,6 +22,8 @@ import com.soros.v2.util.CollectMetrics
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import java.math.BigDecimal
 import java.time.LocalDate
+import java.sql.Date
+import javax.sql.DataSource
 import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
@@ -32,6 +34,7 @@ import org.junit.jupiter.api.Test
 import org.mockito.Mockito
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase
+import org.springframework.jdbc.core.JdbcTemplate
 import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection
 import org.testcontainers.containers.PostgreSQLContainer
@@ -76,6 +79,9 @@ class StockHistoryServiceTest {
     @Autowired
     private lateinit var indexHistoryRepository: com.soros.v2.repository.IndexHistoryRepository
 
+    @Autowired
+    private lateinit var dataSource: DataSource
+
     /** Fake Python 客户端：可设定 fetchDailyBarsBatch 响应并计数（规避 Mockito 对 suspend 方法 Continuation 参数匹配问题） */
     private class FakePythonClient : PythonDataServiceClient {
         var fetchDailyBarsBatchResponse: DailyBarsBatchResponse = DailyBarsBatchResponse("ok")
@@ -103,7 +109,7 @@ class StockHistoryServiceTest {
         return StockHistoryServiceImpl(
             historyRepository, dataQualityLogRepository, calendarService,
             pythonClient, com.soros.v2.config.DataCollectionProperties(), stockInfoService, metrics,
-            indexHistoryRepository,
+            indexHistoryRepository, JdbcTemplate(dataSource),
         )
     }
 
@@ -159,6 +165,70 @@ class StockHistoryServiceTest {
         // given: 空表
         // when & then
         assertNull(service().findMaxDate("600000"), "空表返回 null（采集初始态）")
+    }
+
+    // ==================== 水位线契约（2026-10-05 用户定稿：导入后必更新 input_data_last_day） ====================
+
+    private fun seedStockInfo(code: String, watermark: LocalDate?) {
+        JdbcTemplate(dataSource).update(
+            "INSERT INTO stock_info (code, name, board, is_st, delisted, input_data_last_day) VALUES (?, ?, 'MAIN', false, false, ?)",
+            code, "测试\$code", watermark?.let { Date.valueOf(it) },
+        )
+    }
+
+    private fun readWatermark(code: String): LocalDate? =
+        JdbcTemplate(dataSource).queryForObject(
+            "SELECT input_data_last_day FROM stock_info WHERE code = ?",
+            Date::class.java, code,
+        )?.toLocalDate()
+
+    @Test
+    fun `testSaveBatch successAdvancesInputWatermark`() {
+        // given: stock_info 水位线=2026-09-26（落后）；bars 至 2026-09-29
+        seedStockInfo("600000", LocalDate.of(2026, 9, 26))
+        val bars = listOf(
+            bar(LocalDate.of(2026, 9, 28), BigDecimal("13.2000"), BigDecimal("9.98")),
+            bar(LocalDate.of(2026, 9, 29), BigDecimal("14.5000"), BigDecimal("9.98")),
+        )
+
+        // when
+        runBlocking { service().saveBatch("600000", bars, DataSourceType.BAOSTOCK, Board.MAIN) }
+
+        // then: 水位线推进到导入最大交易日（用户口径：每一个股票导入数据后都要做更新操作）
+        assertEquals(LocalDate.of(2026, 9, 29), readWatermark("600000"), "导入成功 → 水位线=max(bar 交易日)")
+    }
+
+    @Test
+    fun `testSaveBatch watermarkNeverRollsBack`() {
+        // given: 水位线=2026-09-30（超前于本批最大交易日 9-29）
+        seedStockInfo("600000", LocalDate.of(2026, 9, 30))
+        val bars = listOf(bar(LocalDate.of(2026, 9, 28), BigDecimal("13.2000"), BigDecimal("9.98")))
+
+        // when
+        runBlocking { service().saveBatch("600000", bars, DataSourceType.BAOSTOCK, Board.MAIN) }
+
+        // then: 单调不减防御——超前水位线不得被回拨
+        assertEquals(LocalDate.of(2026, 9, 30), readWatermark("600000"), "水位线禁止回拨（单调不减）")
+    }
+
+    @Test
+    fun `testSaveBatch allRejectedDoesNotAdvanceWatermark`() {
+        // given: 水位线=2026-09-26；全部行非法（low > high）零入库
+        seedStockInfo("600000", LocalDate.of(2026, 9, 26))
+        val invalid = DailyBar(
+            date = LocalDate.of(2026, 9, 28), code = "600000",
+            open = BigDecimal("10.0000"), high = BigDecimal("9.0000"),
+            low = BigDecimal("11.0000"), close = BigDecimal("10.0000"),
+            volume = 1_000_000L, amount = BigDecimal("10000000.0000"),
+            changePercent = BigDecimal("0.00"), turnover = BigDecimal("1.0000"), prevClose = null,
+        )
+
+        // when
+        val result = runBlocking { service().saveBatch("600000", listOf(invalid), DataSourceType.BAOSTOCK, Board.MAIN) }
+
+        // then: 零行落库 → 水位线不动（数据没落库就不能声称已导入）
+        assertEquals(1, result.invalidRowsSkipped, "非法行跳过")
+        assertEquals(LocalDate.of(2026, 9, 26), readWatermark("600000"), "零入库 → 水位线不推进")
     }
 
     // ==================== 正常流程（骨架，RED：契约） ====================

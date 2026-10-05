@@ -85,6 +85,14 @@ class StockInfo(
     @Column(name = "adj_processed_until")
     var adjProcessedUntil: LocalDate? = null,
 
+    /**
+     * 数据导入水位（2026-10-05 用户定稿）：该票数据已核对/导入到的最近交易日。
+     * 判定口径：= 最新开市日 → 跳过导入；落后 → 从次日断点续传导入。
+     * 成功落库或整段验证空后推进到段终点（单调不减防御，禁止回拨）；NULL=从未导入。
+     */
+    @Column(name = "input_data_last_day")
+    var inputDataLastDay: LocalDate? = null,
+
     /** 行更新时间 */
     @UpdateTimestamp
     @Column(name = "updated_at")

@@ -285,6 +285,7 @@ class BackfillJob(
             }
             // HTTP 200 且不在 failed[] 且 0 行 → verified-empty（仅记录，不拉重复）
             gapCheckRepository?.upsertVerifiedEmpty(seg.code, seg.from, seg.to, 0)
+            advanceInputWatermark(seg.code, seg.to)
             logger.warn("[backfill] 段验证空 code={} from={} to={}", seg.code, seg.from, seg.to)
             metrics.incrementFailedCodes()
             return ChunkResult(0, 1, 0)
@@ -298,8 +299,23 @@ class BackfillJob(
         }
         val source = DataSourceType.fromPython(result.source)
         copyMergeBatches(valid, source)
+        advanceInputWatermark(seg.code, seg.to)
         metrics.incrementRows(source)
         return ChunkResult(1, 0, valid.size.toLong())
+    }
+
+    /**
+     * 水位线推进（2026-10-05 用户定稿：每票导入后更新 stock_info.input_data_last_day）。
+     * 时序铁律：只在数据落库（copyMergeBatches）或整段验证空（upsertVerifiedEmpty）**之后**调用——
+     * 崩在两者之间 = 水位线落后 → 重拉一次（幂等安全）；反向定序 = 数据缺失且被跳过（事故）。
+     * 单调不减防御（禁止回拨）：仅当现值更旧或为 NULL 时推进。
+     */
+    private fun advanceInputWatermark(code: String, day: LocalDate) {
+        jdbcTemplate.update(
+            "UPDATE stock_info SET input_data_last_day = ? " +
+                "WHERE code = ? AND (input_data_last_day IS NULL OR input_data_last_day < ?)",
+            day, code, day,
+        )
     }
 
     /** 段批量拉取（items 模式：逐段独立窗口；重试语义与 legacy codes 路径一致） */
@@ -418,6 +434,7 @@ class BackfillJob(
         }
         val source = DataSourceType.fromPython(result.source)
         copyMergeBatches(valid, source)
+        advanceInputWatermark(stock.code, valid.maxOf { it.date })
         metrics.incrementRows(source)
         return ChunkResult(1, 0, valid.size.toLong())
     }

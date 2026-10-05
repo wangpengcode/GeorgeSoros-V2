@@ -52,8 +52,9 @@ import org.testcontainers.junit.jupiter.Testcontainers
  * 31. aggregateCoverageByCodes：造码造行 → 聚合 min/max/n_rows 正确；无行 code 不在结果集；
  * 32. findMissingDateIslands：calendar 有交易日 A/B/C，stock_history 缺 B → 输出 [B,B]；
  *     缺 B/C 连续 → [B,C] 单岛；
- * 33. 端到端（Fake Python + 真实 DB）：BackfillJob.run 全齐票零请求、头/尾/洞票按段拉取、
- *     gap_check 落库、MID 排除生效。
+ * 33. 端到端（Fake Python + 真实 DB）：2026-10-05 用户定稿水位线语义——input_data_last_day
+ *     判定导入（=最新开市日跳过）、断点续传从水位线后首开市日起拉、板块优先级
+ *     688→300→600 排序、每票导入后（含验证空）水位线更新、gap_check 落库。
  *
  * 红线（预期红）：BackfillPlanService / StockHistoryGapCheckRepository / BackfillClassifier /
  * StockHistoryRepository 新查询 / BackfillJob 新构造器实现后才可编译与运行。
@@ -117,14 +118,21 @@ class BackfillRerunPlanIntegrationTest {
         dates.forEach { jdbc.update("INSERT INTO trading_calendar (trade_date) VALUES (?)", Date.valueOf(it)) }
     }
 
-    private fun seedInfo(code: String, board: String = "MAIN") {
+    private fun seedInfo(code: String, board: String = "MAIN", watermark: LocalDate? = null) {
         jdbc.update(
-            "INSERT INTO stock_info (code, name, market, board, is_st, delisted, ipo_date) VALUES (?, ?, 'SH', ?, false, false, NULL)",
+            "INSERT INTO stock_info (code, name, market, board, is_st, delisted, ipo_date, input_data_last_day) VALUES (?, ?, 'SH', ?, false, false, NULL, ?)",
             code,
             "测试$code",
             board,
+            watermark?.let { Date.valueOf(it) },
         )
     }
+
+    private fun readWatermark(code: String): LocalDate? =
+        jdbc.queryForObject(
+            "SELECT input_data_last_day FROM stock_info WHERE code = ?",
+            Date::class.java, code,
+        )?.toLocalDate()
 
     private fun seedBar(code: String, tradeDate: LocalDate, changePct: String = "1.00") {
         jdbc.update(
@@ -295,17 +303,21 @@ class BackfillRerunPlanIntegrationTest {
     // ==================== 33. 端到端：BackfillJob.run ====================
 
     @Test
-    fun `testEndToEnd completeZeroFetch fullWindowOneSegmentPerCode gapCheckCoveredSkipped`() {
-        // given: 日历 4 日 + 5 只（全齐/头缺/尾缺/缺失全被台账覆盖/无数据）
-        // 2026-10-05 整窗拉齐语义：部分缺失票产出恰一个整窗段；台账覆盖的缺失日计入已覆盖
+    fun `testEndToEnd watermarkDrivesImport boardPriorityOrdering watermarkUpdatedPerStock`() {
+        // given: 日历 4 日 + 6 只（水位线判定：齐/落后/空/洞）
+        // 2026-10-05 用户定稿：input_data_last_day=最新开市日 → 跳过；落后 → 从次日断点续传；
+        // 顺序 = 板块优先级 688→300→600；每票导入后（含验证空）水位线必更新
         seedCalendar(d1, d2, d3, d4)
-        listOf("600001", "600002", "600003", "600004", "600005").forEach { seedInfo(it) }
-        seedBar("600001", d1); seedBar("600001", d2); seedBar("600001", d3); seedBar("600001", d4) // 全齐
-        seedBar("600002", d3); seedBar("600002", d4)                                             // 缺 d1,d2（2 天）
-        seedBar("600003", d1); seedBar("600003", d2); seedBar("600003", d3)                       // 缺 d4（1 天）
-        seedBar("600004", d1); seedBar("600004", d2); seedBar("600004", d4)                       // 缺 d3，台账已覆盖
-        seedGapCheck("600004", d3, d3)                                                             // 覆盖 1 天 → 未覆盖缺失=0
-        // 600005 无数据 → NO_DATA 整窗 [d1,d4]
+        seedInfo("688001", "STAR")                                        // 科创板：从未导入 → 整窗 NO_DATA
+        seedInfo("300001", "GEM")                                         // 创业板：从未导入 → 整窗 NO_DATA
+        seedInfo("600001", "MAIN", watermark = d4)                        // 全齐且水位线=最新 → 零请求
+        seedBar("600001", d1); seedBar("600001", d2); seedBar("600001", d3); seedBar("600001", d4)
+        seedInfo("600002", "MAIN", watermark = d2)                        // 水位线=d2 → 断点续传段 [d3,d4]
+        seedBar("600002", d1); seedBar("600002", d2)
+        seedInfo("600003", "MAIN", watermark = d3)                        // 水位线=d3 → 段 [d4,d4]
+        seedBar("600003", d1); seedBar("600003", d2); seedBar("600003", d3)
+        seedInfo("600004", "MAIN", watermark = d4)                        // 水位线=最新但中段缺 d3 → 跳过（洞归检查兜底）
+        seedBar("600004", d1); seedBar("600004", d2); seedBar("600004", d4)
 
         val python = FakePythonClient(fetchable = setOf("600002", "600003"))
         val notifier = Mockito.mock(DingTalkNotifier::class.java)
@@ -332,47 +344,59 @@ class BackfillRerunPlanIntegrationTest {
         // when
         runBlocking { job.run(d1, d4) { } }
 
-        // then ①: 全齐票 600001 与台账全覆盖票 600004 零请求；缺失票各恰一个整窗段
-        val fetched = python.fetchedItems
+        // then ①: 请求面——只有水位线落后的票被拉；顺序 = 688→300→600（板块优先级，用户定稿）
+        val fetchedCodes = python.fetchedItems.map { it.code }
         assertEquals(
-            setOf("600002", "600003", "600005"),
-            fetched.map { it.code }.toSet(),
-            "全齐/台账全覆盖票不得进入请求（铁律）",
+            listOf("688001", "300001", "600002", "600003"),
+            fetchedCodes,
+            "板块优先级排序 + 水位线判定（齐/超前票零请求铁律）",
         )
-        val byCode = fetched.associateBy { it.code }
-        assertEquals(d1.toString() to d4.toString(), byCode["600002"]!!.startDate to byCode["600002"]!!.endDate, "部分缺失 → 整窗段 [d1,d4]")
-        assertEquals(1, fetched.count { it.code == "600002" }, "每票恰一段（不做洞级拆分）")
-        assertEquals(d1.toString() to d4.toString(), byCode["600003"]!!.startDate to byCode["600003"]!!.endDate, "尾缺 → 整窗段 [d1,d4]")
-        assertEquals(d1.toString() to d4.toString(), byCode["600005"]!!.startDate to byCode["600005"]!!.endDate, "无数据整窗 [d1,d4]")
+        val byCode = python.fetchedItems.associateBy { it.code }
+        assertEquals(
+            d1.toString() to d4.toString(),
+            byCode["688001"]!!.startDate to byCode["688001"]!!.endDate,
+            "从未导入 → 整窗段 [d1,d4]",
+        )
+        assertEquals(
+            d3.toString() to d4.toString(),
+            byCode["600002"]!!.startDate to byCode["600002"]!!.endDate,
+            "断点续传：水位线 d2 → 段起点=后一开市日 d3（不重拉已有区间）",
+        )
+        assertEquals(
+            d4.toString() to d4.toString(),
+            byCode["600003"]!!.startDate to byCode["600003"]!!.endDate,
+            "水位线 d3 → 只拉 d4",
+        )
 
-        // then ②: gap_check 落库（600005 HTTP200+0 行 → rows_returned=0）；600004 预置台账行保留
-        val recorded = jdbc.queryForMap(
-            "SELECT code, seg_from, seg_to, rows_returned FROM stock_history_gap_check WHERE code = '600005'",
-        )
-        assertEquals(Date.valueOf(d1), recorded["seg_from"], "verified-empty seg_from=d1")
-        assertEquals(Date.valueOf(d4), recorded["seg_to"], "verified-empty seg_to=d4")
-        assertEquals(0, (recorded["rows_returned"] as Number).toInt(), "verified-empty rows_returned=0")
-        val excludedStill = jdbc.queryForObject(
-            "SELECT count(*) FROM stock_history_gap_check WHERE code = '600004' AND seg_from = ? AND seg_to = ?",
-            Long::class.java,
-            Date.valueOf(d3),
-            Date.valueOf(d3),
-        )
-        assertEquals(1L, excludedStill, "台账覆盖票零请求，预置 gap_check 行保留")
+        // then ②: 水位线更新——拉到数的/验证空的/原本就齐的全部推进到 d4（每票导入后必更新）
+        assertEquals(d4, readWatermark("688001"), "验证空票水位线推进到段终点（下轮零请求）")
+        assertEquals(d4, readWatermark("300001"), "验证空票水位线推进到段终点")
+        assertEquals(d4, readWatermark("600002"), "导入成功票水位线推进")
+        assertEquals(d4, readWatermark("600003"), "导入成功票水位线推进")
+        assertEquals(d4, readWatermark("600001"), "原齐票水位线不变（=d4）")
+        assertEquals(d4, readWatermark("600004"), "跳过票水位线不变（=d4，中段洞由检查兜底）")
 
-        // then ③: 缺失日已补齐落库
-        val headFilled = jdbc.queryForObject(
+        // then ③: gap_check 落库（验证空票 HTTP200+0 行 → rows_returned=0）
+        for (code in listOf("688001", "300001")) {
+            val recorded = jdbc.queryForMap(
+                "SELECT seg_from, seg_to, rows_returned FROM stock_history_gap_check WHERE code = ?",
+                code,
+            )
+            assertEquals(Date.valueOf(d1), recorded["seg_from"], "$code verified-empty seg_from=d1")
+            assertEquals(Date.valueOf(d4), recorded["seg_to"], "$code verified-empty seg_to=d4")
+            assertEquals(0, (recorded["rows_returned"] as Number).toInt(), "$code verified-empty rows_returned=0")
+        }
+
+        // then ④: 缺失日落库
+        val filled600002 = jdbc.queryForObject(
             "SELECT count(*) FROM stock_history WHERE code = '600002' AND trade_date BETWEEN ? AND ?",
-            Long::class.java,
-            Date.valueOf(d1),
-            Date.valueOf(d2),
+            Long::class.java, Date.valueOf(d3), Date.valueOf(d4),
         )
-        assertEquals(2L, headFilled, "600002 缺失日 [d1,d2] 已补齐")
-        val tailFilled = jdbc.queryForObject(
+        assertEquals(2L, filled600002, "600002 断点续传补齐 [d3,d4]")
+        val filled600003 = jdbc.queryForObject(
             "SELECT count(*) FROM stock_history WHERE code = '600003' AND trade_date = ?",
-            Long::class.java,
-            Date.valueOf(d4),
+            Long::class.java, Date.valueOf(d4),
         )
-        assertEquals(1L, tailFilled, "600003 缺失日 [d4] 已补齐")
+        assertEquals(1L, filled600003, "600003 补齐 [d4]")
     }
 }

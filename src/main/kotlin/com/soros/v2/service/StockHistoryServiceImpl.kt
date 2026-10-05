@@ -22,6 +22,7 @@ import com.soros.v2.util.LimitUpDetector
 import java.math.BigDecimal
 import java.time.LocalDate
 import org.slf4j.LoggerFactory
+import org.springframework.jdbc.core.JdbcTemplate
 import org.springframework.stereotype.Service
 
 /**
@@ -49,6 +50,7 @@ class StockHistoryServiceImpl(
     private val stockInfoService: StockInfoService,
     private val metrics: CollectMetrics,
     private val indexHistoryRepository: IndexHistoryRepository,
+    private val jdbcTemplate: JdbcTemplate,
     private val notifier: DingTalkNotifier? = null,
 ) : StockHistoryService {
 
@@ -56,6 +58,18 @@ class StockHistoryServiceImpl(
 
     override fun findMaxDate(code: String): LocalDate? =
         historyRepository.findMaxTradeDateByCode(code)
+
+    /**
+     * 水位线推进（2026-10-05 用户定稿：每一个股票导入数据后都要更新 stock_info.input_data_last_day）。
+     * 单调不减防御（禁止回拨）：仅当现值更旧或为 NULL 时推进。
+     */
+    private fun advanceInputWatermark(code: String, day: LocalDate) {
+        jdbcTemplate.update(
+            "UPDATE stock_info SET input_data_last_day = ? " +
+                "WHERE code = ? AND (input_data_last_day IS NULL OR input_data_last_day < ?)",
+            day, code, day,
+        )
+    }
 
     override suspend fun saveBatch(
         code: String,
@@ -95,7 +109,12 @@ class StockHistoryServiceImpl(
         }
 
         val written = deriveAndPersist(code, actualBars, source, board)
-        if (written > 0) metrics.incrementRows(source)
+        if (written > 0) {
+            metrics.incrementRows(source)
+            // 水位线推进（2026-10-05 用户定稿）：增量导入成功即更新 input_data_last_day，
+            // 否则回填计划的水位线判定永远滞后一天 → 每轮重复拉尾巴（穿透发现 #4 必修项）
+            advanceInputWatermark(code, actualBars.maxOf { it.date })
+        }
         return SaveBatchResult(code, written, drift != null, refetched, invalidSkipped)
     }
 

@@ -1,6 +1,5 @@
 package com.soros.v2.service.backfill
 
-import com.soros.v2.repository.StockHistoryGapCheckRepository
 import com.soros.v2.repository.StockHistoryRepository
 import com.soros.v2.repository.StockInfoRepository
 import com.soros.v2.service.TradingCalendarService
@@ -12,15 +11,15 @@ import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
 
 /**
- * 回填重跑计划实现（库内驱动，零外部请求；2026-10-05 语义重写：整窗拉齐，不做洞级拆分）：
+ * 回填重跑计划实现（库内驱动，零外部请求；2026-10-05 用户定稿：水位线断点续传 + 板块优先级）：
  * 1. 防御性 ensureLoaded()（日历是计划的硬依赖，失败 fail-open 用库内日历继续）；
- * 2. stock_info 全量有效股票清单（非 ST/非退市，ST 隔离铁律）→ 每票库内覆盖聚合；
+ * 2. stock_info 全量有效股票清单（非 ST/非退市，ST 隔离铁律）→ 每票库内覆盖聚合（仅供 reason 判定）；
  * 3. 期望窗口计算（起点=max(from, ipo) 吸附首个开市日，终点吸附 ≤to 最后开市日）；
- * 4. 单票判定：未覆盖缺失 = 窗口开市日 − 库内行数 − gap_check 台账覆盖天数；
- *    = 0 → 跳过（全齐或缺失日全部已验证停牌）；> 0 → **一个整窗段**（每票成本=一次外部链，与洞数无关）；
- * 5. 排序（stock_info 驱动，用户口径「先看 stock_info 决定哪些优先拉」）：
- *    有部分数据的票优先（大概率能落库真数据）→ 无数据票垫底；组内按 code 升序。
- * 洞级 islands（findMissingDateIslands）保留供拉齐后检查报告，不再驱动拉取。
+ * 4. 单票判定（BackfillClassifier.classifyStock）：input_data_last_day ≥ expectedEnd → 跳过；
+ *    否则恰一段，起点=水位线后首个开市日（断点续传），水位线为空整窗起拉；
+ * 5. 排序（用户定稿「688 300 先导入，然后 600 000」）：板块组 688→300→600→000→其他，
+ *    组内按 code 升序。
+ * gap_check 台账由 Job 落库（验证空记录），不再参与计划判定；islands 查询保留供拉齐后检查报告。
  */
 @Service
 class BackfillPlanServiceImpl(
@@ -28,7 +27,6 @@ class BackfillPlanServiceImpl(
     private val stockHistoryRepository: StockHistoryRepository,
     private val calendarService: TradingCalendarService,
     private val tradingDayLookup: TradingDayLookup,
-    private val gapCheckRepository: StockHistoryGapCheckRepository,
 ) : BackfillPlanService {
 
     private val logger = LoggerFactory.getLogger(BackfillPlanServiceImpl::class.java)
@@ -42,11 +40,8 @@ class BackfillPlanServiceImpl(
 
         val coverageByCode = stockHistoryRepository.aggregateCoverageByCodes(stocks.map { it.code })
             .associateBy { it.code }
-        val coveredDaysByCode = gapCheckRepository.coveredTradingDaysByCode()
-            .associate { it.code to it.coveredDays }
 
-        val dataSegments = mutableListOf<FetchSegment>()   // 有部分数据的缺失票（优先）
-        val noDataSegments = mutableListOf<FetchSegment>() // 无数据票（垫底）
+        val segments = mutableListOf<FetchSegment>()
         var completeCodes = 0
         var zeroWindowCodes = 0
         for (stock in stocks) {
@@ -68,25 +63,23 @@ class BackfillPlanServiceImpl(
 
             val stockSegments = BackfillClassifier.classifyStock(
                 code = stock.code,
+                watermark = stock.inputDataLastDay,
                 span = span,
                 expectedStart = expectedStart,
                 expectedEnd = expectedEnd,
                 cal = tradingDayLookup,
-                verifiedCoveredDays = coveredDaysByCode[stock.code] ?: 0L,
             )
             if (stockSegments.isEmpty()) {
                 completeCodes++
-            } else if (span.minD != null) {
-                dataSegments += stockSegments
             } else {
-                noDataSegments += stockSegments
+                segments += stockSegments
             }
         }
-        // stock_info 驱动优先级：有部分数据的缺失票 → 无数据票；组内 code 升序
-        val segments = dataSegments.sortedBy { it.code } + noDataSegments.sortedBy { it.code }
+        // 板块优先级：688→300→600→000→其他，组内 code 升序（用户定稿导入顺序）
+        val ordered = segments.sortedWith(compareBy({ BackfillClassifier.boardGroup(it.code) }, { it.code }))
         logger.info(
             "[backfill-plan] 构建完成：from={} to={} codes={} complete={} zeroWindow={} segments={}",
-            from, to, stocks.size, completeCodes, zeroWindowCodes, segments.size,
+            from, to, stocks.size, completeCodes, zeroWindowCodes, ordered.size,
         )
         return RerunPlan(
             from = from,
@@ -94,7 +87,7 @@ class BackfillPlanServiceImpl(
             totalCodes = stocks.size,
             completeCodes = completeCodes,
             zeroWindowCodes = zeroWindowCodes,
-            segments = segments,
+            segments = ordered,
         )
     }
 

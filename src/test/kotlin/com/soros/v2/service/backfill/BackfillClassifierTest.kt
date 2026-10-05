@@ -149,7 +149,7 @@ class BackfillClassifierTest {
         )
     }
 
-    // ==================== classifyStock — 整窗拉齐语义（2026-10-05） ====================
+    // ==================== classifyStock — 水位线断点续传语义（2026-10-05 用户定稿） ====================
 
     /** 2021-11 连续交易周窗口（11-01 周一 ~ 11-30 周二；22 个开市日） */
     private fun novemberCal() = FakeTradingDayLookup(
@@ -160,122 +160,108 @@ class BackfillClassifierTest {
     private val novEnd = LocalDate.of(2021, 11, 30)
 
     @Test
-    fun `testClassifyStock allCompleteProducesZeroSegments`() {
-        // given: 全齐票——nRows == 窗口开市日数
+    fun `testClassifyStock watermarkAtExpectedEndSkips`() {
+        // given: 水位线已核对到最新开市日（导入时间=最新交易日）→ 跳过
         val cal = novemberCal()
-        val openDays = cal.countOpenDaysInclusive(novStart, novEnd)
-        val span = StockSpan("600000", novStart, novEnd, openDays)
+        val span = StockSpan("600000", novStart, novEnd, 10L)
 
-        // when
         val segments = BackfillClassifier.classifyStock(
-            code = "600000", span = span,
-            expectedStart = novStart, expectedEnd = novEnd,
-            cal = cal, verifiedCoveredDays = 0L,
+            code = "600000", watermark = novEnd, span = span,
+            expectedStart = novStart, expectedEnd = novEnd, cal = cal,
         )
 
-        // then: 零 segment（全齐票零外部请求铁律）
-        assertTrue(segments.isEmpty(), "全齐票必须零 segment（零外部请求）")
+        assertTrue(segments.isEmpty(), "input_data_last_day=最新交易日 → 零 segment（零外部请求铁律）")
     }
 
     @Test
-    fun `testClassifyStock missingDaysAllCoveredByGapCheckProducesZeroSegments`() {
-        // given: 库内 18 行 + 台账已验证空 4 天 → 未覆盖缺失 = 22-18-4 = 0 → 跳过
+    fun `testClassifyStock watermarkAfterExpectedEndSkipsDefensive`() {
+        // given: 水位线超前于窗口终点（to 参数回拨等）→ 防御性跳过，绝不倒拉
         val cal = novemberCal()
-        val span = StockSpan("600000", novStart, novEnd, 18L)
+        val span = StockSpan("600000", novStart, novEnd, 10L)
 
         val segments = BackfillClassifier.classifyStock(
-            code = "600000", span = span,
-            expectedStart = novStart, expectedEnd = novEnd,
-            cal = cal, verifiedCoveredDays = 4L,
+            code = "600000", watermark = LocalDate.of(2021, 12, 1), span = span,
+            expectedStart = novStart, expectedEnd = novEnd, cal = cal,
         )
 
-        assertTrue(segments.isEmpty(), "缺失日全部已验证空（停牌）→ 零 segment，下轮不再空拉")
+        assertTrue(segments.isEmpty(), "水位线 > expectedEnd → 零 segment（禁止倒拉）")
     }
 
     @Test
-    fun `testClassifyStock uncoveredMissingProducesSingleFullWindowSegment`() {
-        // given: 部分缺失票（3 个洞未验证）→ 一个整窗段（不做洞级拆分，每票一次外部链）
+    fun `testClassifyStock nullWatermarkFullWindowFromExpectedStart`() {
+        // given: 从未导入（V8 回填后仍无任何行）→ 整窗一段
         val cal = novemberCal()
-        val span = StockSpan("600000", novStart, novEnd, 19L)
+        val span = StockSpan("600000", novStart, novEnd, 5L)
 
         val segments = BackfillClassifier.classifyStock(
-            code = "600000", span = span,
-            expectedStart = novStart, expectedEnd = novEnd,
-            cal = cal, verifiedCoveredDays = 0L,
+            code = "600000", watermark = null, span = span,
+            expectedStart = novStart, expectedEnd = novEnd, cal = cal,
         )
 
-        assertEquals(1, segments.size, "部分缺失 → 恰一个整窗段（洞数与请求数解耦）")
+        assertEquals(1, segments.size, "水位线为空 → 恰一个整窗段")
         assertEquals(novStart, segments.single().from, "整窗段 from=expectedStart")
         assertEquals(novEnd, segments.single().to, "整窗段 to=expectedEnd")
-        assertEquals(SegmentReason.FULL, segments.single().reason, "reason=FULL（整窗拉齐）")
-    }
-
-    @Test
-    fun `testClassifyStock headMissingCoveredOverFullWindowNotMinMax`() {
-        // given: 头缺票——minD 在窗口中段；缺失判定必须覆盖整窗（含头缺日），产出整窗段
-        val cal = novemberCal()
-        val minD = LocalDate.of(2021, 11, 15)
-        val span = StockSpan("600000", minD, novEnd, 12L)
-
-        val segments = BackfillClassifier.classifyStock(
-            code = "600000", span = span,
-            expectedStart = novStart, expectedEnd = novEnd,
-            cal = cal, verifiedCoveredDays = 0L,
-        )
-
-        assertEquals(1, segments.size, "头缺 → 一个整窗段（从 expectedStart 起拉齐）")
-        assertEquals(novStart, segments.single().from, "整窗段 from=expectedStart（不从 minD 起，头缺日一并补）")
         assertEquals(SegmentReason.FULL, segments.single().reason, "reason=FULL")
     }
 
     @Test
-    fun `testClassifyStock noDataProducesSingleNoDataSegment`() {
-        // given: 库内无此码 → 整窗一段 NO_DATA
+    fun `testClassifyStock watermarkMidWindowSegmentStartsNextTradingDay`() {
+        // given: 水位线=2021-11-19（周五）→ 断点续传从下一开市日 2021-11-22（周一）起拉
+        val cal = novemberCal()
+        val span = StockSpan("600000", novStart, LocalDate.of(2021, 11, 19), 15L)
+
+        val segments = BackfillClassifier.classifyStock(
+            code = "600000", watermark = LocalDate.of(2021, 11, 19), span = span,
+            expectedStart = novStart, expectedEnd = novEnd, cal = cal,
+        )
+
+        assertEquals(1, segments.size, "水位线落后 → 恰一段")
+        assertEquals(LocalDate.of(2021, 11, 22), segments.single().from, "段起点=水位线后首个开市日（断点续传，不重拉已有区间）")
+        assertEquals(novEnd, segments.single().to, "段终点=expectedEnd")
+        assertEquals(SegmentReason.FULL, segments.single().reason, "reason=FULL")
+    }
+
+    @Test
+    fun `testClassifyStock watermarkNonTradingDaySnapsForward`() {
+        // given: 水位线=2021-11-20（周六，非交易日）→ 吸附到下一开市日 2021-11-22
+        val cal = novemberCal()
+        val span = StockSpan("600000", novStart, LocalDate.of(2021, 11, 19), 15L)
+
+        val segments = BackfillClassifier.classifyStock(
+            code = "600000", watermark = LocalDate.of(2021, 11, 20), span = span,
+            expectedStart = novStart, expectedEnd = novEnd, cal = cal,
+        )
+
+        assertEquals(LocalDate.of(2021, 11, 22), segments.single().from, "非交易日水位线吸附到下一开市日")
+    }
+
+    @Test
+    fun `testClassifyStock watermarkBeforeExpectedStartClampsToWindowStart`() {
+        // given: 水位线早于窗口起点（defaultStart 前移）→ 从窗口起点起拉，不拉窗口外
+        val cal = novemberCal()
+        val span = StockSpan("600000", novStart, novEnd, 5L)
+
+        val segments = BackfillClassifier.classifyStock(
+            code = "600000", watermark = LocalDate.of(2021, 10, 15), span = span,
+            expectedStart = novStart, expectedEnd = novEnd, cal = cal,
+        )
+
+        assertEquals(novStart, segments.single().from, "段起点钳制到 expectedStart（窗口外不重拉）")
+    }
+
+    @Test
+    fun `testClassifyStock noDataNullWatermarkProducesNoDataSegment`() {
+        // given: 库内无此码且从未导入 → 整窗一段 NO_DATA
         val cal = novemberCal()
         val span = StockSpan("600000", null, null, 0L)
 
         val segments = BackfillClassifier.classifyStock(
-            code = "600000", span = span,
-            expectedStart = novStart, expectedEnd = novEnd,
-            cal = cal, verifiedCoveredDays = 0L,
+            code = "600000", watermark = null, span = span,
+            expectedStart = novStart, expectedEnd = novEnd, cal = cal,
         )
 
         assertEquals(1, segments.size, "无数据 → 一个整窗段")
-        assertEquals(novStart, segments.single().from, "整窗段 from=expectedStart")
-        assertEquals(novEnd, segments.single().to, "整窗段 to=expectedEnd")
         assertEquals(SegmentReason.NO_DATA, segments.single().reason, "reason=NO_DATA")
-    }
-
-    @Test
-    fun `testClassifyStock noDataWholeWindowVerifiedEmptySkips`() {
-        // given: 无数据票整窗已验证空（台账覆盖=开市日数）→ 未覆盖缺失=0 → 跳过
-        val cal = novemberCal()
-        val openDays = cal.countOpenDaysInclusive(novStart, novEnd)
-        val span = StockSpan("600000", null, null, 0L)
-
-        val segments = BackfillClassifier.classifyStock(
-            code = "600000", span = span,
-            expectedStart = novStart, expectedEnd = novEnd,
-            cal = cal, verifiedCoveredDays = openDays,
-        )
-
-        assertTrue(segments.isEmpty(), "整窗已验证空的无数据票 → 零 segment（下轮零请求）")
-    }
-
-    @Test
-    fun `testClassifyStock coveredDaysOvercountClampedDefensive`() {
-        // given: 防御——台账覆盖数异常超限（重复记账/窗口变化）不得产出负缺失而误判全齐以外的行为
-        val cal = novemberCal()
-        val openDays = cal.countOpenDaysInclusive(novStart, novEnd)
-        val span = StockSpan("600000", novStart, novEnd, openDays)
-
-        val segments = BackfillClassifier.classifyStock(
-            code = "600000", span = span,
-            expectedStart = novStart, expectedEnd = novEnd,
-            cal = cal, verifiedCoveredDays = openDays + 100,
-        )
-
-        assertTrue(segments.isEmpty(), "coerceAtLeast(0) 钳制：负缺失按 0 处理 → 零 segment")
     }
 
     @Test
@@ -285,12 +271,48 @@ class BackfillClassifierTest {
         val span = StockSpan("600000", novStart, novEnd, 5L)
 
         val segments = BackfillClassifier.classifyStock(
-            code = "600000", span = span,
-            expectedStart = LocalDate.of(2021, 12, 1), expectedEnd = novEnd,
-            cal = cal, verifiedCoveredDays = 0L,
+            code = "600000", watermark = null, span = span,
+            expectedStart = LocalDate.of(2021, 12, 1), expectedEnd = novEnd, cal = cal,
         )
 
         assertTrue(segments.isEmpty(), "expectedStart > expectedEnd → 零 segment")
+    }
+
+    // ==================== boardGroup — 板块导入优先级（688→300→600→000，用户定稿） ====================
+
+    @Test
+    fun `testBoardGroup starBoardHighestPriority`() {
+        assertEquals(0, BackfillClassifier.boardGroup("688001"), "科创板 688 → 组 0")
+        assertEquals(0, BackfillClassifier.boardGroup("689009"), "科创板 CDR 689 → 组 0")
+    }
+
+    @Test
+    fun `testBoardGroup gemBoardSecondPriority`() {
+        assertEquals(1, BackfillClassifier.boardGroup("300001"), "创业板 300 → 组 1")
+        assertEquals(1, BackfillClassifier.boardGroup("301236"), "创业板注册制 301 → 组 1")
+    }
+
+    @Test
+    fun `testBoardGroup shMainBoardThirdPriority`() {
+        assertEquals(2, BackfillClassifier.boardGroup("600000"), "沪主板 600 → 组 2")
+        assertEquals(2, BackfillClassifier.boardGroup("601398"), "沪主板 601 → 组 2")
+        assertEquals(2, BackfillClassifier.boardGroup("603259"), "沪主板 603 → 组 2")
+        assertEquals(2, BackfillClassifier.boardGroup("605117"), "沪主板 605 → 组 2")
+    }
+
+    @Test
+    fun `testBoardGroup szMainBoardFourthPriority`() {
+        assertEquals(3, BackfillClassifier.boardGroup("000001"), "深主板 000 → 组 3")
+        assertEquals(3, BackfillClassifier.boardGroup("001979"), "深主板 001 → 组 3")
+        assertEquals(3, BackfillClassifier.boardGroup("002415"), "原中小板 002 → 组 3")
+        assertEquals(3, BackfillClassifier.boardGroup("003816"), "深主板 003 → 组 3")
+    }
+
+    @Test
+    fun `testBoardGroup otherPrefixesLast`() {
+        assertEquals(4, BackfillClassifier.boardGroup("430047"), "北交所 430 → 组 4（垫底）")
+        assertEquals(4, BackfillClassifier.boardGroup("833171"), "北交所 83 → 组 4（垫底）")
+        assertEquals(4, BackfillClassifier.boardGroup("900901"), "B 股 900 → 组 4（垫底）")
     }
 
 

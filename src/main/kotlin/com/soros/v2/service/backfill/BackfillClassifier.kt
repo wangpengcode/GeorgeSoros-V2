@@ -29,30 +29,57 @@ object BackfillClassifier {
     }
 
     /**
-     * 单票分类（2026-10-05 计划语义重写：整窗拉齐，不做洞级拆分）。
+     * 单票分类（2026-10-05 用户定稿：stock_info.input_data_last_day 水位线断点续传）。
      *
-     * 未覆盖缺失天数 = 窗口开市日数 − 库内行数 − gap_check 已验证空天数；
-     * = 0 → 全齐（或缺失日全部已验证停牌）→ 零 segment（零外部请求铁律）；
-     * > 0 → 产出**一个整窗段** [expectedStart, expectedEnd]——每票成本=一次外部链，
-     * 与洞数无关（用户口径「一次性把所有股票的数据拉齐然后来检查」；窗内已有行随段
-     * 拉回、merge upsert 幂等无害）。
+     * 判定：水位线（input_data_last_day，= 该票数据已核对到的最近交易日）≥ expectedEnd →
+     * 已核对到最新开市日 → 零 segment（零外部请求铁律）；否则产出**恰一段**：
+     * - 段起点 = 水位线后首个开市日（断点续传，不重拉已核对区间）；
+     *   水位线为空（从未导入）→ 从 expectedStart 整窗起拉；
+     *   水位线早于 expectedStart → 钳制到 expectedStart（窗口外不重拉）；
+     *   水位线为非交易日 → 吸附到下一开市日。
+     * - 段终点 = expectedEnd。
+     * - reason：库内 0 行 → NO_DATA，否则 FULL。
      *
-     * @param verifiedCoveredDays 该票 gap_check 台账覆盖的开市日数（Planner 一次聚合查询提供）
+     * 水位线之前的窗内中段洞不由本判定承载（导入→更新→检查 流程，由拉齐后检查兜底）；
+     * gap_check 台账保留记录供检查报告，不再参与拉取判定。
+     *
+     * @param watermark stock_info.input_data_last_day（null=从未导入）
      */
     fun classifyStock(
         code: String,
+        watermark: LocalDate?,
         span: StockSpan,
         expectedStart: LocalDate,
         expectedEnd: LocalDate,
         cal: TradingDayLookup,
-        verifiedCoveredDays: Long,
     ): List<FetchSegment> {
         if (expectedStart > expectedEnd) return emptyList()
-        val openDays = cal.countOpenDaysInclusive(expectedStart, expectedEnd)
-        val missingUncovered = (openDays - span.nRows - verifiedCoveredDays).coerceAtLeast(0)
-        if (missingUncovered == 0L) return emptyList()
+        if (watermark != null && !watermark.isBefore(expectedEnd)) return emptyList()
+        val snapped = if (watermark == null) {
+            expectedStart
+        } else {
+            cal.firstTradingDayOnOrAfter(watermark.plusDays(1)) ?: return emptyList()
+        }
+        val from = maxOf(snapped, expectedStart)
+        if (from > expectedEnd) return emptyList()
         val reason = if (span.nRows == 0L) SegmentReason.NO_DATA else SegmentReason.FULL
-        return listOf(FetchSegment(code, expectedStart, expectedEnd, reason))
+        return listOf(FetchSegment(code, from, expectedEnd, reason))
+    }
+
+    /**
+     * 板块导入优先级分组（2026-10-05 用户定稿「688 300 先导入，然后 600 000」）：
+     * 0=科创板(688/689) → 1=创业板(300/301) → 2=沪主板(600/601/603/605/606) →
+     * 3=深主板(000/001/002/003，含原中小板) → 4=其他(北交所/B股等，垫底)。
+     */
+    fun boardGroup(code: String): Int {
+        val prefix = if (code.length >= 3) code.substring(0, 3) else code
+        return when (prefix) {
+            "688", "689" -> 0
+            "300", "301" -> 1
+            "600", "601", "603", "605", "606" -> 2
+            "000", "001", "002", "003" -> 3
+            else -> 4
+        }
     }
 
     /**
