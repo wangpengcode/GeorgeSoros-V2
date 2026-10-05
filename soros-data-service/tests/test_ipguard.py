@@ -189,7 +189,8 @@ def test_banned_source_skipped_in_failover(monkeypatch):
     assert any("IP被封禁" in e or "IP" in e for e in errors) or result is not None
 
 
-def test_all_shard_owner_and_fallback_banned_returns_error_text(monkeypatch):
+def test_all_others_banned_assigned_source_serves(monkeypatch):
+    """akshare 封禁：候选排除它，轮转分到健康源正常服务（封禁×轮转组合穿透）。"""
     """akshare 封禁 + baostock 归属 code：归属源 baostock 正常时不报错（分片×封禁组合穿透）。"""
     g = _new_guard()
     monkeypatch.setattr("adapters.base.guard", g)

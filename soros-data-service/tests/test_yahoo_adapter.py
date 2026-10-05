@@ -225,8 +225,11 @@ def test_router_without_yahoo_still_builds():
     assert result["source"] == "baostock"
 
 
-def test_router_with_yahoo_failover_tail():
-    """注册 yahoo → 进入 failover 序尾；全前源空结果时 yahoo 接管并如实归因。"""
+def test_router_with_yahoo_joins_rotation():
+    """注册 yahoo → 加入轮转候选（可选源注册即参与均分流量，非序尾兜底）。
+
+    前 3 票轮转 bs/ak/mx 各空一票后（空票累计），回退轮转必然命中 yahoo 并如实归因。
+    """
     def bars(code, start, end, adjust):
         return []  # baostock/akshare/mootdx 全空
     router = DataRouter([
@@ -235,25 +238,26 @@ def test_router_with_yahoo_failover_tail():
         StubAdapter("mootdx", bars=bars),
         StubAdapter("yahoo", bars=[make_bar("000001")]),
     ])
-    result, errors = router.fetch_daily_bars("000001", "2026-09-30", "2026-09-30", "qfq")
-    assert result["source"] == "yahoo"
+    result = None
+    for _ in range(8):
+        result, errors = router.fetch_daily_bars("000001", "2026-09-30", "2026-09-30", "qfq")
+        if result["count"] == 1:
+            break
+    assert result["source"] == "yahoo", "轮转候选含 yahoo，命中即如实归因"
 
 
-def test_shard_owner_yahoo_first(monkeypatch):
-    """分片三源默认池（baostock,akshare,yahoo）：000002 % 3 == 2 → yahoo 归属优先。"""
-    from config import settings
-    monkeypatch.setattr(settings, "shard_sources", ("baostock", "akshare", "yahoo"))
+def test_yahoo_even_share_in_rotation():
+    """4 源全健康 → 连续 4 票轮转，yahoo 恰好 1 票（均分流量，非取模归属）。"""
     order: list = []
 
     def mk(name):
         def bars(code, start, end, adjust):
             order.append(name)
-            if name == "yahoo":
-                return [make_bar(code)]
-            return []
+            return [make_bar(code)]
         return StubAdapter(name, bars=bars)
 
     router = DataRouter([mk("baostock"), mk("akshare"), mk("mootdx"), mk("yahoo")])
-    result, _ = router.fetch_daily_bars("000002", "2026-09-30", "2026-09-30", "qfq")
-    assert order == ["yahoo"], "yahoo 归属 code 应最先尝试且命中即停"
-    assert result["source"] == "yahoo"
+    for i in range(4):
+        result, _ = router.fetch_daily_bars(f"60000{i}", "2026-09-30", "2026-09-30", "qfq")
+        assert result is not None
+    assert order.count("yahoo") == 1, "yahoo 参与均分轮转（4 票恰 1 票）"

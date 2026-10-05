@@ -73,6 +73,8 @@ class Settings:
     )
 
     # ── 多源分片分压（2026-10-04 设计穿透 92 分；改动 4 扩 tencent）──
+    # [已废弃 2026-10-05 均分流量定稿] 旧 int(code)%N 取模分片已删除（DataRouter 改健康源轮转）。
+    # 字段保留仅为兼容旧环境变量 SOROS_SHARD_SOURCES（不再参与任何路由决策）。
     # 股票日K按 code 稳态分片：int(code) % len(shard_sources) 决定归属源（归属源优先尝试，
     # 故障仍 failover）。只调顺序不改能力；<2 个源视为关闭分压。禁 hash()（PYTHONHASHSEED
     # 随机 → 重启换归属 → 滚动自愈互相覆盖），必须稳定映射。

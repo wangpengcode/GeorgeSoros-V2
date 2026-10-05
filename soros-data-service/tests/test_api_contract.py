@@ -98,7 +98,10 @@ def test_daily_bars_batch_contract_field_keys(make_client):
     assert body["failed"] == []
 
     item = body["results"]["600000"]
-    assert set(item.keys()) == {"source", "count", "data"}
+    assert set(item.keys()) == {"source", "count", "data", "empty_sources"}, (
+        "非空结果 empty_sources=null（K=2 verified-empty 字段位，非空恒 null）"
+    )
+    assert item["empty_sources"] is None, "非空结果不携带空票"
     assert item["source"] == "baostock", "source 记录实际成功源"
     assert item["count"] == 1
     assert len(item["data"]) == 1
@@ -122,6 +125,8 @@ def test_daily_bars_mootdx_source_still_keeps_prev_close_key(make_client):
         StubAdapter("akshare", bars=raise_error(SourceError("down"))),
         StubAdapter("mootdx", bars=lambda *a: [make_bar("600000", include_prev_close=False)]),
     ])
+    router.adapters["baostock"].circuit_breaker = FakeCircuitBreaker(state="open")
+    router.adapters["akshare"].circuit_breaker = FakeCircuitBreaker(state="open")
     client = make_client(router)
     resp = client.post("/api/v1/daily-bars/batch", json={
         "codes": ["600000"], "start_date": "2026-09-25", "end_date": "2026-09-30", "adjust": "qfq",
@@ -156,7 +161,7 @@ def test_daily_bars_batch_mixed_success_failure(make_client):
     assert len(body["failed"]) == 1
     assert set(body["failed"][0].keys()) == {"code", "reason"}
     assert body["failed"][0]["code"] == "000001"
-    assert "All sources failed" in body["failed"][0]["reason"]
+    assert "源故障" in body["failed"][0]["reason"], "reason 归因被分配源（单票单源语义）"
 
 
 def test_daily_bars_invalid_code_422_envelope(make_client):

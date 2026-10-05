@@ -138,6 +138,10 @@ class StockBarsResult(BaseModel):
     source: str
     count: int
     data: list[Bar]
+    # 空占位专用（2026-10-05 均分流量定稿）：本 code 跨轮投过空票的源集合（K=2 verified-empty
+    # 判据——Spring 侧要求 ≥2 个不同源都确认空才可记 verified-empty 并推水位）；
+    # 非空结果恒为 None/缺省。缺省=保守不推水位（Spring 先发兼容）。
+    empty_sources: Optional[list[str]] = None
 
 
 class DailyBarsBatchResponse(BaseModel):
@@ -300,6 +304,12 @@ class ChannelStatus(BaseModel):
     last_failure_at: Optional[str] = None  # 最近一次失败时间（SourceError；null=从未失败）
     banned: Optional[ChannelBanned] = None  # 封禁中：{at, egress_ip}；未封禁 null
     breaker: str                           # closed | open | half_open（CircuitBreaker.state）
+    # 调用计数（2026-10-05 均分流量定稿，进程态重启即清）：total_calls=真实请求发出数
+    #（banned/驱逐/熔断 open 未发请求不计）；empty_results=空结果数（K=2 空票观测）；
+    # failures=SourceError 数（源级驱逐计数同源）
+    total_calls: int = 0
+    empty_results: int = 0
+    failures: int = 0
 
 
 class ChannelsResponse(BaseModel):

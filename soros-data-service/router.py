@@ -32,6 +32,7 @@ from constants import (
     ERROR_PARAM_INVALID,
     ERROR_STOCK_LIST_FAILED,
     ERROR_TRADING_CALENDAR_FAILED,
+    is_index_code,
 )
 from health import get_health
 from models import (
@@ -84,46 +85,6 @@ def create_router(data_router: DataRouter) -> APIRouter:
             ).model_dump(),
         )
 
-    def _is_all_sources_empty(errors: List[str]) -> bool:
-        """errors 是否「证据上可判停牌」→ 停牌占位（results[code] count=0 data=[]，非 failed）。
-
-        语义（重跑计划 verified-empty 铁律 + 2026-10-04 生产事故③）：按证据分类逐源判定，
-        而非要求所有 part 以「空结果」结尾——生产中 mootdx/sse 报「不支持该复权」、yahoo 报
-        429 限流，把真停牌段污染成 failed[]，永远无法记 verified-empty、每次重跑空拉。
-
-        证据分类（_fetch_stock_daily 聚合串 part 级，闭合对齐 base.py 错误分类学）：
-        - 「空结果」结尾 = 源成功查询且确认无数据（正面证据）；
-        - 无证据类（源未对数据存在性下判断，不构成反证）：
-          「不支持该复权」= CapabilityError 结构性无证据；
-          「熔断 open」= SourceUnavailableError 未发起请求；
-          429/Too Many Requests = 限流未下判断；
-        - 其余（SourceError 超时/网络/登录失败、ParameterError）= 真实故障 → 绝不判停牌，归 failed[]。
-        判停牌充要：≥1 个空结果正面证据 且 0 个真实故障。
-        """
-        if not errors:
-            return False
-        reason = errors[0]
-        # _fetch_stock_daily 返回 [reason]：reason 形如 "All sources failed: baostock: 空结果; akshare: 空结果"
-        if not reason.startswith("All sources failed"):
-            return False
-        parts = reason.split(": ", 1)[1].split("; ") if ": " in reason else []
-        if not parts:
-            return False
-
-        def is_real_failure(part: str) -> bool:
-            return not (part.endswith("空结果") or "不支持该复权" in part or "熔断 open" in part
-                        or "429" in part or "Too Many Requests" in part)
-
-        has_empty = any(p.endswith("空结果") for p in parts)
-        return has_empty and not any(is_real_failure(p) for p in parts)
-
-    def _placeholder_source(errors: List[str]) -> str:
-        """全源空结果占位的 source 标签：取 failover 序第一个源名（仅占位，非真实源归因）。"""
-        try:
-            return errors[0].split(": ", 1)[1].split("; ")[0].split(":")[0]
-        except (IndexError, ValueError):
-            return "baostock"
-
     @router.post("/daily-bars/batch", response_model=DailyBarsBatchResponse)
     def daily_bars_batch(req: DailyBarsBatchRequest):
         items_mode = bool(req.items)
@@ -160,44 +121,50 @@ def create_router(data_router: DataRouter) -> APIRouter:
         return _daily_bars_batch_codes(req, data_router)
 
     def _daily_bars_batch_codes(req, data_router):
-        """codes+dates 模式（向后兼容）：原契约行为零变化（多源分组并行 + 串行尾批）。"""
-        # ── 多源分组并行（2026-10-04 设计定稿）──
-        # 设计依据：并行只在源之间，源内节奏不变（防封禁铁律）——不同分片组并行互不干扰；
-        # 组内逐只串行走 failover Router（现有语义），各源限流节奏各自独立（TokenBucket 每源独立）。
-        # 分组归属与串行 failover 路径共用 DataRouter._shard_owner（单点判断，两处归属一致）。
-        # 指数/非纯数字 code 无分片归属 → 归入串行尾批，主线程在所有 worker 完成后逐只拉取。
+        """codes+dates 模式（向后兼容）：每票先轮转分配源，按分配源分组并行 + 串行尾批。
+
+        - 均分流量（2026-10-05 定稿）：每票由 data_router._assign_source 轮转分配一个健康源，
+          分组与执行单点一致（worker 回传 source=钉死该源，不再轮转/不再换源）；
+        - 无健康源 → 直接 failed（零外部请求，本轮放弃等下轮重扫），不进 worker；
+        - 指数 code → 归串行尾批（走指数路径，仅 akshare）；
+        - 分配源空结果 → fetch 层返回 count=0 占位（带 empty_sources）进 results（非 failed）；
+          分配源真实故障 → failed[{code, reason}]（reason 归因被分配源）。
+        """
         groups: Dict[str, List[str]] = {}
         tail: List[str] = []
+        failed: List[dict] = []
         for code in req.codes:
-            owner = data_router._shard_owner(code)
-            if owner is None:
+            if is_index_code(code):
                 tail.append(code)
+                continue
+            adapter = data_router._assign_source(req.adjust, code)
+            if adapter is None:
+                failed.append({"code": code, "reason": "无健康源，本轮不发起外部调用"})
             else:
-                groups.setdefault(owner.source_name, []).append(code)
+                groups.setdefault(adapter.source_name, []).append(code)
 
-        # worker：组内逐只串行调 failover Router（与现串行语义完全一致），各自收集 results/failed
-        # （局部 dict/list 收集再合并，避免跨线程共享可变对象竞态；合并语义与原串行结果一致）
-        def _worker(codes: List[str]) -> Tuple[Dict[str, dict], List[dict]]:
+        # worker：组内逐只串行、钉死分配源（与分组同一次分配结果），各自收集 results/failed
+        # （局部 dict/list 收集再合并，避免跨线程共享可变对象竞态）
+        def _worker(codes: List[str], src: str) -> Tuple[Dict[str, dict], List[dict]]:
             local_results: Dict[str, dict] = {}
             local_failed: List[dict] = []
             for code in codes:
                 result, errors = data_router.fetch_daily_bars(
-                    code, req.start_date, req.end_date, req.adjust
+                    code, req.start_date, req.end_date, req.adjust, source=src
                 )
                 if result is not None:
                     local_results[code] = result
                 else:
                     local_failed.append(
-                        {"code": code, "reason": errors[0] if errors else "All sources failed"}
+                        {"code": code, "reason": errors[0] if errors else f"{src}: 本轮失败"}
                     )
             return local_results, local_failed
 
         results: Dict[str, dict] = {}
-        failed: List[dict] = []
         if groups:
-            # 非空组数 = worker 数：单组（或全部同归属）时 worker 数 1，组内串行天然等价现串行
+            # 非空组数 = worker 数：并行只在源之间，组内串行（防封禁铁律）
             with ThreadPoolExecutor(max_workers=len(groups)) as pool:
-                futures = [pool.submit(_worker, codes) for codes in groups.values()]
+                futures = [pool.submit(_worker, codes, src) for src, codes in groups.items()]
                 for (src, codes), fut in zip(groups.items(), futures):
                     try:
                         r, f = fut.result()
@@ -209,7 +176,7 @@ def create_router(data_router: DataRouter) -> APIRouter:
                     results.update(r)
                     failed.extend(f)
 
-        # 串行尾批：指数等非分片代码，主线程逐只拉取（量小，串行防封禁）
+        # 串行尾批：指数 code，主线程逐只拉取（量小，串行防封禁）
         for code in tail:
             result, errors = data_router.fetch_daily_bars(
                 code, req.start_date, req.end_date, req.adjust
@@ -218,55 +185,58 @@ def create_router(data_router: DataRouter) -> APIRouter:
                 results[code] = result
             else:
                 failed.append(
-                    {"code": code, "reason": errors[0] if errors else "All sources failed"}
+                    {"code": code, "reason": errors[0] if errors else "指数源失败"}
                 )
         return {"status": "ok", "results": results, "failed": failed}
 
     def _daily_bars_batch_items(req, data_router):
-        """items 逐段窗口模式（重跑计划）：每 item 独立窗口拉取，并行只在源之间。
+        """items 逐段窗口模式（重跑计划）：每 item 独立窗口拉取，按分配源分组并行。
 
-        - 分组归属与 codes 模式共用 _shard_owner（单点判断，两处归属一致）；组内逐段串行
-          走 failover（防封禁铁律）；
-        - 全源「空结果」→ results[code] count=0 data=[] 占位（停牌语义，非 failed），
-          供 Kotlin 侧 verified-empty 记录（防反复空拉）；
-        - 任何源真实故障 → failed[{code, reason}]（与 codes 模式 failed 语义一致）。
+        - 均分流量（2026-10-05 定稿）：每票先 _assign_source 轮转分配一个健康源，按分配源
+          分组（worker 回传 source=钉死分配源）；无健康源 → failed（零外部请求）；
+        - 分配源空结果 → results[code] count=0 占位（带 empty_sources 空票，K=2 verified-empty
+          判据载体，供 Kotlin 侧 ≥2 源确认空后记 verified-empty 并推水位）；
+        - 分配源真实故障 → failed[{code, reason}]（reason 归因被分配源）。
         """
         items = req.items
         groups: Dict[str, List[DailyBarsBatchItem]] = {}
         tail: List[DailyBarsBatchItem] = []
         for item in items:
-            owner = data_router._shard_owner(item.code)
-            if owner is None:
+            if is_index_code(item.code):
                 tail.append(item)
-            else:
-                groups.setdefault(owner.source_name, []).append(item)
+                continue
+            adapter = data_router._assign_source(req.adjust, item.code)
+            if adapter is None:
+                continue  # 无健康源在下方统一收口（item 级 failed 去重到分组循环外）
+            groups.setdefault(adapter.source_name, []).append(item)
 
-        def _worker_items(segments: List[DailyBarsBatchItem]) -> Tuple[Dict[str, dict], List[dict]]:
+        def _worker_items(segments: List[DailyBarsBatchItem], src: str) -> Tuple[Dict[str, dict], List[dict]]:
             local_results: Dict[str, dict] = {}
             local_failed: List[dict] = []
             for seg in segments:
                 result, errors = data_router.fetch_daily_bars(
-                    seg.code, seg.start_date, seg.end_date, req.adjust
+                    seg.code, seg.start_date, seg.end_date, req.adjust, source=src
                 )
                 if result is not None:
                     local_results[seg.code] = result
-                elif _is_all_sources_empty(errors):
-                    local_results[seg.code] = {
-                        "source": _placeholder_source(errors),
-                        "count": 0,
-                        "data": [],
-                    }
                 else:
                     local_failed.append(
-                        {"code": seg.code, "reason": errors[0] if errors else "All sources failed"}
+                        {"code": seg.code, "reason": errors[0] if errors else f"{src}: 本轮失败"}
                     )
             return local_results, local_failed
 
         results: Dict[str, dict] = {}
         failed: List[dict] = []
+        # 无健康源统一收口（与 codes 模式同文案；零外部请求）
+        assigned_codes = {item.code for segs in groups.values() for item in segs} | {
+            item.code for item in tail
+        }
+        for item in items:
+            if item.code not in assigned_codes:
+                failed.append({"code": item.code, "reason": "无健康源，本轮不发起外部调用"})
         if groups:
             with ThreadPoolExecutor(max_workers=len(groups)) as pool:
-                futures = [pool.submit(_worker_items, segments) for segments in groups.values()]
+                futures = [pool.submit(_worker_items, segs, src) for src, segs in groups.items()]
                 for (src, segments), fut in zip(groups.items(), futures):
                     try:
                         r, f = fut.result()
@@ -276,22 +246,16 @@ def create_router(data_router: DataRouter) -> APIRouter:
                     results.update(r)
                     failed.extend(f)
 
-        # 串行尾批：指数等非分片代码，主线程逐段拉取（量小，串行防封禁）
+        # 串行尾批：指数 item，主线程逐段拉取（量小，串行防封禁）
         for seg in tail:
             result, errors = data_router.fetch_daily_bars(
                 seg.code, seg.start_date, seg.end_date, req.adjust
             )
             if result is not None:
                 results[seg.code] = result
-            elif _is_all_sources_empty(errors):
-                results[seg.code] = {
-                    "source": _placeholder_source(errors),
-                    "count": 0,
-                    "data": [],
-                }
             else:
                 failed.append(
-                    {"code": seg.code, "reason": errors[0] if errors else "All sources failed"}
+                    {"code": seg.code, "reason": errors[0] if errors else "指数源失败"}
                 )
         return {"status": "ok", "results": results, "failed": failed}
 

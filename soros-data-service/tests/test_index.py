@@ -245,7 +245,8 @@ def test_api_index_batch_contract_11_fields(make_client):
     assert body["status"] == "ok"
     assert body["failed"] == []
     item = body["results"]["sh000001"]
-    assert set(item.keys()) == {"source", "count", "data"}
+    assert set(item.keys()) == {"source", "count", "data", "empty_sources"}
+    assert item["empty_sources"] is None, "指数结果非空 → empty_sources null"
     assert item["source"] == "akshare", "指数 source=akshare"
     assert item["count"] == 1
     bar = item["data"][0]

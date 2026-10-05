@@ -20,8 +20,11 @@ from helpers import StubAdapter, make_bar
 from ipguard import IPGuard
 from models import ChannelsResponse
 
-# PLAN §11.1 channels 每项契约键集合（逐字段，防漂移）
-CHANNEL_ITEM_KEYS = {"source", "health", "last_success_at", "last_failure_at", "banned", "breaker"}
+# PLAN §11.1 channels 每项契约键集合（逐字段，防漂移；2026-10-05 均分流量定稿新增调用计数）
+CHANNEL_ITEM_KEYS = {
+    "source", "health", "last_success_at", "last_failure_at", "banned", "breaker",
+    "total_calls", "empty_results", "failures",
+}
 HEALTH_VALUES = ("ok", "degraded", "down")
 BREAKER_VALUES = ("closed", "open", "half_open")
 SOURCE_NAMES = {"baostock", "akshare", "mootdx", "yahoo", "tencent", "sse"}
@@ -70,6 +73,20 @@ def test_get_channels_contract_shape():
         assert c["breaker"] in BREAKER_VALUES, "breaker 值域 closed|open|half_open"
         assert c["banned"] is None, "无封禁 → banned null"
         assert c["last_success_at"] is None and c["last_failure_at"] is None, "新 router 台账为空"
+        assert c["total_calls"] == 0 and c["empty_results"] == 0 and c["failures"] == 0, "新 router 计数为零"
+
+
+def test_channel_counters_passthrough():
+    """调用计数透出：一次成功取数 → 分配源 total_calls=1；未分配源保持零。"""
+    router = _six_source_router()
+    result, _ = router.fetch_daily_bars("600000", "2026-09-30", "2026-09-30", "qfq")
+    assert result is not None
+    body = get_channels(router, _new_guard())
+    by = _by_source(body)
+    assert by["baostock"]["total_calls"] == 1
+    assert by["baostock"]["empty_results"] == 0 and by["baostock"]["failures"] == 0
+    for name in ("akshare", "mootdx", "yahoo", "tencent", "sse"):
+        assert by[name]["total_calls"] == 0, f"{name} 未被分配，计数为零"
 
 
 def test_breaker_open_passthrough():

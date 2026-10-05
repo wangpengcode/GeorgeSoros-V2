@@ -154,7 +154,7 @@ def test_items_single_failure_goes_failed(make_client):
     assert "600000" not in body["results"]
     assert len(body["failed"]) == 1
     assert body["failed"][0]["code"] == "600000"
-    assert "All sources failed" in body["failed"][0]["reason"]
+    assert "源故障" in body["failed"][0]["reason"], "reason 归因被分配源（单票单源语义）"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -246,11 +246,17 @@ def test_items_suspend_with_circuit_breaker_open_placeholder(make_client):
 
 
 def test_items_real_failure_with_empty_goes_failed(make_client):
-    # 43. 空结果 + 真实故障（网络超时）→ 保守归 failed，绝不误判停牌
+    # 43. 真实故障（网络超时）→ 保守归 failed，绝不占位（单票单源：分配源故障即 failed）。
+    # 轮转语义下「别的源故障 + 本源空」不可同票同轮观测——K=2 空票判据由 Spring 侧
+    # empty_sources≥2 把关，单源空票占位不会推水位（等价保守性）。
     def timeout(*a):
         raise SourceError("baostock 网络超时")
 
-    client = make_client(_suspend_like_router(akshare_bars=timeout))
+    client = make_client(DataRouter([
+        StubAdapter("baostock", bars=timeout, delisted=set()),
+        StubAdapter("akshare", bars=lambda *a: []),
+        StubAdapter("mootdx", bars=lambda *a: []),
+    ]))
     resp = client.post("/api/v1/daily-bars/batch", json={
         "items": [{"code": "000007", "start_date": "2022-06-20", "end_date": "2022-06-30"}],
     })

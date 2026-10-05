@@ -1,8 +1,8 @@
-"""DataRouter failover 单测（PLAN §11.1：baostock → akshare → mootdx，首源成功即返回）。
+"""DataRouter 单票单源语义测试（2026-10-05 均分流量定稿，替代旧 failover 语义）。
 
-- 主源异常切次源；全源失败进 failed[]（reason 含 "All sources failed"）
-- mootdx 永不参与 stock-list；source 字段记录实际成功源
-- 参数错误（ParameterError）跨源一致 → break 不再尝试次源
+- 每票由健康源轮转分配一个源；分配源故障 → 本轮放弃（result None），不切源
+- 空结果 = 正面证据：返回 count=0 占位（带 empty_sources），非 failed、不切源
+- mootdx 永不参与 stock-list；source 字段记录实际服务源
 """
 
 from __future__ import annotations
@@ -28,7 +28,22 @@ def _router(baostock_bars=None, akshare_bars=None, mootdx_bars=None,
     ])
 
 
-def test_main_source_failure_fallthrough_to_secondary():
+def test_source_field_records_actual_success_source():
+    """首票轮转到候选首位：source 字段如实记录实际服务源。"""
+    router = _router(
+        baostock_bars=lambda *a: [make_bar("600000")],
+        akshare_bars=raise_error(SourceError("down")),
+        mootdx_bars=raise_error(SourceError("down")),
+    )
+    result, errors = router.fetch_daily_bars("600000", "2026-09-25", "2026-09-30", "qfq")
+
+    assert result is not None
+    assert result["source"] == "baostock", "首票轮转候选首位，source 如实归因"
+    assert errors == []
+
+
+def test_assigned_source_failure_abandons_round():
+    """分配源故障 → 本轮放弃（None + 单源 reason），绝不切源（均分铁律：失败票等下轮重扫）。"""
     router = _router(
         baostock_bars=raise_error(SourceError("baostock 网络故障")),
         akshare_bars=lambda *a: [make_bar("600000")],
@@ -36,40 +51,14 @@ def test_main_source_failure_fallthrough_to_secondary():
     )
     result, errors = router.fetch_daily_bars("600000", "2026-09-25", "2026-09-30", "qfq")
 
-    assert result is not None
-    assert result["source"] == "akshare", "主源 baostock 异常应切次源 akshare"
-    assert errors == []
-    assert router.adapters["akshare"].call_counts["daily_bars"] == 1
-    assert router.adapters["mootdx"].call_counts["daily_bars"] == 0, "首源成功即返回，不再试 mootdx"
+    assert result is None, "不 inline failover"
+    assert len(errors) == 1 and "baostock" in errors[0], "只归因被分配源"
+    assert router.adapters["akshare"].call_counts["daily_bars"] == 0, "故障票零切换"
+    assert router.adapters["mootdx"].call_counts["daily_bars"] == 0
 
 
-def test_all_sources_failed_reason_contains_marker():
-    router = _router(
-        baostock_bars=raise_error(SourceError("baostock down")),
-        akshare_bars=raise_error(SourceError("akshare down")),
-        mootdx_bars=raise_error(SourceError("mootdx down")),
-    )
-    result, errors = router.fetch_daily_bars("600000", "2026-09-25", "2026-09-30", "qfq")
-
-    assert result is None
-    assert len(errors) == 1
-    assert "All sources failed" in errors[0], "全源失败 reason 必须含 'All sources failed'"
-    assert "baostock" in errors[0] and "akshare" in errors[0] and "mootdx" in errors[0]
-
-
-def test_source_field_records_actual_success_source():
-    router = _router(
-        baostock_bars=raise_error(SourceError("down")),
-        akshare_bars=raise_error(SourceError("down")),
-        mootdx_bars=lambda *a: [make_bar("000001", include_prev_close=False)],
-    )
-    result, errors = router.fetch_daily_bars("000001", "2026-09-25", "2026-09-30", "qfq")
-
-    assert result is not None
-    assert result["source"] == "mootdx", "baostock/akshare 均败 → mootdx 兜底，source 须记录 mootdx"
-
-
-def test_parameter_error_breaks_without_trying_next_source():
+def test_parameter_error_abandons_round_without_next_source():
+    """参数错误跨源一致：分配源报错即止，不再尝试其他源。"""
     router = _router(
         baostock_bars=raise_error(ParameterError("非法代码")),
         akshare_bars=lambda *a: [make_bar("600000")],
@@ -78,20 +67,50 @@ def test_parameter_error_breaks_without_trying_next_source():
 
     assert result is None
     assert router.adapters["akshare"].call_counts["daily_bars"] == 0, (
-        "参数错误跨源一致，不再尝试次源"
+        "参数错误跨源一致，不换源重试"
     )
     assert "参数错误" in errors[0]
 
 
-def test_empty_result_treated_as_failure_and_continues():
+def test_empty_result_returns_placeholder_not_failed():
+    """分配源空结果 = 正面证据（源确认无数据）：count=0 占位带 empty_sources，非 failed、不切源。"""
     router = _router(
         baostock_bars=lambda *a: [],
         akshare_bars=lambda *a: [make_bar("600000")],
     )
     result, errors = router.fetch_daily_bars("600000", "2026-09-25", "2026-09-30", "qfq")
 
-    assert result is not None
-    assert result["source"] == "akshare", "主源空结果视为失败继续切次源"
+    assert result is not None, "空结果返回占位，非 None"
+    assert result["count"] == 0 and result["data"] == []
+    assert result["empty_sources"] == ["baostock"], "空票归因被分配源（K=2 verified-empty 判据）"
+    assert errors == []
+    assert router.adapters["akshare"].call_counts["daily_bars"] == 0, "空结果不切源"
+
+
+def test_empty_votes_rotate_to_other_source_next_round():
+    """同 code 下轮扫描：空票源优先排除，换源验证（K=2 两源空才可判 verified-empty）。"""
+    flip = {"ak_empty": True}
+    router = _router(
+        baostock_bars=lambda *a: [],
+        akshare_bars=lambda *a: [] if flip["ak_empty"] else [make_bar("000001")],
+        mootdx_bars=lambda *a: [],
+    )
+    r1, _ = router.fetch_daily_bars("000001", "2026-09-25", "2026-09-30", "qfq")
+    assert r1["count"] == 0 and r1["empty_sources"] == ["baostock"]
+    assert router.adapters["baostock"].call_counts["daily_bars"] == 1
+    r2, _ = router.fetch_daily_bars("000001", "2026-09-25", "2026-09-30", "qfq")
+    assert r2["count"] == 0
+    assert "baostock" not in r2["empty_sources"] or len(r2["empty_sources"]) == 2, (
+        "第二轮换源，票累计"
+    )
+    assert router.adapters["baostock"].call_counts["daily_bars"] == 1, "有空票时不再撞 baostock"
+    flip["ak_empty"] = False
+    # 回退轮转终会命中 akshare（全候选投过票则回退全候选）
+    for _ in range(4):
+        r3, _ = router.fetch_daily_bars("000001", "2026-09-25", "2026-09-30", "qfq")
+        if r3["count"] == 1:
+            break
+    assert r3["count"] == 1 and r3["source"] == "akshare", "换源后取到数据"
 
 
 def test_mootdx_never_participates_in_stock_list():
@@ -107,6 +126,8 @@ def test_mootdx_never_participates_in_stock_list():
     stocks = router.fetch_stock_list()
 
     assert router.adapters["mootdx"].call_counts["stock_list"] == 0, "mootdx 永不参与 stock-list"
-    by_code = {s["code"]: s for s in stocks}
-    assert by_code["600001"]["delisted"] is True, "退市标记由 baostock query_stock_basic 合并"
-    assert by_code["600000"]["delisted"] is False
+    by_code = {s["code"] for s in stocks}
+    stocks_by_code = {s["code"]: s for s in stocks}
+    assert "600001" in by_code
+    assert stocks_by_code["600001"]["delisted"] is True, "退市标记由 baostock query_stock_basic 合并"
+    assert stocks_by_code["600000"]["delisted"] is False

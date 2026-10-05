@@ -78,20 +78,21 @@ def test_success_records_last_success_at(monkeypatch):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 异常路径：SourceError 记 last_failure_at + failover 接管
+# 异常路径：SourceError 记 last_failure_at（单票单源，本轮放弃）
 # ──────────────────────────────────────────────────────────────────────────────
 
-def test_failure_records_last_failure_and_failover(monkeypatch):
-    """baostock 抛 SourceError → akshare 接管 → baostock 记失败、akshare 记成功。"""
+def test_failure_records_last_failure_no_failover(monkeypatch):
+    """baostock 抛 SourceError → 本轮放弃（result None），baostock 记失败；其他源零请求零台账。"""
     g = _new_guard()
     monkeypatch.setattr("adapters.base.guard", g)
     router = _failure_router()
     result, errors = router.fetch_daily_bars("600000", "2026-09-30", "2026-09-30", "qfq")
-    assert result["source"] == "akshare", "baostock 故障 → akshare 接管"
+    assert result is None, "分配源故障本轮放弃，不 failover"
+    assert len(errors) == 1 and "baostock" in errors[0]
     ledger = router.channel_ledger()
     assert ledger["baostock"]["last_failure_at"] is not None, "SourceError（真实请求已发出）应记 last_failure_at"
-    assert ledger["akshare"]["last_success_at"] is not None, "接管成功应记 last_success_at"
     assert ledger["baostock"]["last_success_at"] is None, "baostock 本次未成功"
+    assert "akshare" not in ledger, "未发请求的源不进台账"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -142,9 +143,12 @@ def test_parameter_error_not_recorded(monkeypatch):
     assert router.channel_ledger() == {}, "ParameterError 不计台账，ledger 全空"
 
 
-def test_capability_error_continues_failover(monkeypatch):
-    """CapabilityError（复权能力型，verifier MEDIUM-1 修复）：该源不支持但后续源
-    可能支持——failover 必须继续，不得像真 ParameterError 那样 break 截断。"""
+def test_capability_error_not_recorded_and_no_failover(monkeypatch):
+    """CapabilityError（复权能力型，verifier MEDIUM-1 修复）不计台账失败；单票单源本轮放弃。
+
+    能力过滤主防线在 _healthy_candidates（支持源声明 _supports_adjust_*，分配时排除）；
+    到得了调用层的 CapabilityError 属声明与实现不一致的兜底：不切源（均分铁律）。
+    """
     g = _new_guard()
     monkeypatch.setattr("adapters.base.guard", g)
     router = DataRouter([
@@ -152,9 +156,26 @@ def test_capability_error_continues_failover(monkeypatch):
         StubAdapter("akshare", bars=raise_error(CapabilityError("akshare: 不支持 qfq"))),
         StubAdapter("mootdx", bars=[make_bar("600000", "2026-09-30")]),
     ])
-    result, _errors = router.fetch_daily_bars("600000", "2026-09-30", "2026-09-30", "qfq")
-    assert result is not None and result["count"] == 1, "能力型错误不截断 failover，后续源接住"
+    result, errors = router.fetch_daily_bars("600000", "2026-09-30", "2026-09-30", "qfq")
+    assert result is None, "能力型错误单票单源本轮放弃"
+    assert "baostock" in errors[0]
     ledger = router.channel_ledger()
-    assert ledger["mootdx"]["last_success_at"], "接住的源记成功"
     assert "baostock" not in ledger or ledger["baostock"]["last_failure_at"] is None, \
         "CapabilityError 不计台账失败"
+    assert router.adapters["mootdx"].call_counts["daily_bars"] == 0, "不 failover"
+
+
+def test_capability_filtered_at_assignment(monkeypatch):
+    """支持源声明 _supports_adjust_qfq=False → 分配阶段排除（不到得了调用层）。"""
+    g = _new_guard()
+    monkeypatch.setattr("adapters.base.guard", g)
+    router = DataRouter([
+        StubAdapter("baostock", bars=lambda *a: [make_bar(a[0])]),
+        StubAdapter("akshare", bars=lambda *a: [make_bar(a[0])]),
+        StubAdapter("mootdx", bars=lambda *a: [make_bar(a[0], include_prev_close=False)]),
+    ])
+    router.adapters["mootdx"]._supports_adjust_qfq = False
+    for i in range(4):
+        result, _ = router.fetch_daily_bars(f"60000{i}", "2026-09-30", "2026-09-30", "qfq")
+        assert result is not None
+    assert router.adapters["mootdx"].call_counts["daily_bars"] == 0, "能力过滤在分配时生效"

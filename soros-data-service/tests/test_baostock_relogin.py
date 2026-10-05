@@ -140,6 +140,60 @@ def test_normal_path_no_extra_login(monkeypatch):
     assert login_calls == []                # 零额外登录
 
 
+def test_network_error_relogins_and_retries(monkeypatch):
+    """首查'网络接收错误'（baostock lib send_msg 断连 → history.py BSERR_RECVSOCK_FAIL）
+    → 与会话过期同路径自愈：登录态重置 + 重登录 + 重试一次（2026-10-05 生产事故①根因）。"""
+    adapter = make_adapter()
+    adapter._logged_in = True
+    login_calls = []
+    monkeypatch.setattr(
+        baostock_module.bs, "login",
+        lambda: (login_calls.append(1), FakeRs([]))[1],
+    )
+    query_calls = []
+    responses = [
+        FakeRs([], error_code="network", error_msg="网络接收错误。"),
+        FakeRs([ROW]),
+    ]
+
+    def fake_query(*args, **kwargs):
+        query_calls.append(kwargs)
+        return responses[len(query_calls) - 1]
+
+    monkeypatch.setattr(baostock_module.bs, "query_history_k_data_plus", fake_query)
+
+    bars = adapter.fetch_daily_bars("000001", "2026-01-01", "2026-01-31", "qfq")
+
+    assert len(bars) == 1
+    assert len(query_calls) == 2            # 首查 + 重试一次
+    assert len(login_calls) == 1            # 恰好重登录一次（进程内 socket 已死，必须重连）
+    assert adapter._logged_in is True
+
+
+def test_network_error_retry_still_fails_raises_no_loop(monkeypatch):
+    """'网络接收错误'重试仍败 → SourceError，查询恰 2 次不无限循环。"""
+    adapter = make_adapter()
+    adapter._logged_in = True
+    login_calls = []
+    monkeypatch.setattr(
+        baostock_module.bs, "login",
+        lambda: (login_calls.append(1), FakeRs([]))[1],
+    )
+    query_calls = []
+
+    def fake_query(*args, **kwargs):
+        query_calls.append(kwargs)
+        return FakeRs([], error_code="network", error_msg="网络接收错误。")
+
+    monkeypatch.setattr(baostock_module.bs, "query_history_k_data_plus", fake_query)
+
+    with pytest.raises(SourceError):
+        adapter.fetch_daily_bars("000001", "2026-01-01", "2026-01-31", "qfq")
+
+    assert len(query_calls) == 2
+    assert len(login_calls) == 1
+
+
 def test_session_expiry_relogin_for_stock_basic(monkeypatch):
     """query_stock_basic 路径同样自愈（退市集合/列表兜底共用）。"""
     adapter = make_adapter()

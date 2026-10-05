@@ -153,10 +153,16 @@ class BackfillRerunPlanIntegrationTest {
         )
     }
 
-    /** Fake Python：fetchable 码按 item 窗口逐日返回 bar；其余码 0 行（不炸、不进 failed） */
+    /**
+     * Fake Python：fetchable 码按 item 窗口逐日返回 bar；其余码 0 行（不炸、不进 failed）。
+     * 2026-10-05 均分流量定稿：空结果模拟 Python _empty_votes 跨轮累积——
+     * 首轮单源空（pending），第二轮起附 ≥2 源 → K=2 验证空确认（模拟源轮转换源重拉）。
+     */
     private class FakePythonClient(private val fetchable: Set<String>) : PythonDataServiceClient {
         val fetchedItems = mutableListOf<BatchItem>()
         var fetchCalls = 0
+        private val emptyVotes = mutableMapOf<String, MutableList<String>>()
+        private val rotation = listOf("baostock", "akshare", "tencent")
 
         override suspend fun healthCheck(): Boolean = true
         override suspend fun fetchStockList(): List<StockListDto> = emptyList()
@@ -168,7 +174,16 @@ class BackfillRerunPlanIntegrationTest {
                 // 对齐真实 Python items 契约（router.py）：每段必落 results——无数据 = 占位 count=0 data=[]，
                 // 缺席 results 属异常态（M1 修复后计 failed 不记 verified-empty）
                 val bars = if (item.code in fetchable) buildBars(item.code, item.startDate, item.endDate) else emptyList()
-                results[item.code] = StockBarsResult("baostock", bars.size, bars)
+                if (bars.isEmpty()) {
+                    val votes = emptyVotes.getOrPut(item.code) { mutableListOf() }
+                    val next = rotation.firstOrNull { it !in votes } ?: rotation.last()
+                    votes.add(next)
+                    results[item.code] = StockBarsResult(
+                        source = next, count = 0, data = emptyList(), emptySources = votes.distinct(),
+                    )
+                } else {
+                    results[item.code] = StockBarsResult("baostock", bars.size, bars)
+                }
             }
             return DailyBarsBatchResponse("ok", results, emptyList())
         }
@@ -344,12 +359,19 @@ class BackfillRerunPlanIntegrationTest {
         // when
         runBlocking { job.run(d1, d4) { } }
 
-        // then ①: 请求面——只有水位线落后的票被拉；顺序 = 688→300→600（板块优先级，用户定稿）
+        // then ①: 请求面——只有水位线落后的票被拉；顺序 = 688→300→600（板块优先级，用户定稿）；
+        // 2026-10-05 轮次重扫：688001/300001 首轮单源空（pending 不推水位）→ 第 2 轮重扫换源各再拉 1 次
+        // → K=2 验证空确认（第 3 轮计划已空收口）。600001/600004 齐/洞票全程零请求（铁律不因轮次重扫破坏）。
         val fetchedCodes = python.fetchedItems.map { it.code }
         assertEquals(
-            listOf("688001", "300001", "600002", "600003"),
+            listOf("688001", "300001", "600002", "600003", "688001", "300001"),
             fetchedCodes,
-            "板块优先级排序 + 水位线判定（齐/超前票零请求铁律）",
+            "板块优先级排序 + 水位线判定；单源空票第 2 轮换源重拉一次后 K=2 确认收口",
+        )
+        assertEquals(
+            listOf("688001", "300001"),
+            fetchedCodes.groupingBy { it }.eachCount().filterValues { it > 1 }.keys.toList(),
+            "重拉仅限 pending 票（各 2 次：首轮 + 第二源确认轮），齐票/成功票不重拉",
         )
         val byCode = python.fetchedItems.associateBy { it.code }
         assertEquals(

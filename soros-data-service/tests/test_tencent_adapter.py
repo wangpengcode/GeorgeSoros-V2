@@ -217,22 +217,30 @@ def test_router_without_tencent_still_builds():
     assert result["source"] == "baostock"
 
 
-def test_router_with_tencent_failover_tail():
-    """注册 tencent → 进入 failover 序尾（yahoo 之后）；全前源空结果时 tencent 接管并如实归因。"""
-    order = []
+def test_router_with_tencent_rotation_member():
+    """注册 tencent → 加入轮转候选（可选源注册即参与均分流量，非序尾兜底）。
+
+    5 源全健康连续 5 票 → tencent 恰好分到 1 票并如实归因（均分，非取模归属）。
+    """
+    calls = {n: 0 for n in ("baostock", "akshare", "mootdx", "yahoo", "tencent")}
 
     def mk(name, bars=None):
         def f(code, start, end, adjust):
-            order.append(name)
+            calls[name] += 1
             return bars or []
         return StubAdapter(name, bars=f)
 
     router = DataRouter([
-        mk("baostock"), mk("akshare"), mk("mootdx"),
-        mk("yahoo"), mk("tencent", bars=[make_bar("600000")]),
+        mk("baostock", bars=[make_bar("600000")]),
+        mk("akshare", bars=[make_bar("600000")]),
+        mk("mootdx", bars=[make_bar("600000")]),
+        mk("yahoo", bars=[make_bar("600000")]),
+        mk("tencent", bars=[make_bar("600000")]),
     ])
-    result, errors = router.fetch_daily_bars("600000", "2026-09-30", "2026-09-30", "qfq")
-    assert result["source"] == "tencent"
-    assert order == ["baostock", "akshare", "mootdx", "yahoo", "tencent"], (
-        "可选源按「已注册」追加语义排 failover 序尾（yahoo 之后）"
-    )
+    sources = set()
+    for i in range(5):
+        result, errors = router.fetch_daily_bars(f"60000{i}", "2026-09-30", "2026-09-30", "qfq")
+        assert result is not None
+        sources.add(result["source"])
+    assert calls["tencent"] == 1, "tencent 参与均分轮转（5 票恰 1 票）"
+    assert sources == set(calls), "5 票恰好覆盖全部 5 源（均分无偏）"

@@ -54,7 +54,9 @@ import org.springframework.jdbc.core.JdbcTemplate
  * 测试的是改造后的 BackfillJob：
  * - 替代 buildChunkPlan 全量重拉 → planService.buildRerunPlan（库内驱动，零外部请求当零 segment）；
  * - 批打包 = BackfillClassifier.batchSegments（同批 code 唯一）→ fetchWithRetry 收 items 逐段窗口；
- * - processSegment：HTTP 200 + 0 行且非 failed → gap_check 记录 verified-empty；failed 含此码 → 计 failed 不记录；
+ * - processSegment：HTTP 200 + 0 行且非 failed → K=2 验证空（2026-10-05 均分流量定稿：
+ *   empty_sources ≥2 个不同源才记 verified-empty+推水位；缺字段/单源空=pending-empty 不推水位）；
+ *   failed 含此码 → 计 failed 不记录；
  * - 空 segments → 跳过 collect 直接 recompute+verify（不炸）；空库 totalCodes==0 → BusinessException 防御保留；
  * - gap_check 排除 MID 在 Planner 层生效，Job 层透传（请求 items 不含被排除段）。
  *
@@ -106,9 +108,14 @@ class BackfillJobRerunTest {
             CrossValidateResponse("ok")
     }
 
-    /** Fake 计划服务：buildRerunPlan 返回注入的 RerunPlan（库内重跑计划零外部请求） */
+    /** Fake 计划服务：首轮返回注入的 plan，后续构建返回 subsequentPlan（模拟水位推进后计划收敛为空） */
     private class FakePlanService(var plan: RerunPlan) : BackfillPlanService {
-        override suspend fun buildRerunPlan(from: LocalDate, to: LocalDate): RerunPlan = plan
+        var subsequentPlan: RerunPlan? = null
+        var buildCalls = 0
+        override suspend fun buildRerunPlan(from: LocalDate, to: LocalDate): RerunPlan {
+            buildCalls++
+            return if (buildCalls == 1) plan else subsequentPlan ?: plan
+        }
     }
 
     /** Fake 交易日历（ensureLoaded 为 suspend，规避 Mockito Continuation 匹配） */
@@ -133,7 +140,10 @@ class BackfillJobRerunTest {
         pythonClient = FakePythonClient()
         planService = FakePlanService(
             RerunPlan(from, to, totalCodes = 0, completeCodes = 0, zeroWindowCodes = 0, segments = emptyList()),
-        )
+        ).apply {
+            // 轮次重扫语义：首轮有进展 → 重建计划已收敛（segments 空）→ 单轮收口（与生产水位推进一致）
+            subsequentPlan = RerunPlan(from, to, totalCodes = 1, completeCodes = 1, zeroWindowCodes = 0, segments = emptyList())
+        }
         gapCheckRepository = Mockito.mock(StockHistoryGapCheckRepository::class.java)
         stockInfoRepository = Mockito.mock(StockInfoRepository::class.java)
         stockHistoryRepository = Mockito.mock(StockHistoryRepository::class.java)
@@ -257,12 +267,12 @@ class BackfillJobRerunTest {
         assertTrue(request.codes.isEmpty(), "items 模式 codes 必须为空（XOR 契约）")
     }
 
-    // ==================== 24. verified-empty 记录语义（HTTP 200 + 0 行） ====================
+    // ==================== 24. 空结果 K=2 验证空契约（2026-10-05 均分流量定稿） ====================
 
     @Test
-    fun `testProcessSegment verifiedEmptyRecordedWhen200ZeroRows`() {
-        // given: 段拉取 HTTP 200 返回 0 行（results[code] 在场但 data 空，Python items 契约）且不在 failed[] → 验证空段
-        // 注：code 缺席 results 属异常态（M1 修复后计 failed 不记录），0 行必须以空 results 条目表达
+    fun `testProcessSegment missingEmptySourcesIsPendingEmptyNoUpsertNoAdvance`() {
+        // given: 0 行占位但缺 empty_sources（旧版 Python 兼容）→ pending-empty：不落台账不推水位不计失败
+        // （单源空不可信——源可能自己缺数据；缺字段=无法证明 ≥2 源都空，保守不推水位）
         planService.plan = plan(FetchSegment("600000", from, to, SegmentReason.NO_DATA))
         pythonClient.batchResponse = DailyBarsBatchResponse(
             status = "ok",
@@ -272,8 +282,96 @@ class BackfillJobRerunTest {
         // when
         runBlocking { job.run(from, to) { } }
 
-        // then: 记录 verified-empty（stop 停牌防反复空拉）
+        // then: 不记 verified-empty、不推水位、不计失败
+        Mockito.verify(gapCheckRepository, Mockito.never())
+            .upsertVerifiedEmpty(Mockito.anyString(), Mockito.any<LocalDate>(), Mockito.any<LocalDate>(), Mockito.anyInt())
+        Mockito.verify(jdbcTemplate, Mockito.never()).update(Mockito.anyString(), Mockito.any(), Mockito.any(), Mockito.any())
+        Mockito.verify(metrics, Mockito.never()).incrementFailedCodes()
+    }
+
+    @Test
+    fun `testProcessSegment singleSourceEmptyIsPendingEmptyNoUpsertNoAdvance`() {
+        // given: 0 行且 empty_sources 只有 1 个源 → 单源空待第二源确认（pending-empty）
+        planService.plan = plan(FetchSegment("600000", from, to, SegmentReason.NO_DATA))
+        pythonClient.batchResponse = DailyBarsBatchResponse(
+            status = "ok",
+            results = mapOf(
+                "600000" to StockBarsResult(
+                    source = "baostock", count = 0, data = emptyList(), emptySources = listOf("baostock"),
+                ),
+            ),
+        )
+
+        // when
+        runBlocking { job.run(from, to) { } }
+
+        // then: 不记 verified-empty、不推水位、不计失败（下轮计划重扫换源再验证）
+        Mockito.verify(gapCheckRepository, Mockito.never())
+            .upsertVerifiedEmpty(Mockito.anyString(), Mockito.any<LocalDate>(), Mockito.any<LocalDate>(), Mockito.anyInt())
+        Mockito.verify(jdbcTemplate, Mockito.never()).update(Mockito.anyString(), Mockito.any(), Mockito.any(), Mockito.any())
+        Mockito.verify(metrics, Mockito.never()).incrementFailedCodes()
+    }
+
+    @Test
+    fun `testProcessSegment twoDistinctSourcesEmptyConfirmsVerifiedEmptyAndAdvances`() {
+        // given: 0 行且 empty_sources ≥2 个不同源 → 验证空成立：落台账 + 推水位
+        planService.plan = plan(FetchSegment("600000", from, to, SegmentReason.NO_DATA))
+        pythonClient.batchResponse = DailyBarsBatchResponse(
+            status = "ok",
+            results = mapOf(
+                "600000" to StockBarsResult(
+                    source = "tencent",
+                    count = 0,
+                    data = emptyList(),
+                    emptySources = listOf("baostock", "tencent"),
+                ),
+            ),
+        )
+
+        // when
+        runBlocking { job.run(from, to) { } }
+
+        // then: 记录 verified-empty（防反复空拉）+ 水位推进（单调不减 UPDATE）
         Mockito.verify(gapCheckRepository).upsertVerifiedEmpty("600000", from, to, 0)
+        Mockito.verify(jdbcTemplate).update(Mockito.anyString(), Mockito.any(), Mockito.any(), Mockito.any())
+    }
+
+    @Test
+    fun `testProcessSegment duplicateEmptySourcesDoNotConfirmVerifiedEmpty`() {
+        // given: empty_sources 两个条目但 distinct 后只有 1 个源（同源重复计票）→ 不得确认验证空
+        planService.plan = plan(FetchSegment("600000", from, to, SegmentReason.NO_DATA))
+        pythonClient.batchResponse = DailyBarsBatchResponse(
+            status = "ok",
+            results = mapOf(
+                "600000" to StockBarsResult(
+                    source = "baostock",
+                    count = 0,
+                    data = emptyList(),
+                    emptySources = listOf("baostock", "baostock"),
+                ),
+            ),
+        )
+
+        // when
+        runBlocking { job.run(from, to) { } }
+
+        // then: 按源去重后单源 → pending-empty
+        Mockito.verify(gapCheckRepository, Mockito.never())
+            .upsertVerifiedEmpty(Mockito.anyString(), Mockito.any<LocalDate>(), Mockito.any<LocalDate>(), Mockito.anyInt())
+    }
+
+    @Test
+    fun `testProcessSegment dataLandedStillAdvancesWatermark`() {
+        // given: 有数据 → 落库 + 推水位（K=2 契约不影响成功路径，回归保护）
+        planService.plan = plan(FetchSegment("600000", from, to, SegmentReason.NO_DATA))
+        pythonClient.batchResponse = response("600000")
+        Mockito.`when`(stockInfoRepository.findByCode("600000")).thenReturn(stock("600000"))
+
+        // when
+        runBlocking { job.run(from, to) { } }
+
+        // then: 水位推进（advanceInputWatermark 走 jdbcTemplate.update）
+        Mockito.verify(jdbcTemplate).update(Mockito.anyString(), Mockito.any(), Mockito.any(), Mockito.any())
     }
 
     // ==================== 25. failed 含此码 → 计 failed 不记录 ====================

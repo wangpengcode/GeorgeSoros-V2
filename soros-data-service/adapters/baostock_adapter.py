@@ -65,18 +65,22 @@ class BaostockAdapter(BaseAdapter):
             logger.info("baostock 登录成功")
         return True
 
-    # ---- 会话过期自愈（2026-10-04 修 A）----
+    # ---- 会话过期/网络断连自愈（2026-10-04 修 A + 2026-10-05 生产事故①）----
     def _query_with_session_retry(self, query_fn):
-        """首查返回"用户未登录"→ 登录态重置 + 重登录 + 重试一次；仍败才抛错。
+        """首查「用户未登录」或「网络接收错误」→ 登录态重置 + 重登录 + 重试一次；仍败才抛错。
 
-        背景：服务端会话过期后 _logged_in 粘死为 True，每票必败（回填实测
-        16 连败）→ 熔断 → 分片 failover 全堆下游源 → 下游限流等待超时。
-        重试恰好一次，绝不无限循环。
+        - 会话过期：服务端会话失效后 _logged_in 粘死为 True，每票必败（回填实测 16 连败）
+        - 网络接收错误（BSERR_RECVSOCK_FAIL）：baostock lib send_msg 断连后 print+隐式
+          return None → history.py 译成该文案；进程内 socket 已死，必须重登录重建连接
+          （2026-10-05 生产实测：00:01 登录后 socket 静默死亡，无自愈则 baostock 全天哑火）
+        两种文案同一自愈路径：重试恰好一次，绝不无限循环。
         """
         self._ensure_login()
         rs = query_fn()
-        if rs.error_code != "0" and "用户未登录" in (rs.error_msg or ""):
-            logger.warning("baostock 会话过期，重登录后重试一次")
+        msg = rs.error_msg or ""
+        if rs.error_code != "0" and ("用户未登录" in msg or "网络接收错误" in msg):
+            logger.warning("baostock %s，重登录后重试一次",
+                           "会话过期" if "用户未登录" in msg else "网络错误自愈")
             with self._login_lock:
                 self._logged_in = False
             self._ensure_login()

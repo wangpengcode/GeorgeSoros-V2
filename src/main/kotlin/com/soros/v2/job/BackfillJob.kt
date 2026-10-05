@@ -62,11 +62,15 @@ import org.springframework.stereotype.Component
  * ③ TRUNCATE stock_history_stage → 下一批
  * ```
  *
- * 库内重跑计划（2026-10-04 设计定稿，替代全量重拉空转）：
+ * 库内重跑计划（2026-10-04 设计定稿，替代全量重拉空转；2026-10-05 均分流量定稿升级）：
  * - planService 注入 → 计划驱动：buildRerunPlan 按分类规则产出缺失 FetchSegment（真实缺失区间），
  *   全齐票零 segment → 零外部请求；批打包 = BackfillClassifier.batchSegments（同批 code 唯一）；
- * - processSegment 收口 verified-empty：HTTP 200 且该码不在 failed[] 且返回 0 行 →
- *   gapCheckRepository.upsertVerifiedEmpty（停牌防反复空拉）；failed 里出现绝不记录；
+ * - 轮次重扫 [collectPlanDrivenRounds]：每轮执行计划后重建计划（纯查库零外部请求），
+ *   停止条件三选一——① segments 空（全部拉齐）② 整轮零进展（0 行/0 验证空/0 待确认，防空转）
+ *   ③ 轮次硬上限 [MAX_RESYNC_ROUNDS]；失败/单源空不推水位 → 下轮计划自动含入，交给其他健康源；
+ * - processSegment 收口 K=2 验证空：HTTP 200 且该码不在 failed[] 且返回 0 行时按 empty_sources
+ *   去重计票——≥2 个不同源空 → upsertVerifiedEmpty + 推水位（防反复空拉）；单源空/缺字段 →
+ *   pending-empty（不落台账不推水位，待下轮换源确认）；failed 里出现绝不记录；
  * - planService 为 null（旧构造调用方）→ 保留 legacy 分片路径（findMaxTradeDate 断点续传 + codes 模式），
  *   兼容既有调用方/测试。
  *
@@ -94,6 +98,12 @@ class BackfillJob(
     private companion object {
         /** 校验拒绝明细写入 data_quality_log 的封顶条数（避免海量拒绝日志打爆问题表） */
         const val MAX_REJECT_LOG_ROWS = 200
+
+        /**
+         * 轮次重扫硬上限（2026-10-05 均分流量定稿防御兜底）：pending-empty 永不确认的病态循环
+         * （如 Python 侧空票投票状态丢失）下防止无限轮询；正常链路 2 轮内收敛，远达不到此上限。
+         */
+        const val MAX_RESYNC_ROUNDS = 10
     }
 
     /** stage→主表 幂等合并 SQL（资源文件缓存） */
@@ -117,46 +127,43 @@ class BackfillJob(
         truncateStage()
         prepareCalendar(from, to)
 
-        // ── 执行计划装配：planService 注入=库内重跑计划（新）；null=legacy 分片（旧行为保留）──
+        // ── 执行计划装配：planService 注入=库内重跑计划+轮次重扫（2026-10-05 均分流量定稿）；
+        //    null=legacy 分片（旧行为保留）──
         val isPlanDriven = planService != null
-        val plan: RerunPlan
-        val segmentBatches: List<List<FetchSegment>>
         val legacyChunks: List<List<StockInfo>>
+        val totalCodes: Int
+        var firstPlan: RerunPlan? = null
         if (isPlanDriven) {
-            plan = planService!!.buildRerunPlan(from, to)
-            segmentBatches = BackfillClassifier.batchSegments(plan.segments, chunkSize())
+            firstPlan = planService!!.buildRerunPlan(from, to)
+            totalCodes = firstPlan.totalCodes
             legacyChunks = emptyList()
         } else {
             val stocks = loadValidStocks()
             // 断点续传：已覆盖到 end_date 的 code 跳过（幂等重跑语义，不重复拉取）
             val pending = stocks.filter { (stockHistoryRepository.findMaxTradeDateByCode(it.code) ?: LocalDate.MIN) < to }
-            plan = RerunPlan(
-                from = from,
-                to = to,
-                totalCodes = stocks.size,
-                completeCodes = stocks.size - pending.size,
-                zeroWindowCodes = 0,
-                segments = pending.map { FetchSegment(it.code, from, to, SegmentReason.NO_DATA) },
-            )
-            segmentBatches = emptyList()
+            totalCodes = stocks.size
             legacyChunks = pending.chunked(chunkSize())
         }
         // 空候选防御（部署冒烟发现）：空库直接回填=零代码可拉，不能静默 COMPLETED 掩盖配置问题，
         // 明确 FAILED 引导先刷新股票清单（POST /api/v1/info/refresh）
-        if (plan.totalCodes == 0) {
+        if (totalCodes == 0) {
             throw BusinessException("股票清单为空：请先 POST /api/v1/info/refresh 刷新股票列表后重试回填")
         }
-        val totalBatches = if (isPlanDriven) segmentBatches.size else legacyChunks.size
+        val totalBatches = if (isPlanDriven) {
+            BackfillClassifier.batchSegments(firstPlan!!.segments, chunkSize()).size
+        } else {
+            legacyChunks.size
+        }
         val initial = BackfillProgress(
-            totalCodes = plan.totalCodes,
+            totalCodes = totalCodes,
             totalBatches = totalBatches,
             startedAt = Instant.now(),
         )
         onProgress(initial)
-        logger.info("[backfill] 启动：from={} to={} codes={} batches={} segments={}", from, to, plan.totalCodes, totalBatches, plan.segments.size)
+        logger.info("[backfill] 启动：from={} to={} codes={} batches={}", from, to, totalCodes, totalBatches)
 
         val collect = if (isPlanDriven) {
-            collectAllSegmentBatches(segmentBatches, from, to, onProgress, initial)
+            collectPlanDrivenRounds(firstPlan!!, from, to, onProgress, initial)
         } else {
             collectAllChunks(legacyChunks, from, to, onProgress, initial)
         }
@@ -164,7 +171,7 @@ class BackfillJob(
         val replay = replaySentiment(from, to)
         val durationMs = System.currentTimeMillis() - startMs
 
-        val summary = buildSummary(from, to, plan.totalCodes, collect, durationMs, recomputed, replay)
+        val summary = buildSummary(from, to, totalCodes, collect, durationMs, recomputed, replay)
         notifyDigest(summary, replay)
         logger.info(
             "[backfill] 完成：成功={} 失败={} 行={} 耗时={}ms 派生列补算={}",
@@ -193,6 +200,71 @@ class BackfillJob(
 
     // ==================== 新：重跑计划批循环（items 模式） ====================
 
+    /**
+     * 计划驱动轮次重扫（2026-10-05 均分流量定稿）：失败/单源空不推水位 → 下轮计划自动重扫。
+     * - 每轮 buildRerunPlan（纯查库零外部请求）→ 逐批拉取，批循环复用 [collectAllSegmentBatches]；
+     * - 轮间进展 = 落库行 / 验证空 / 单源空待确认（pending）任一 >0 → 继续；
+     * - 整轮全零 = 源全坏或全部失败（再跑也是空转）→ 停止（零容忍空转铁律）；
+     * - segments 空 = 全部拉齐 → 停止；轮次达 [MAX_RESYNC_ROUNDS] 硬上限兜底停止。
+     */
+    private suspend fun collectPlanDrivenRounds(
+        firstPlan: RerunPlan,
+        from: LocalDate,
+        to: LocalDate,
+        onProgress: (BackfillProgress) -> Unit,
+        initial: BackfillProgress,
+    ): CollectResult {
+        var plan = firstPlan
+        var succeeded = 0
+        var failed = 0
+        var processedRows = 0L
+        var verifiedEmpty = 0
+        var pendingEmpty = 0
+        var progress = initial
+        var round = 0
+        while (round < MAX_RESYNC_ROUNDS) {
+            round++
+            if (plan.segments.isEmpty()) {
+                logger.info("[backfill] 第 {} 轮计划无待拉段（全部拉齐），轮次重扫结束", round)
+                break
+            }
+            logger.info("[backfill] 第 {} 轮开始：segments={} codes={}", round, plan.segments.size, plan.totalCodes)
+            val batches = BackfillClassifier.batchSegments(plan.segments, chunkSize())
+            progress = progress.copy(
+                totalBatches = batches.size,
+                processedBatches = 0,
+                currentBatch = 0,
+                processedCodes = succeeded + failed,
+                succeededCodes = succeeded,
+                failedCodes = failed,
+                processedRows = processedRows,
+            )
+            val roundResult = collectAllSegmentBatches(batches, from, to, onProgress, progress)
+            succeeded += roundResult.succeeded
+            failed += roundResult.failed
+            processedRows += roundResult.totalRows
+            verifiedEmpty += roundResult.verifiedEmpty
+            pendingEmpty += roundResult.pendingEmpty
+            if (roundResult.totalRows == 0L && roundResult.verifiedEmpty == 0 && roundResult.pendingEmpty == 0) {
+                logger.info(
+                    "[backfill] 第 {} 轮零进展（0 行落库/0 验证空/0 待确认）：源全坏或全部失败，停止轮次重扫防空转",
+                    round,
+                )
+                break
+            }
+            if (round >= MAX_RESYNC_ROUNDS) break  // 已达上限：不再重建计划（build 次数与轮次同界）
+            plan = planService!!.buildRerunPlan(from, to)
+        }
+        if (round >= MAX_RESYNC_ROUNDS) {
+            logger.warn("[backfill] 达到轮次硬上限 {}，停止轮次重扫（防御兜底，防病态循环）", MAX_RESYNC_ROUNDS)
+        }
+        logger.info(
+            "[backfill] 轮次重扫收口：轮数={} 成功={} 失败={} 行={} 验证空={} 待确认={}",
+            round, succeeded, failed, processedRows, verifiedEmpty, pendingEmpty,
+        )
+        return CollectResult(succeeded, failed, processedRows, verifiedEmpty, pendingEmpty)
+    }
+
     /** 段批循环累计：逐批拉取/合并/TRUNCATE，进度回调原子替换，批间刻意停顿（间歇性获取铁律） */
     private suspend fun collectAllSegmentBatches(
         batches: List<List<FetchSegment>>,
@@ -204,6 +276,8 @@ class BackfillJob(
         var succeeded = 0
         var failed = 0
         var processedRows = 0L
+        var verifiedEmpty = 0
+        var pendingEmpty = 0
         var progress = initial
         for ((index, batch) in batches.withIndex()) {
             progress = progress.copy(currentBatch = index + 1)
@@ -219,6 +293,8 @@ class BackfillJob(
             succeeded += result.succeeded
             failed += result.failed
             processedRows += result.rows
+            verifiedEmpty += result.verifiedEmpty
+            pendingEmpty += result.pendingEmpty
             progress = progress.copy(
                 processedCodes = succeeded + failed,
                 succeededCodes = succeeded,
@@ -236,7 +312,7 @@ class BackfillJob(
                 delay(backfillProperties.batchPauseMs)
             }
         }
-        return CollectResult(succeeded, failed, processedRows)
+        return CollectResult(succeeded, failed, processedRows, verifiedEmpty, pendingEmpty)
     }
 
     /** 单段批处理：批量拉取（items 逐段窗口，重试）→ 逐 segment 处理 → 合并 → TRUNCATE */
@@ -250,20 +326,27 @@ class BackfillJob(
         var succeeded = 0
         var failed = 0
         var rows = 0L
+        var verifiedEmpty = 0
+        var pendingEmpty = 0
         val rejectDetails = mutableListOf<String>()
         for (seg in batch) {
             val result = processSegment(seg, response, rejectDetails)
             succeeded += result.succeeded
             failed += result.failed
             rows += result.rows
+            verifiedEmpty += result.verifiedEmpty
+            pendingEmpty += result.pendingEmpty
         }
         writeRejectLog(rejectDetails)
-        return ChunkResult(succeeded, failed, rows)
+        return ChunkResult(succeeded, failed, rows, verifiedEmpty, pendingEmpty)
     }
 
     /**
-     * 单 segment 处理（回填重跑收口）：
-     * - results[code] 为空 且 不在 failed[] → 记录 verified-empty（HTTP 200 + 0 行 = 停牌，防反复空拉）；
+     * 单 segment 处理（回填重跑收口；2026-10-05 均分流量定稿：K=2 验证空）：
+     * - results[code] 为空 且 不在 failed[] → 空结果占位，按 empty_sources 分流：
+     *   · ≥2 个不同源都空 → 验证空成立：upsertVerifiedEmpty + 推水位（防反复空拉）；
+     *   · 缺字段（旧版 Python 兼容）或单源空 → pending-empty：不落台账不推水位不计失败，
+     *     下轮计划重扫换源再验证（单源空不可信——源可能自己缺数据，如 baostock 会话死亡静默空）；
      * - failed[] 含此码 → 计 failed，**不**记录 verified-empty（语义铁律：failed 里出现绝不记录）；
      * - 空且既无 results 又无 failed（异常态，防御）→ 计 failed 不记录；
      * - 非空 → 过滤到 [seg.from, seg.to] 窗口内（防御，Python 已按段窗口返回）后校验 + COPY 合并。
@@ -283,12 +366,24 @@ class BackfillJob(
                 metrics.incrementFailedCodes()
                 return ChunkResult(0, 1, 0)
             }
-            // HTTP 200 且不在 failed[] 且 0 行 → verified-empty（仅记录，不拉重复）
-            gapCheckRepository?.upsertVerifiedEmpty(seg.code, seg.from, seg.to, 0)
-            advanceInputWatermark(seg.code, seg.to)
-            logger.warn("[backfill] 段验证空 code={} from={} to={}", seg.code, seg.from, seg.to)
-            metrics.incrementFailedCodes()
-            return ChunkResult(0, 1, 0)
+            // HTTP 200 且不在 failed[] 且 0 行 → K=2 验证空判定（empty_sources 按源去重计票）
+            val emptySources = result.emptySources
+            if (emptySources != null && emptySources.distinct().size >= 2) {
+                gapCheckRepository?.upsertVerifiedEmpty(seg.code, seg.from, seg.to, 0)
+                advanceInputWatermark(seg.code, seg.to)
+                logger.warn(
+                    "[backfill] 段验证空 code={} from={} to={} empty_sources={}",
+                    seg.code, seg.from, seg.to, emptySources.distinct(),
+                )
+                metrics.incrementFailedCodes()
+                return ChunkResult(0, 1, 0, verifiedEmpty = 1)
+            }
+            // pending-empty：单源空/缺字段 → 待第二源确认（下轮计划自动重扫，Python 轮转分配换源）
+            logger.info(
+                "[backfill] 单源空待第二源确认 code={} from={} to={} empty_sources={}",
+                seg.code, seg.from, seg.to, emptySources,
+            )
+            return ChunkResult(0, 0, 0, pendingEmpty = 1)
         }
         val windowed = result.data.filter { bar -> !bar.date.isBefore(seg.from) && !bar.date.isAfter(seg.to) }
         val valid = filterValidBars(seg.code, windowed, rejectDetails)
@@ -772,17 +867,25 @@ class BackfillJob(
     private fun readSql(path: String): String =
         ClassPathResource(path).inputStream.bufferedReader().use { it.readText() }
 
-    /** 批循环累计结果（成功/失败股票数与入库行数） */
+    /**
+     * 批循环累计结果（成功/失败股票数与入库行数）。
+     * verifiedEmpty=K=2 验证空确认数；pendingEmpty=单源空待确认数（均计「进展」，
+     * 因为待确认票下轮会被重扫——仅 0 行/0 验证空/0 待确认才算零进展防空转）。
+     */
     private data class CollectResult(
         val succeeded: Int,
         val failed: Int,
         val totalRows: Long,
+        val verifiedEmpty: Int = 0,
+        val pendingEmpty: Int = 0,
     )
 
-    /** 批处理结果（成功/失败股票数与入库行数） */
+    /** 批处理结果（成功/失败股票数与入库行数；verifiedEmpty/pendingEmpty 同 CollectResult） */
     private data class ChunkResult(
         val succeeded: Int,
         val failed: Int,
         val rows: Long,
+        val verifiedEmpty: Int = 0,
+        val pendingEmpty: Int = 0,
     )
 }

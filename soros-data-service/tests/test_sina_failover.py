@@ -109,9 +109,16 @@ def test_both_fail_raises_source_error_with_both_reasons(monkeypatch):
 
 
 def test_router_result_carries_sina_label(monkeypatch):
-    """Router 结果 source=akshare-sina 如实透传（data_source 归因对拍口径）。"""
+    """Router 结果 source=akshare-sina 如实透传（data_source 归因对拍口径）。
+
+    轮转语义：bs/mx 熔断 open → 唯一候选 akshare 被分配；EM 腿失败内部转新浪。
+    """
     akshare = _adapter_with(monkeypatch, em_raises=ConnectionError("RemoteDisconnected"))
-    router = DataRouter([StubAdapter("baostock"), akshare, StubAdapter("mootdx")])
+    baostock = StubAdapter("baostock")
+    mootdx = StubAdapter("mootdx")
+    router = DataRouter([baostock, akshare, mootdx])
+    router.adapters["baostock"].circuit_breaker = FakeCircuitBreaker(state="open")
+    router.adapters["mootdx"].circuit_breaker = FakeCircuitBreaker(state="open")
     result, errors = router.fetch_daily_bars("000001", "2026-09-29", "2026-09-30", "qfq")
     assert result["source"] == "akshare-sina"
 

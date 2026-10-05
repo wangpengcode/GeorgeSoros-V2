@@ -1,14 +1,21 @@
-"""Adapter 基类 + 多源 failover Router（PLAN §11.1）。
+"""Adapter 基类 + 多源均分流量 Router（PLAN §11.1；2026-10-05 均分流量定稿重构）。
 
 - BaseAdapter：统一封装 限流 → 熔断 → 调用源实现 → 熔断成败登记
 - 异常分类（防御性设计，任务要求「网络调用全部 try/except 分类」）：
     * ParameterError      —— 参数错误（非法代码/日期），跨源一致，不计熔断失败，直接抛
     * SourceError         —— 数据源故障（网络/API 异常/超时），计入熔断失败
     * SourceUnavailableError —— 熔断 open 或该源不支持该能力，不计熔断失败（未发起请求）
-- DataRouter：Router 顺序 baostock → akshare → mootdx（PLAN §11.1）；
-  stock-list/is_st/退市状态永不走 mootdx。
+- DataRouter 均分流量语义（用户定稿：多源=均分流量防封禁，不是逐个烧穿源）：
+    * 每票由「健康源轮转」分配一个源，单票单源，绝不 inline failover；
+      分配源故障 → 本轮放弃，等 stock_info 下一轮扫描自然重试（届时可能换源）
+    * 健康过滤 _healthy_candidates：封禁（IPGuard banned）/ 熔断 open / 驱逐冷却中
+      （连续 2 次 SourceError → 300s 冷却）/ 复权能力缺失 → 移出候选；half_open 保留
+    * 空票偏好（K=2 verified-empty 配套）：同 code 已投过空票的源优先排除，换源验证空；
+      全部候选都投过票 → 回退全候选；取到数据即清空票
+    * 空结果 = 源确认无数据的正面证据 → 返回 count=0 占位（带 empty_sources），
+      非 failed；真实故障才 failed
 - 可选源（yahoo/tencent/sse）：Router 缺席不报错（missing-check 只硬查核心三源），
-  注册后按 _resolve_order「已注册」追加到 failover 序尾。
+  注册后加入轮转候选参与均分。
 """
 
 from __future__ import annotations
@@ -16,9 +23,11 @@ from __future__ import annotations
 import abc
 import logging
 import threading
+import time
 from datetime import datetime
 from typing import Dict, List, Optional, Sequence, Tuple
 
+from circuit_breaker import STATE_OPEN
 from constants import (
     SOURCE_AKSHARE,
     SOURCE_BAOSTOCK,
@@ -29,6 +38,8 @@ from constants import (
     DATA_SOURCES,
     BOARD_ALL,
     MARKET_ALL,
+    ADJUST_HFQ,
+    ADJUST_QFQ,
     is_north_exchange,
     is_index_code,
     derive_market,
@@ -196,22 +207,28 @@ class BaseAdapter(abc.ABC):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# DataRouter（failover Router，PLAN §11.1）
+# DataRouter（均分流量 Router，2026-10-05 定稿；原 failover 语义废弃）
 # ──────────────────────────────────────────────────────────────────────────────
 class DataRouter:
-    """多源 failover Router。
+    """多源均分流量 Router。
 
-    - 股票日K顺序：baostock → akshare → mootdx，首个成功即返回
+    - 股票日K：每票由健康源轮转分配一个源，单票单源，绝不 inline failover（防烧源铁律）；
+      分配源故障 → 本轮放弃，等上游（stock_info 水位扫描）下一轮自然重试
     - 指数日K：仅 akshare（内部 sina→腾讯→东财 链，探针选源结论见 akshare_adapter KDoc），
-      mootdx 永不参与（PLAN Step 4）；baostock 指数K未做探针验证，暂不启用（未来增强可加）
+      mootdx 永不参与（PLAN Step 4）
     - stock-list / is_st / 退市状态：只认 baostock/akshare，mootdx 永不参与
-    - 单源失败不炸整批：单股失败进 failed[]
-    - daily-bars/batch 分组并行（router.py）：按 _shard_owner 分片组并行（并行只在源之间），
-      源内逐只串行走 failover（防封禁铁律）；指数等非分片代码归串行尾批由主线程拉取
+    - 单票失败/无健康源不炸整批：进 failed[]（batch 端点），本轮不发起外部请求
+    - daily-bars/batch 分组并行（router.py）：每票先 _assign_source，按分配源分组并行
+      （并行只在源之间），组内逐只串行（防封禁铁律）；指数 code 归串行尾批
     - 同源在途互斥（2026-10-04 改动 2）：_adapter_locks 按 source_name 登记各源
-      adapter._call_lock，_call_guarded 锁住实际请求（TokenBucket 等待在锁外）——
-      baostock 模块级单例 socket 防串包、failover 跨线程碰源排队
+      adapter._call_lock，_call_guarded 锁住实际请求（TokenBucket 等待在锁外）
     """
+
+    # 源级驱逐参数（均分流量定稿）：连续 2 次真实 SourceError → 移出轮换 300s。
+    # 阈值 2 远快于熔断 5 次——failover 时代靠熔断太慢（烧穿下游），轮转时代必须
+    # 快速把死源移出候选，否则轮转每 N 票撞它一次。
+    EVICTION_FAILURES = 2
+    EVICTION_COOLDOWN_SECONDS = 300.0
 
     def __init__(self, adapters: Sequence[BaseAdapter]):
         self.adapters: Dict[str, BaseAdapter] = {a.source_name: a for a in adapters}
@@ -219,7 +236,7 @@ class DataRouter:
         missing = [s for s in DATA_SOURCES if s not in self.adapters]
         if missing:
             raise ValueError(f"缺少数据源 adapter: {missing}")
-        # 股票日线 failover 顺序
+        # 轮转候选基序（router_order 过滤已注册源；指数/stock-list 子序不变）
         self._bar_order = [self.adapters[n] for n in self._resolve_order()]
         # 指数日K只走 akshare（mootdx 永不参与）
         self._index_order = [self.adapters[SOURCE_AKSHARE]]
@@ -228,6 +245,15 @@ class DataRouter:
         # 渠道台账（/channels 观测）：{source: {last_success_at, last_failure_at}}，
         # 进程态重启即清——与 IPGuard「banned 不持久化」同一设计哲学（docstring 见 _mark_*）
         self._source_ledger: Dict[str, dict] = {}
+        # ── 均分流量轮转状态（进程态，重启即清；统一 _state_lock 保护）──
+        self._state_lock = threading.Lock()
+        self._rotation_cursor = 0                  # 全局轮转游标（均分，非 code 归属）
+        self._evicted_until: Dict[str, float] = {} # {source: monotonic 冷却到期时刻}
+        self._fail_streak: Dict[str, int] = {}     # {source: 连续 SourceError 次数}
+        self._empty_votes: Dict[str, set] = {}     # {code: {source...}} 跨轮空票（K=2 判据）
+        self._channel_counters: Dict[str, dict] = {}  # {source: {total_calls, empty_results, failures}}
+        # 可注入时钟（测试替换实例属性，不碰全局 time.monotonic）
+        self._clock = time.monotonic
         # 同源在途请求互斥锁（改动 2）：{source_name: threading.Lock}，按 adapter.source_name
         # 惰性登记（key 与台账 key 一致）；锁本体 = 各源 adapter._call_lock（每源唯一实例 → 每源
         # 一把锁），_call_guarded 用它包裹实际请求，TokenBucket 等待在锁外。
@@ -299,64 +325,168 @@ class DataRouter:
         return {k: dict(v) for k, v in dict(self._source_ledger).items()}
 
     # ---- daily-bars/batch 单股 ----
-    def fetch_daily_bars(self, code: str, start: str, end: str, adjust: str) -> Tuple[Optional[dict], List[str]]:
-        """返回 (result, errors)。result 为 {source, count, data[]} 或 None。
+    def fetch_daily_bars(
+        self, code: str, start: str, end: str, adjust: str, source: Optional[str] = None
+    ) -> Tuple[Optional[dict], List[str]]:
+        """返回 (result, errors)。result 为 {source, count, data[], empty_sources?} 或 None。
 
-        指数 code（sh000001）走指数路径（仅 akshare，mootdx 永不参与）。
+        - 指数 code（sh000001）走指数路径（仅 akshare，mootdx 永不参与）
+        - source=None：健康源轮转分配（单票单源）；source 指定：钉死该源（batch 分组回填用）
+        - 分配源空结果 → count=0 占位（带 empty_sources 空票）非 None；真实故障 → None
         """
         if is_index_code(code):
             return self._fetch_index_daily(code, start, end, adjust)
-        return self._fetch_stock_daily(code, start, end, adjust)
+        return self._fetch_stock_daily(code, start, end, adjust, source=source)
 
-    def _shard_owner(self, code: str) -> Optional[BaseAdapter]:
-        """code 的分片归属源（无归属返回 None）——串行 failover 与 batch 分组共用的唯一归属判断。
+    # ── 均分流量轮转（2026-10-05 定稿）──
+    def _healthy_candidates(self, adjust: str) -> List[BaseAdapter]:
+        """健康候选 = router_order ∩ （未封禁 ∩ 非驱逐冷却 ∩ 非熔断 open ∩ 支持该复权口径）。
 
-        - 稳态映射 int(code) % len(shard_sources)：禁 hash()（PYTHONHASHSEED 随机 →
-          重启换归属 → 滚动窗口自愈会互相覆盖），必须稳定映射
-        - 指数/非纯数字 code 与单分片配置（<2 源）无归属 → None（退化为原 router_order）
-        - 归属源不在已注册 adapter 中（分片池含可选源但未注册）→ None（零风险兜底）
+        - banned / 熔断 open：未发请求即排除（banned 期间出请求=把负载打回被封 IP）
+        - 驱逐冷却（连续 2 次 SourceError → 300s）：快速把死源移出轮换，不每 N 票撞它
+        - 复权能力（_supports_adjust_qfq/hfq，声明缺失视为支持）：能力型排除在分配时完成，
+          不到得了调用层（failover 时代靠 CapabilityError 逐源试，轮转时代无 failover 可言）
+        - half_open 保留：allow_request 单探针放行，成功即闭合——排除它反而堵死自愈入口
         """
-        from config import settings
+        now = self._clock()
+        candidates: List[BaseAdapter] = []
+        for adapter in self._bar_order:
+            name = adapter.source_name
+            if guard.is_banned(name):
+                continue
+            evicted_until = self._evicted_until.get(name)
+            if evicted_until is not None and now < evicted_until:
+                continue
+            if adapter.circuit_breaker.state == STATE_OPEN:
+                continue
+            if adjust in (ADJUST_QFQ, ADJUST_HFQ) and not getattr(
+                adapter, f"_supports_adjust_{adjust}", True
+            ):
+                continue
+            candidates.append(adapter)
+        return candidates
 
-        shard = list(settings.shard_sources)
-        if not code.isdigit() or len(shard) < 2:
+    def _assign_source(self, adjust: str, code: str) -> Optional[BaseAdapter]:
+        """健康源轮转分配：全局游标取模候选数（均分流量；此取模是轮转游标，非 code 归属）。
+
+        空票偏好（K=2 verified-empty 配套）：同 code 已投过空票的源在还有其他候选时
+        优先排除（换源验证空，不再撞已确认无数据的源）；全部候选都投过票 → 回退全候选。
+        无健康候选 → None（调用方本轮放弃，零外部请求）。
+        """
+        candidates = self._healthy_candidates(adjust)
+        if not candidates:
             return None
-        return self.adapters.get(shard[int(code) % len(shard)])
+        with self._state_lock:
+            votes = self._empty_votes.get(code)
+            if votes and len(candidates) > 1:
+                preferred = [a for a in candidates if a.source_name not in votes]
+                if preferred:
+                    candidates = preferred
+            idx = self._rotation_cursor % len(candidates)
+            self._rotation_cursor += 1
+        return candidates[idx]
 
-    def _ordered_for_stock(self, code: str) -> List[BaseAdapter]:
-        """多源分片分压（2026-10-04 设计穿透 92 分）：按 code 稳态归属源优先，其余按 router_order 兜底。
+    def _record_call_failure(self, source: str) -> None:
+        """源级驱逐计数：连续 SourceError 达阈值 → 移出轮换 EVICTION_COOLDOWN_SECONDS。"""
+        with self._state_lock:
+            entry = self._channel_counters.setdefault(
+                source, {"total_calls": 0, "empty_results": 0, "failures": 0}
+            )
+            entry["failures"] += 1
+            streak = self._fail_streak.get(source, 0) + 1
+            self._fail_streak[source] = streak
+            if streak >= self.EVICTION_FAILURES:
+                self._evicted_until[source] = self._clock() + self.EVICTION_COOLDOWN_SECONDS
+                self._fail_streak[source] = 0  # 冷却到期后重新计数
+                logger.warning(
+                    "源 %s 连续 %d 次故障，移出轮换冷却 %ds（恢复后自动回归候选）",
+                    source, streak, int(self.EVICTION_COOLDOWN_SECONDS),
+                )
 
-        - 分片只调整 failover 顺序、不改能力：归属源故障自然 failover（数据完整性 > 分压）
-        - 归属判断与 batch 分组共用 _shard_owner（单点判断，两处归属一致）
-        - 指数/非纯数字 code 与单分片配置（<2 源）退化为原 router_order（零风险兜底）
+    def _record_call_success(self, source: str) -> None:
+        """成功清零连续失败计数（非累计 2 次即驱逐；成功是最强的健康证据）。"""
+        with self._state_lock:
+            self._fail_streak[source] = 0
+
+    def _count_call(self, source: str) -> None:
+        """total_calls：真实请求发出才计数（banned/驱逐/open 未发请求不计）。"""
+        with self._state_lock:
+            entry = self._channel_counters.setdefault(
+                source, {"total_calls": 0, "empty_results": 0, "failures": 0}
+            )
+            entry["total_calls"] += 1
+
+    def _count_empty(self, source: str) -> None:
+        with self._state_lock:
+            entry = self._channel_counters.setdefault(
+                source, {"total_calls": 0, "empty_results": 0, "failures": 0}
+            )
+            entry["empty_results"] += 1
+
+    def channel_counters(self) -> Dict[str, dict]:
+        """渠道调用计数只读副本（/channels 聚合读取）：{source: {total_calls, empty_results, failures}}。"""
+        with self._state_lock:
+            return {k: dict(v) for k, v in self._channel_counters.items()}
+
+    def _fetch_stock_daily(
+        self, code: str, start: str, end: str, adjust: str, source: Optional[str] = None
+    ) -> Tuple[Optional[dict], List[str]]:
+        """单票单源拉取（均分流量定稿，无 failover）。
+
+        - source=None → _assign_source 轮转分配；分配失败（无健康源）→ 本轮放弃（零请求）
+        - 分配源空结果 → count=0 占位 {source, count:0, data:[], empty_sources:[...]}（非 None）：
+          空结果 = 源确认无数据的正面证据（K=2 verified-empty 的票），绝不冒充失败
+        - 分配源真实故障（SourceError）→ 计驱逐 + 本轮放弃（None）；失败票等上游下轮重扫
+        - 显式 source 未注册 → (None, ["{source}: 源未注册"])
         """
-        owner = self._shard_owner(code)
-        if owner is None:
-            return list(self._bar_order)
-        return [owner] + [a for a in self._bar_order if a is not owner]
+        if source is not None:
+            adapter = self.adapters.get(source)
+            if adapter is None:
+                return None, [f"{source}: 源未注册"]
+        else:
+            adapter = self._assign_source(adjust, code)
+            if adapter is None:
+                return None, ["无健康源，本轮不发起外部调用"]
 
-    def _fetch_stock_daily(self, code: str, start: str, end: str, adjust: str) -> Tuple[Optional[dict], List[str]]:
+        name = adapter.source_name
         errors: List[str] = []
-        for adapter in self._ordered_for_stock(code):
-            try:
-                bars = adapter.fetch_daily_bars(code, start, end, adjust)
-                if bars:
-                    self._mark_success(adapter.source_name)  # 非空结果=成功取到数据
-                    return {"source": adapter.serving_source, "count": len(bars), "data": bars}, []
-                errors.append(f"{adapter.source_name}: 空结果")
-            except SourceUnavailableError as exc:
-                errors.append(f"{adapter.source_name}: {exc}")
-            except SourceError as exc:
-                self._mark_failure(adapter.source_name)
-                errors.append(f"{adapter.source_name}: {exc}")
-            except CapabilityError as exc:
-                errors.append(f"{adapter.source_name}: 不支持该复权 ({exc})")
-                # 能力型缺失跨源不一致：后续源可能支持，继续 failover（verifier MEDIUM-1）
-            except ParameterError as exc:
-                errors.append(f"{adapter.source_name}: 参数错误 ({exc})")
-                break  # 参数错误跨源一致，无需继续尝试
-        reason = "All sources failed: " + "; ".join(errors) if errors else "All sources failed"
-        return None, [reason]
+        try:
+            self._count_call(name)
+            bars = adapter.fetch_daily_bars(code, start, end, adjust)
+        except SourceUnavailableError as exc:
+            errors.append(f"{name}: {exc}")     # banned/open：未发请求，归封禁/熔断展示
+        except SourceError as exc:
+            self._mark_failure(name)
+            self._record_call_failure(name)
+            errors.append(f"{name}: {exc}")
+        except CapabilityError as exc:
+            errors.append(f"{name}: 不支持该复权 ({exc})")  # 声明缺失兜底，不计台账/驱逐
+        except ParameterError as exc:
+            errors.append(f"{name}: 参数错误 ({exc})")
+        else:
+            if bars:
+                self._mark_success(name)        # 非空结果=成功取到数据
+                self._record_call_success(name)
+                with self._state_lock:
+                    self._empty_votes.pop(code, None)  # 取到数据，清空票
+                return {"source": adapter.serving_source, "count": len(bars), "data": bars}, []
+            # 空结果：记空票（跨轮按源累计）+ 占位（K=2 verified-empty 的判据载体）
+            self._count_empty(name)
+            with self._state_lock:
+                votes = self._empty_votes.setdefault(code, set())
+                votes.add(name)
+                empty_sources = sorted(votes)
+            logger.info(
+                "fetch_daily_bars 空结果: code=%s window=[%s,%s] adjust=%s source=%s empty_sources=%s",
+                code, start, end, adjust, adapter.serving_source, empty_sources,
+            )
+            return {
+                "source": adapter.serving_source,
+                "count": 0,
+                "data": [],
+                "empty_sources": empty_sources,
+            }, []
+        return None, errors
 
     def _fetch_index_daily(self, code: str, start: str, end: str, adjust: str) -> Tuple[Optional[dict], List[str]]:
         """指数日K路径：仅 akshare（内部 sina→腾讯→东财 链），mootdx 永不参与（PLAN Step 4）。"""

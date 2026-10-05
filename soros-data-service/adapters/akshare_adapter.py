@@ -27,8 +27,9 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from datetime import datetime, timedelta
-from typing import List
+from typing import List, Optional
 
 import akshare as ak
 import requests
@@ -69,6 +70,11 @@ class AkshareAdapter(BaseAdapter):
     # 新浪 raw 窗口前扩（自然日）：供首行涨跌幅计算取前一交易日昨收（sina 全量拉取+本地切片，前扩有效）
     SINA_RAW_LOOKBACK_DAYS = 10
 
+    # EM 腿级熔断参数（2026-10-05 均分流量定稿）：连续 3 次 EM 失败 → 腿开直走新浪，
+    # 每 300s 放行一次探针；探针成功腿闭合，失败刷新 300s 窗口。
+    EM_FAILURE_THRESHOLD = 3
+    EM_PROBE_INTERVAL_SECONDS = 300.0
+
     def __init__(self, circuit_breaker, rate_limiter):
         super().__init__(circuit_breaker, rate_limiter)
         self._supports_stock_list = True
@@ -79,35 +85,80 @@ class AkshareAdapter(BaseAdapter):
         self._supports_board_members = True  # stock_board_industry/concept_*_em（PLAN §4.8，仅 akshare）
         self._board_members_degraded = False  # 板块成分拉取降级标记（单板块失败置 True，响应透传）
         self._serving = threading.local()    # 本次调用实际子源标注（线程本地，线程池并发安全）
+        # EM 腿级熔断状态（实例级；EM 故障被内部消化不上抛，源级熔断/IPGuard 看不到它）
+        self._em_lock = threading.Lock()
+        self._em_fail_streak = 0
+        self._em_leg_open_at: Optional[float] = None  # monotonic 腿开时刻；None=腿闭合
+        self._clock = time.monotonic        # 可注入时钟（测试替换实例属性）
 
     @property
     def serving_source(self) -> str:
         """本次调用实际服务的子源：akshare（EM）/ akshare-sina（东财被拒后新浪接管）。"""
         return getattr(self._serving, "name", "akshare")
 
+    # ---- EM 腿级熔断（2026-10-05 均分流量定稿）----
+    def _em_leg_available(self) -> bool:
+        """腿闭合 → 可用；腿开且距上次探针 ≥300s → 放行一次探针（并刷新探针时刻）。
+
+        探针时刻在放行时刷新：探针失败由 _em_leg_failure 再刷 300s，探针成功则腿闭合——
+        无论成败，300s 内至多一次真实 EM 尝试，不空转撞死腿。
+        """
+        with self._em_lock:
+            if self._em_leg_open_at is None:
+                return True
+            if self._clock() - self._em_leg_open_at >= self.EM_PROBE_INTERVAL_SECONDS:
+                self._em_leg_open_at = self._clock()
+                return True
+            return False
+
+    def _em_leg_failure(self) -> None:
+        with self._em_lock:
+            self._em_fail_streak += 1
+            if self._em_fail_streak >= self.EM_FAILURE_THRESHOLD:
+                was_open = self._em_leg_open_at is not None
+                self._em_leg_open_at = self._clock()  # 首次腿开/探针失败都刷新窗口
+                if not was_open:
+                    logger.warning(
+                        "akshare: EM 连续 %d 次失败，腿级熔断开启（%ds 内直走新浪，每 %ds 一次探针）",
+                        self._em_fail_streak,
+                        int(self.EM_PROBE_INTERVAL_SECONDS),
+                        int(self.EM_PROBE_INTERVAL_SECONDS),
+                    )
+
+    def _em_leg_success(self) -> None:
+        with self._em_lock:
+            self._em_fail_streak = 0
+            self._em_leg_open_at = None
+
     # ---- 日 K 线（PLAN §5.4）----
     def _sync_fetch_daily_bars(self, code: str, start: str, end: str, adjust: str) -> List[dict]:
-        """双链内部 failover：EM(push2his) → 新浪（2026-10-04 东财 WAF 整族拒连）。
+        """双链：EM(push2his) → 新浪（2026-10-04 东财 WAF 整族拒连）+ EM 腿级熔断。
 
-        - EM 失败不外抛：不炸到 Router（省 baostock 接管）、不计 IPGuard 封禁窗口
-          （否则 akshare 被 ban 会整体跳过，新浪链路永远轮不到）
+        - EM 腿开期间直走新浪（不再每票白撞一次 EM 拖慢整批）；300s 探针保自愈入口
+        - EM 失败不外抛：不炸到 Router、不计 IPGuard 封禁窗口（否则 akshare 被 ban
+          会整体跳过，新浪链路永远轮不到）；腿级状态自行记账
         - 双链全失败才抛 SourceError，带两侧原因
         - 归因经 serving_source 线程本地标注，Router 结果如实透传
         """
-        em_reason: str
-        try:
-            bars = self._fetch_em_daily(code, start, end, adjust)
-            self._serving.name = "akshare"
-            return bars
-        except Exception as exc:  # noqa: BLE001 - EM 故障转新浪（见上，刻意不计熔断/封禁）
-            # 注意：`as exc` 名字在块结束即被 Python 删除，必须先固化文本
-            em_reason = f"{type(exc).__name__}: {exc}"
-            logger.warning("akshare: EM 日K失败转新浪 (%s)", em_reason[:120])
+        em_reason = ""
+        if self._em_leg_available():
+            try:
+                bars = self._fetch_em_daily(code, start, end, adjust)
+                self._em_leg_success()
+                self._serving.name = "akshare"
+                return bars
+            except Exception as exc:  # noqa: BLE001 - EM 故障转新浪（见上，刻意不计熔断/封禁）
+                # 注意：`as exc` 名字在块结束即被 Python 删除，必须先固化文本
+                em_reason = f"{type(exc).__name__}: {exc}"
+                self._em_leg_failure()
+                logger.warning("akshare: EM 日K失败转新浪 (%s)", em_reason[:120])
+        else:
+            logger.info("akshare: EM 腿级熔断开启中，直走新浪")
         try:
             bars = self._fetch_sina_daily(code, start, end, adjust)
         except Exception as exc:  # noqa: BLE001
             raise SourceError(
-                f"akshare 日K失败: em({em_reason}); sina({exc})"
+                f"akshare 日K失败: em({em_reason or '腿熔断跳过'}); sina({exc})"
             ) from exc
         self._serving.name = "akshare-sina"
         return bars

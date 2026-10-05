@@ -97,6 +97,12 @@ data class StockBarsResult(
     @JsonProperty("data") val data: List<DailyBar>,
     /** 源故障文案；null=正常（2026-10-04 部署穿透：Python 侧静默 0 行无法区分「无数据」与「故障」） */
     @JsonProperty("error") val error: String? = null,
+    /**
+     * 空结果源名单（2026-10-05 均分流量定稿：K=2 验证空）。
+     * count=0 占位时 Python 附带：该票历史上返回过空结果的源名去重清单（跨轮累积）。
+     * ≥2 个不同源 → 验证空成立；null（旧版 Python）或单源 → pending-empty，保守不推水位。
+     */
+    @JsonProperty("empty_sources") val emptySources: List<String>? = null,
 )
 
 /** 单股失败项（failed[] 元素） */
