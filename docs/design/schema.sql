@@ -28,15 +28,28 @@ CREATE TABLE stock_history (
     limit_up_streak   SMALLINT DEFAULT 0,        -- 连板数（首板=1，0=非涨停/断板；§4.8 派生）
     limit_down_streak SMALLINT DEFAULT 0,        -- 跌停连板（§4.9 崩塌池，镜像派生）
     data_source       VARCHAR(20) DEFAULT 'UNKNOWN' -- 数据来源（failover 可见性）
-                      CHECK (data_source IN ('BAOSTOCK','AKSHARE','MOOTDX','UNKNOWN')),
+                      CHECK (data_source IN ('BAOSTOCK','AKSHARE','AKSHARE_SINA','MOOTDX','YAHOO','TENCENT','SSE','UNKNOWN')),  -- 值域对齐 V6
     created_at        TIMESTAMP DEFAULT NOW(), -- 行创建时间
+    calibrated        BOOLEAN NOT NULL DEFAULT FALSE, -- 是否已校准（CalibrationJob 低频对拍通过后置位；V5）
+    calibrated_source VARCHAR(20),               -- 校准对照源（DataSourceType 枚举名）
+    calibrated_at     TIMESTAMPTZ,                -- 校准时间
     UNIQUE (code, trade_date)
 );
 -- 索引审计（§2.2）：UNIQUE 自带 (code,trade_date) 复合索引，勿再建同列普通索引
 CREATE INDEX idx_history_date ON stock_history (trade_date);   -- 按日全市场扫描
+CREATE INDEX idx_stock_history_uncalibrated ON stock_history (code) WHERE calibrated = FALSE; -- 未校准行候选池（随校准推进自动收缩，V5）
 
 COMMENT ON COLUMN stock_history.open IS '前复权 qfq；涨停判定与 change_pct 用不复权口径，坐标永不混用';
 COMMENT ON COLUMN stock_history.volume IS '统一单位=股（AKShare/mootdx 手×100，探针实测校准）';
+
+CREATE TABLE stock_history_gap_check ( -- 回填验证空段台账（停牌防反复空拉，V7）
+    code          VARCHAR(20) NOT NULL,      -- 证券代码（裸数字 600000）
+    seg_from      DATE NOT NULL,             -- 已验证空段起点（含；V7 回填验证空段台账，防停牌反复空拉）
+    seg_to        DATE NOT NULL,             -- 已验证空段终点（含）
+    rows_returned INTEGER NOT NULL DEFAULT 0, -- 该段拉取返回行数（HTTP 200 且非 failed 时 0 即验证空）
+    checked_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(), -- 验证时间（timestamptz）
+    PRIMARY KEY (code, seg_from, seg_to)
+);
 
 CREATE TABLE stock_info (
     id             SERIAL PRIMARY KEY,  -- 行主键
@@ -176,34 +189,37 @@ CREATE TABLE market_daily (
     zhaban_count      SMALLINT,                 -- 炸板家数（日线近似口径）
     yst_limit_premium NUMERIC(6,2),             -- 昨涨停今溢价 = 昨名单 ∘ 今行情（表自算自洽）
     yst_promotion     JSONB,                    -- 分级晋级率 {"total":21.05,"by_level":{"1to2":33.3,...}}
-    yst_face_count    SMALLINT                  -- 昨日大面家数
+    yst_face_count    SMALLINT,                 -- 昨日大面家数
+    data_coverage     VARCHAR(10) NOT NULL DEFAULT 'FULL', -- 数据覆盖（FULL=全量正常 / PARTIAL=采集失败率>10%，§13.4）
+    CHECK (data_coverage IN ('FULL','PARTIAL'))
 );
 
 CREATE TABLE sector_daily (
     trade_date        DATE NOT NULL,    -- 交易日
-    board          VARCHAR(100) NOT NULL, -- 市场板（MAIN 主板/GEM 创业板/STAR 科创板）
+    board          VARCHAR(100) NOT NULL, -- 行业（industry 主口径，概念不落表条件现算，市场板另置；§19.11.1 决策 1）
     limit_up_count SMALLINT,        -- 板块内涨停家数
     max_streak     SMALLINT,        -- 板块内最高连板
     avg_chg_pct    NUMERIC(10,4),   -- 板块涨停名单平均涨幅%
+    avg_chg_pct_all NUMERIC(10,4),  -- 板块全成员平均涨幅%（词表 #9「板块涨幅榜前列」，§19.11.1 决策 3）
     driver_text    TEXT,                        -- 当日板块驱动主线（LLM 生成，标"系统生成"）
     PRIMARY KEY (trade_date, board)
 );
 
 CREATE TABLE signal_daily (
-    code            VARCHAR(20) NOT NULL, -- 证券代码（股票=裸数字 600000；指数=带前缀 sh000001，仅 stock_index/index_history）
+    code            VARCHAR(20) NOT NULL, -- 证券代码（股票=裸数字 600000；本期不落指数行）
     trade_date            DATE NOT NULL, -- 交易日
     ladder_rank        SMALLINT,                -- 当日梯队排名（全市场排序才得出）
     is_zhaban          BOOLEAN,                 -- 炸板（日线近似，统一口径落库）
     sector_ladder_rank SMALLINT,                -- 板块内板数排名
     -- 筹码分布 6+ 列（路径 A 自算递推；不存分布曲线本身）
     profit_ratio       NUMERIC(6,2),            -- 获利盘%
-    cost_dev           NUMERIC(8,4),            -- 成本偏离% = 平均成本/现价−1（比率，qfq 重对基免疫）
-    c90_low            NUMERIC(12,4),           -- 90% 成本区间下沿（qfq 坐标）
-    c90_high           NUMERIC(12,4),     -- 90% 成本区间上沿（元）
-    c90_conc           NUMERIC(6,2),            -- 90% 集中度（东财口径 (p90−p10)/(p90+p10)×100）
-    c70_low            NUMERIC(12,4),     -- 70% 成本区间下沿（元）
-    c70_high           NUMERIC(12,4),     -- 70% 成本区间上沿（元）
-    c70_conc           NUMERIC(6,2),      -- 70% 成本集中度（%）
+    cost_dev           NUMERIC(8,4),            -- 成本偏离% = (close−avg_cost)/avg_cost×100（qfq 重对基免疫）
+    c90_low            NUMERIC(12,4),           -- 90% 成本区间下沿（p5 分位，qfq 坐标）
+    c90_high           NUMERIC(12,4),     -- 90% 成本区间上沿（p95 分位，qfq 坐标）
+    c90_conc           NUMERIC(6,2),            -- 90% 集中度（东财口径 (p95−p5)/(p95+p5)×100，qfq 坐标）
+    c70_low            NUMERIC(12,4),     -- 70% 成本区间下沿（p15 分位，qfq 坐标）
+    c70_high           NUMERIC(12,4),     -- 70% 成本区间上沿（p85 分位，qfq 坐标）
+    c70_conc           NUMERIC(6,2),      -- 70% 集中度（(p85−p15)/(p85+p15)×100，qfq 坐标）
     PRIMARY KEY (code, trade_date)
 );
 

@@ -63,6 +63,7 @@
 | max_trade_date | 响应键（非列名） | GET /history/max/date/{code} 增量锚点响应键（V1 兼容语义，非 schema 列，§5 枚举表不收录） |
 | degraded | 响应键（非列名） | POST /board-members 降级标记（任一板块拉取失败/降级 → true，消费侧跳过清空防误清全库；非 schema 列，§5 枚举表不收录） |
 | stock_history_stage | **表级特例**（非字段） | 回填 COPY 中转表（§六.1，UNLOGGED，无主键/唯一约束/CHECK——约束拖慢 COPY）；列名/口径与 stock_history 全同，不新增任何字段 |
+| board | 同名不同义 | stock_info.board=市场板（MAIN/GEM/STAR）；sector_daily.board=行业（industry 主口径，§19.11.1 决策 1，概念不落表条件现算，市场板另置） |
 
 ## 四、JSONB 内部键（同受本册约束）
 
@@ -100,7 +101,7 @@
 | `created_at` | 行创建时间 | stock_history、data_quality_log、index_history、sentiment_cycle、dragon_cycle、strategy_config、strategy_config_history、backtest_result、trade_ledger、watchlist_group、watchlist_member、intraday_event、daily_note |
 | `name` | 名称（列名同名同义：具体对象随表：策略/分组/指数/股票/板块） | stock_info、stock_index、strategy_config、watchlist_group、intraday_event |
 | `market` | SH / SZ | stock_info |
-| `board` | 市场板（MAIN 主板/GEM 创业板/STAR 科创板） | stock_info、sector_daily |
+| `board` | 市场板（MAIN 主板/GEM 创业板/STAR 科创板）；sector_daily 特例=行业（industry 主口径，§19.11.1） | stock_info、sector_daily |
 | `is_st` | 仅用于"识别并排除"，禁止作为业务可选项 | stock_info |
 | `delisted` | 缺失≠退市：人工确认才置 true | stock_info |
 | `ipo_date` | BaoStock ipoDate；§4.8 IPO 首 5 日守卫 | stock_info |
@@ -140,7 +141,7 @@
 | `big_cycle` | 人工确认值（null=未确认，展示取建议值） | sentiment_cycle |
 | `small_cycle` | 小周期人工确认值（null=未确认，展示取建议值） | sentiment_cycle |
 | `status_text` | 冰点/混沌/主升/退潮…（建议标签人工终定） | sentiment_cycle |
-| `data_coverage` | 数据覆盖（FULL=全量正常 / PARTIAL=采集失败率>10%，§13.4） | sentiment_cycle |
+| `data_coverage` | 数据覆盖（FULL=全量正常 / PARTIAL=采集失败率>10%，§13.4） | sentiment_cycle、market_daily |
 | `start_date` | 起始日（dragon_cycle=上位日；backtest_result=回测起始） | dragon_cycle、backtest_result |
 | `end_date` | 结束日（dragon_cycle=阵亡/定性日 null=进行中；backtest_result=回测结束） | dragon_cycle、backtest_result |
 | `rebreak_count` | 反包次数 | dragon_cycle |
@@ -159,18 +160,19 @@
 | `yst_promotion` | 分级晋级率 {"total":21.05,"by_level":{"1to2":33.3,...}} | market_daily |
 | `yst_face_count` | 昨日大面家数 | market_daily |
 | `avg_chg_pct` | 板块涨停名单平均涨幅% | sector_daily |
+| `avg_chg_pct_all` | 板块全成员平均涨幅%（词表 #9「板块涨幅榜前列」，§19.11.1 决策 3） | sector_daily |
 | `driver_text` | 当日板块驱动主线（LLM 生成，标"系统生成"） | sector_daily |
 | `ladder_rank` | 当日梯队排名（全市场排序才得出） | signal_daily |
 | `is_zhaban` | 炸板（日线近似，统一口径落库） | signal_daily |
 | `sector_ladder_rank` | 板块内板数排名 | signal_daily |
 | `profit_ratio` | 获利盘% | signal_daily |
-| `cost_dev` | 成本偏离% = 平均成本/现价−1（比率，qfq 重对基免疫） | signal_daily |
-| `c90_low` | 90% 成本区间下沿（qfq 坐标） | signal_daily |
-| `c90_high` | 90% 成本区间上沿（元） | signal_daily |
-| `c90_conc` | 90% 集中度（东财口径 (p90−p10)/(p90+p10)×100） | signal_daily |
-| `c70_low` | 70% 成本区间下沿（元） | signal_daily |
-| `c70_high` | 70% 成本区间上沿（元） | signal_daily |
-| `c70_conc` | 70% 成本集中度（%） | signal_daily |
+| `cost_dev` | 成本偏离% = (close−avg_cost)/avg_cost×100（qfq 重对基免疫） | signal_daily |
+| `c90_low` | 90% 成本区间下沿（p5 分位，qfq 坐标） | signal_daily |
+| `c90_high` | 90% 成本区间上沿（p95 分位，qfq 坐标） | signal_daily |
+| `c90_conc` | 90% 集中度（东财口径 (p95−p5)/(p95+p5)×100，qfq 坐标） | signal_daily |
+| `c70_low` | 70% 成本区间下沿（p15 分位，qfq 坐标） | signal_daily |
+| `c70_high` | 70% 成本区间上沿（p85 分位，qfq 坐标） | signal_daily |
+| `c70_conc` | 70% 集中度（(p85−p15)/(p85+p15)×100，qfq 坐标） | signal_daily |
 | `yaml` | 配置 YAML 全文 | strategy_config、strategy_config_history |
 | `version` | 配置版本号（保存 +1） | strategy_config、strategy_config_history |
 | `alert_enabled` | 盘中开仓预警开关（§14.9，结果对比页开启） | strategy_config |
@@ -248,3 +250,9 @@
 | `items` | batch 逐段窗口请求数组（{code,start_date,end_date}；与 codes+dates 二选一） | POST /daily-bars/batch 请求体（Python） |
 | `segments` | 重跑计划缺失段扁平清单（一票可多条，全齐票零段） | BackfillPlanService.buildRerunPlan 出参 |
 | `reason` | 缺失段分类原因 HEAD/TAIL/MID/NO_DATA（与 failed[] 的 reason=失败文案不同义，§3 特例留痕） | FetchSegment、failed[] 元素 |
+| `from` | 回放区间起点（ISO 日期） | POST /jobs/signal-replay、POST /jobs/sentiment-replay 响应 SignalReplaySummary |
+| `to` | 回放区间终点（ISO 日期） | POST /jobs/signal-replay、POST /jobs/sentiment-replay 响应 SignalReplaySummary |
+| `signal_rows` | 落库 signal_daily 行数（§19.11.1 回放摘要） | POST /jobs/signal-replay 响应 SignalReplaySummary |
+| `market_rows` | 落库 market_daily 行数（§19.11.1 回放摘要） | POST /jobs/signal-replay 响应 SignalReplaySummary |
+| `sector_rows` | 落库 sector_daily 行数（§19.11.1 回放摘要） | POST /jobs/signal-replay 响应 SignalReplaySummary |
+| `codes_processed` | 处理股票数（§19.11.1 回放摘要） | POST /jobs/signal-replay 响应 SignalReplaySummary |

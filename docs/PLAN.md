@@ -2222,3 +2222,59 @@ qfq_t = raw_t × ∏ f(除权日 > t)                        # 尾部锚定：�
 6. gap_check 台账保留记录供检查报告，不再参与计划判定（`coveredTradingDaysByCode` 遗留未删）。
 
 **穿透评分**：修补增量路径漏洞后 95/100；余 5 分为固有边界（段内停牌日与漏日库内不可分辨，靠检查环节兜底——即用户定的「导入→更新→检查」流程）。
+
+### 19.10 均分流量重构——健康源轮转替代取模分片+删 inline failover（2026-10-05 用户定稿，TDD 已落地）
+
+**根因（生产事故③复盘）**：baostock lib `send_msg` 断连后隐式返回 None → 译成「网络接收错误。」而 adapter 只对「用户未登录」重登录 → baostock 进程内静默死亡 9 小时；期间 inline failover 链把全部流量逐级烧向下游源，akshare 单日 105 次调用，四源逐个过热。
+
+**用户定稿铁律**：多源存在的意义是**均分流量防封禁**，不是 failover 烧链——「每个源分到 1/N 流量，谁死了就把它的份额分给剩下的人」与「谁死了流量全压给下家」是两种相反的语义；后者必然每个源都被封禁一遍。失败任务不需要现场补救：任务全部来自 stock_info 扫描，本轮失败留待下轮重扫时被任意健康源认领，天然再分配。
+
+**改动清单**：
+1. **删除取模分片与 inline failover**：`_shard_owner`/`_ordered_for_stock` 与 fetch 内 failover 循环整链删除（config.shard_sources 字段保留仅为兼容旧 env，不再参与路由）。
+2. **健康源轮转**（`adapters/base.py`）：候选 = 未被 IPGuard 封禁 + 熔断 CLOSED/HALF_OPEN + 退避冷却已过期 + 能力支持该复权档；每票轮转游标取源（线程安全），优先排除本票已投过空票的源；无健康源 → **本轮不发起外部调用**（零容忍空转），留待下轮。
+3. **源级退避**：连续 2 次 SourceError → 移出轮换冷却 300s（logger.warning「源级退避」），成功/空结果清零计数；与熔断互补（熔断管连续爆炸，退避管间歇抖动）。
+4. **空结果投票 `empty_sources`**：空结果是证据不是失败，但**单源空不可信**（可能是源侧缺能力/缺数据）。批响应携带 `empty_sources`；Kotlin 侧 ≥2 个**不同**源都空 → verified-empty + 推水位线；否则 pending-empty（不记台账、不推进、不失败），下轮强制换源再证。
+5. **baostock 自愈扩展**：「网络接收错误」与「用户未登录」同路径——重登录 + 重试恰好一次。
+6. **akshare EM 腿级熔断**：EM(push2his) 腿连续 3 败 → 腿开 300s 直走新浪，单探测恢复；EM 失败不计入源级熔断/退避（EM 是 akshare 内部备用腿，烧腿不等于源死）。
+7. **BackfillJob 轮次重扫**：每轮全量重扫 stock_info 未拉齐票，停止条件 = 无段 / 零进展（0 行且无新增 verified-empty）/ 10 轮上限（含 build 计数护栏）。
+
+**部署顺序**：Spring 先（旧 Python 无 `empty_sources` 字段 = 保守不推进水位线），Python 后——两端任一先单飞都不会错推进。
+
+**测试**：Python 228 通过（新增 `test_em_leg.py`、`test_sharding.py` 改写为轮转语义、baostock 重登录扩展）；Kotlin 451 通过（BackfillJob 轮次/重扫/verified-empty + FakePythonClient 跨轮空票模拟集成测试）。
+
+**生产实测（2026-10-05）**：主轮 44 批全绿（重启窗口烧掉的批由轮次重扫自愈，零外部调用浪费）；yahoo 429 由源级退避周期吸收（约 1/3.5 批浪费 ~12 槽位，稳态 ~10%）；/channels 计数 13/12/12/8 均分可见。换路由器前临时提速 1.0 rps（env 注入，事后回 0.06 默认）：批耗时 13.5min → ~56s，吞吐 ~68 万行/10min。
+
+**遗留已知隐患（不动，待用户拍板）**：baostock lib `send_msg` 对干净 FIN 可能无限 recv 循环（库级悬挂隐患）；无干净的源禁用开关（`SOROS_ROUTER_ORDER` 移除会被 core-source 兜底加回，需 `SOROS_DISABLED_SOURCES` 类机制）；`GET /jobs/backfill` 500；腾讯 800 行截断分块（§19.7）。
+
+### 19.11 四功能穿透定稿与分期落地（2026-10-05，用户拍板）
+
+对情绪周期/K线复盘/盘中监控/策略控制台四条链路做只读穿透（页面↔端点↔DDL↔实库四方对照，连库验证），穿透评分 88/100（SignalPrecomputeJob 列级穿透进行中，预期 93）。核心发现：**②③④ 共享同一断点——信号预计算层（SignalPrecomputeJob）不存在，signal_daily 0 行**。
+
+**已拍板决策（用户 2026-10-05）**：
+1. cost_dev 符号按 PLAN 版 `(close−avg_cost)/avg_cost×100`；DDL 注释 `avg/close−1` 作废（样稿示例数值自证 PLAN 版成立）
+2. 筹码分布曲线**不落库不补端点**，K线页前端递推（与样稿一致，加载时算一次+节流）；端点补 `change_pct`/`turnover_rate` 两字段
+3. 盘中五表写入归属 = **Kotlin 拉**（Python 只出 JSON 拉取端点不碰库；「实时层绝不写 stock_history」保持机器级成立）
+4. 盘中实时 ladder = **snap 现拼**（读 intraday_pool_snap 最新行 JSON；收盘后读 intraday_archive；曲线走 intraday_replay）
+5. 盘中限频 = **独立 TokenBucket 参数**（与日K桶分家；bid_ask 收敛 ≤30/min）；gap_pct 竞价方案落地盘中时再穿透定稿
+
+**分期落地顺序（用户定：先让页面跑起来）**：
+- 步骤0 情绪周期收口：全区间回放重算（回填前误算全零，数据源=stock_history 纯派生零新增采集）
+- 步骤1 SignalPrecomputeJob：筹码递推路径A + market/sector_daily 填充 + AdjustCheckStep 联动 + 全历史补算（K线筹码卡、策略C类条件、盘中预警的公共前置）
+- 步骤2 K线复盘：kline 端点 + kline.html（模糊查询复用 /stock-search，默认近250日可拉全量1211日）
+- 步骤3 盘中监控（决策3/4/5 前提下开工，§14.8 约4-5天）
+- 步骤4 策略控制台 a期（自选股+策略CRUD/YAML契约+回测引擎B/A类）；b期 C类条件；c期 Kelly 链+开仓预警
+- **排后**：SentimentReplayService 性能改造（每日单查6日窗→全量一次加载，3800万行→548万行；巨型事务拆批+进度日志）——不阻塞页面，页面能跑后处理
+
+**策略控制台 a 期前需补的 6 个文档契约缺口**：结果列表端点、watchlist members 读取端点、history 回滚端点、POST /backtests 与表单 JSON schema、情绪术语标签落库归属、chip 60日 warm-up vs 冒烟窗口（冒烟窗口需自动前移预卷）。
+
+#### §19.11.1 SignalPrecomputeJob 穿透设计定稿（2026-10-05，穿透分 93，7 项待定稿全部采纳建议值）
+
+1. sector_daily.board 语义冲突（DDL=MAIN/GEM/STAR vs §4.8=industry/concept）→ **industry 主口径**（概念不落表条件现算，市场板另置）
+2. c90 分位端点 → **p5/p95**（与 c70=p15/p85 对称）；c70 用真 70% 口径，mock 的 p25/p75 作废
+3. 词表 #9「板块涨幅榜前列」→ sector_daily 加 avg_chg_pct_all（板块全成员均涨）
+4. yst_limit_premium 停牌成员 → **剔除分母**（无价不可算；与晋级率"计入分母"口径区分，成文）
+5. market_daily 补 data_coverage 列（V9 迁移，兜底 cron 跳过条件依赖）
+6. signal_daily 不落指数行（指数条件全走回测 B 类现算），DDL 注释修正
+7. 递推桶数 → **180**（PLAN 180/300 两处不一致，取 180 定稿）
+
+设计要点：cost_dev=PLAN 版符号（迁移 COMMENT 纠正 DDL 注释）；递推 D_t=D_{t-1}×(1−tr)+tr×triangular(high,low,close)，qfq 坐标，一字板±0.5% 扁平兜底，停牌分布冻结，warm-up 60 日 NULL；增量=监听 SentimentCycleCompleted（新事件）+21:30 兜底，每票全历史只读递推只写当日行（幂等+除权免疫）；全历史回放=按股分批 200 股/事务（**禁止照抄 SentimentReplay 单事务整区间**），每 500 股进度日志，断点续跑；除权检测内置（隐含昨收≠前日 close → 该票全日期重算重写+更新 adj_processed_until）；AttributionStep(LLM 归因) 拆独立后续任务。落码清单 V9 迁移+3 entity/3 repo+事件+递推纯函数+聚合 service+回放 service+Job+触发端点+单测/TestContainers 集成，估 2.5-3.5 天。

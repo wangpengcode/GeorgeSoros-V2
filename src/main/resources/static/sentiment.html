@@ -308,7 +308,7 @@ function renderChart(data) {
   var step = Math.ceil(n / 12);
   data.forEach(function(r, i) {
     if (i % step !== 0) return;
-    s += '<text x="' + lx(i) + '" y="' + (H - 8) + '" fill="#8593a8" font-size="10" text-anchor="middle" font-family="Menlo,monospace">' + fmt(r.date).slice(5) + '</text>';
+    s += '<text x="' + lx(i) + '" y="' + (H - 8) + '" fill="#8593a8" font-size="10" text-anchor="middle" font-family="Menlo,monospace">' + fmt(r.date) + '</text>';
   });
   s += '<line x1="' + L + '" y1="' + mid + '" x2="' + (W - R) + '" y2="' + mid + '" stroke="#26303f" stroke-width="1"/>';
   document.getElementById('chartsvg').innerHTML = s;
@@ -330,7 +330,7 @@ function renderLists(data) {
     var count = isMeat ? latest.big_meat_count : latest.big_face_count;
     html += '<div class="lcard ' + side + '">'
       + '<div class="lhead"><span class="t" style="color:var(--' + (isMeat ? 'up' : 'down') + ')">今日' + (isMeat ? '大肉' : '大面') + '名单</span>'
-      + '<span class="n">' + latest.trade_date.slice(5) + ' · ' + count + ' 只</span>'
+      + '<span class="n">' + latest.trade_date + ' · ' + count + ' 只</span>'
       + '<span class="sp"></span>'
       + '<button class="ladd" data-side="' + side + '">+ 添加个股</button></div>';
     if (!items || !items.length) {
@@ -350,7 +350,7 @@ function renderLists(data) {
       var fups = (isMeat ? yest.followup_json : yest.followup_json || []);
       var yestItems = (isMeat ? yest.big_meat_list || [] : yest.big_face_list || []);
       if (yestItems.length) {
-        html += '<div class="fup"><span>昨日(' + yest.trade_date.slice(5) + ')名单今日兑现：</span>'
+        html += '<div class="fup"><span>昨日(' + yest.trade_date + ')名单今日兑现：</span>'
           + yestItems.map(function(f) {
               var res = '停牌';
               if (fups && fups.length) {
@@ -511,7 +511,7 @@ function renderAll() {
     if (key === 'meat') return '<span class="up">' + r.meat + '</span>';
     if (key === 'face') return '<span class="down">' + r.face + '</span>';
     if (key === 'dragon') return '<span>' + esc(r.dragon) + '<small style="color:var(--muted)"> ' + r.maxStreak + '板</small></span>';
-    if (key === 'date') return fmt(r.date).slice(5);
+    if (key === 'date') return fmt(r.date);
     if (key === 'wd') return '周' + wdCN(r.date);
     if (key === 'status') return '<span class="' + (manual ? 'manual' : '') + '">' + esc(r.status) + '</span>';
     return r[key];
@@ -519,7 +519,7 @@ function renderAll() {
   var ROWS = [['date','日期'],['wd','周几'],['big','大周期'],['small','小周期'],['meat','大肉总数'],['face','大面总数'],['lianban','连板总数'],['maxStreak','最高板'],['dragon','高度龙'],['status','超短周期状态']];
   var EDITABLE = { big: 1, small: 1, status: 1 };
   var html = '<thead><tr><th></th>' + data.map(function(r, i) {
-    return '<th' + (i === lastI ? ' class="latest"' : '') + '>' + fmt(r.date).slice(5) + '</th>';
+    return '<th' + (i === lastI ? ' class="latest"' : '') + '>' + fmt(r.date) + '</th>';
   }).join('') + '</tr></thead><tbody>';
   ROWS.forEach(function(row) {
     html += '<tr><td>' + row[1] + (EDITABLE[row[0]] ? '<span class="rowedit" title="此行可点击编辑">✎</span>' : '') + '</td>' + data.map(function(r, i) {

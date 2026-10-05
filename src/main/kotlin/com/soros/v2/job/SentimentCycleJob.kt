@@ -8,6 +8,7 @@ import com.soros.v2.repository.SentimentCycleRepository
 import com.soros.v2.repository.StockHistoryRepository
 import com.soros.v2.repository.StockInfoRepository
 import com.soros.v2.service.dto.DailyCollectCompleted
+import com.soros.v2.service.dto.SentimentCycleCompleted
 import com.soros.v2.service.sentiment.SentimentComputeService
 import com.soros.v2.service.sentiment.SentimentComputeContext
 import com.soros.v2.service.TradingCalendarService
@@ -15,6 +16,7 @@ import java.math.BigDecimal
 import java.math.RoundingMode
 import java.time.LocalDate
 import org.slf4j.LoggerFactory
+import org.springframework.context.ApplicationEventPublisher
 import org.springframework.context.event.EventListener
 import org.springframework.scheduling.annotation.Scheduled
 import org.springframework.stereotype.Component
@@ -28,8 +30,9 @@ import org.springframework.stereotype.Component
  * - failedCodes 占比 >10%：照常派生，但 sentiment_cycle 行标 data_coverage=PARTIAL + 钉钉提示（§13.4）。
  * - 失败不阻塞主采集：异常吞掉记日志 + 钉钉告警。
  * - ST 隔离（铁律）：落库前对 barsByCode 做 ST 防御性再过滤（stock_info 为准，识别并排除）。
- * - §13.4 链序留痕：Sentiment 完成后应发完成事件供 Signal 消费（SignalPrecomputeJob 落地步接线），
- *   当前 SignalPrecomputeJob 未存在，本轮不发事件、仅在本 KDoc 留痕。
+ * - §13.4 链序接线：Sentiment 完成后应发 SentimentCycleCompleted 事件供 SignalPrecomputeJob 消费
+ *   （依赖链显式化）。事件发布为 Test-Writer 步定义的契约（SentimentCycleJobEventTest 红），
+ *   publishEvent 调用由 Implementer 填充；构造器已预留 eventPublisher（默认 null，存量单测不受影响）。
  */
 @Component
 class SentimentCycleJob(
@@ -40,6 +43,7 @@ class SentimentCycleJob(
     private val notifier: DingTalkNotifier,
     private val stockHistoryRepository: StockHistoryRepository,
     private val stockInfoRepository: StockInfoRepository,
+    private val eventPublisher: ApplicationEventPublisher? = null,
 ) {
     private val logger = LoggerFactory.getLogger(SentimentCycleJob::class.java)
 
@@ -118,6 +122,10 @@ class SentimentCycleJob(
             "情绪周期派生完成：交易日 $today，涨停 ${sentiment.limitUpCount} 家，" +
                 "最高板 ${sentiment.maxStreak}，阶段 ${sentiment.statusText}",
         )
+        // §13.4 链序留痕：派生成功完成后发布 SentimentCycleCompleted 事件（SignalPrecomputeJob 消费点）；
+        // 恰一次（成功路径末尾）——非交易日早退不发布、computeFor 异常 runCatching 吞掉不发布（§13.4 契约）。
+        // tradeDate 取 computeFor 产物 sentiment.tradeDate（纯函数单点口径，§13.5），不依赖调用方入参。
+        eventPublisher?.publishEvent(SentimentCycleCompleted(sentiment.tradeDate, sentiment.dataCoverage))
     }
 
     /** 失败率 = failed/(success+failed)，比例一律 BigDecimal（铁律）；事件缺省（兜底 cron）视为 0 */
