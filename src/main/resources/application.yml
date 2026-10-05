@@ -70,3 +70,24 @@ soros:
     dragon:   { observe-days: 3, small-max-limit_up_streak: 7 }   # §4.9 状态机
   dingtalk:
     webhook: ${SOROS_DINGTALK_WEBHOOK:}     # §11.3；M6 用测试地址验证
+  intraday:                                 # §19.13.2 盘中监控（TokenBucket 3 参数组 + 时段守卫）
+    poll-interval-ms: 90000                 # @Scheduled fixedDelay 90s 一轮
+    archive-cron: "0 10 15 * * MON-FRI"     # 15:10 收盘权威归档
+    pools-rate: 0.10                        # 池接口 1 请求/10s
+    pools-capacity: 3
+    pools-jitter-seconds: 5.0
+    spot-rate: 0.012                        # 全市场快照 ≈1/85s（90s 一轮 + 随机抖动）
+    spot-capacity: 1
+    spot-jitter-seconds: 30.0
+    bid-ask-rate: 0.5                       # 五档 30/min 上限
+    bid-ask-capacity: 10
+    bid-ask-jitter-seconds: 0.2
+    bid-ask-max-per-round: 15               # 候选名单单轮 ≤15 次
+    backoff-threshold: 3                    # 连续 3 次失败 → 降频 2 倍
+    stop-threshold: 6                       # 连续 6 次失败 → 停轮 300s + 钉钉
+    stop-cooldown-seconds: 300
+    snap-retention-days: 3                  # intraday_pool_snap 原始轮次保留 3 天
+    morning-start: "09:15"                  # 交易时段窗口（午休零轮询）
+    morning-end: "11:30"
+    afternoon-start: "13:00"
+    afternoon-end: "15:00"

@@ -13,5 +13,6 @@ import org.springframework.context.annotation.Configuration
     DingTalkProperties::class,
     SentimentProperties::class,
     BackfillProperties::class,
+    IntradayProperties::class,
 )
 class PropertiesConfig
